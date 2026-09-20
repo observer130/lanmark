@@ -68,6 +68,7 @@ node scripts/cdp-eval.mjs "document.querySelector('.ProseMirror')?.clientWidth" 
 | 动 vault 结构 / 编辑器 / 文件名 / 搜索 | `docs/04`（§2 文件名规则、§4 布局、§8–§9c 往返保真与事故记录） |
 | 动同步 / 协议 / Android 配置 | `docs/05`（§3 协议、§5 Android 专项、§8g/8h 验收清单与真机结论；vault 目录调研在 `docs/research/`） |
 | 同步服务器被杀 / 熄屏掉线 | `docs/06`（前台服务/wakelock/Doze 保活调研，结论附来源） |
+| 动自动同步 / 删除传播 / 冲突裁决 | `docs/07`（§3 协议 v1.1、§4 LWW 裁决规则、§5 回合 v2 + 服务器仲裁、§7 自动循环、§10 验收） |
 | 构建失败 / 新机器搭环境 | `docs/03`（环境总览、SDK 手工组装记录） |
 | 质疑选型 / 动协议大方向 | `docs/02`（选型论证 + 已确认决策，改动前先对账） |
 | 质疑需求边界 | `docs/01`（已确认需求与风险清单） |

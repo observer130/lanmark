@@ -16,6 +16,7 @@ Tauri 2 (Rust core) + React 19 + TypeScript + Tailwind CSS v4 + Zustand
 | [docs/04-M1-数据与组织模型.md](docs/04-M1-数据与组织模型.md) | vault/目录树/编辑器/搜索设计、实现决策与验证记录 |
 | [docs/05-M2-移动端与同步设计.md](docs/05-M2-移动端与同步设计.md) | 手机同步服务器、协议、Android 专项、真机验收与 review 修复记录 |
 | [docs/06-Android端内嵌HTTP服务器保活调研.md](docs/06-Android端内嵌HTTP服务器保活调研.md) | 前台服务/wakelock/Doze 保活调研（结论附来源） |
+| [docs/07-M3-同步引擎深化设计.md](docs/07-M3-同步引擎深化设计.md) | M3：自动同步循环、删除传播（tombstone）、冲突 LWW 裁决设计 |
 
 > 代理/协作开发约定见 [AGENTS.md](AGENTS.md)；调研记录在 [docs/research/](docs/research/)。
 
