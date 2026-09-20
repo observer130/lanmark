@@ -278,159 +278,295 @@ fn save_sync_state(vault: &Path, id: &str, state: &HashMap<String, String>) -> R
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-// ---------- 同步回合 ----------
+// ---------- 同步回合（docs/07 §5 回合语义 v2） ----------
 
-/// 一个完整同步回合（docs/05 §3）。阻塞；调用方负责放到 blocking 线程。
-pub fn sync_round(state: &Arc<AppState>, profile: &ServerProfile) -> Result<SyncReport, String> {
-    let url = normalize_url(&profile.url)?;
-    let vault = state
-        .vault
-        .lock()
-        .map_err(|_| "vault 锁中毒".to_string())?
-        .clone()
-        .ok_or("尚未打开 vault")?;
-    let mut report = SyncReport::default();
-    let c = client();
+/// 同步回合核心（分阶段；`sync_round` = 各阶段的默认编排）。
+/// 分阶段两个目的：1) 测试可在阶段之间注入服务器侧改动，确定性构造
+/// 「manifest 已过期」的竞态（M2 单体回合只能在 HTTP 层测竞态）；
+/// 2) M3b/M3c 的新阶段（tombstone 处理、LWW 裁决）挂在这里，不堆进单一函数。
+pub(crate) struct RoundCore {
+    state: Arc<AppState>,
+    profile: ServerProfile,
+    vault: PathBuf,
+    url: String,
+    c: reqwest::blocking::Client,
+    #[allow(dead_code)] // M3b tombstone 阶段（本地 tombstone vs 服务器 manifest）会消费
+    server_map: HashMap<String, FileMeta>,
+    local_map: HashMap<String, FileMeta>,
+    /// 上轮基线（上次回合结束时服务器的 hash 快照）
+    #[allow(dead_code)] // M3b 的 tombstone 阶段会用到完整基线比较
+    base_prev: HashMap<String, String>,
+    /// 仅服务器有 → 拉
+    to_pull: Vec<String>,
+    /// 仅本地有 / 冲突要推 → (path, base_hash)
+    to_push: Vec<(String, String)>,
+    /// 双方都改（两端 hash 均 ≠ 基线）→ (path, 服务器 hash)
+    conflicts: Vec<(String, String)>,
+    /// 本回合基线（步骤 8）：起点 = 回合开始时的服务器清单，
+    /// 拉取/推送结果按「操作后最终 hash」更新（M3a G3 修复）
+    baseline: HashMap<String, String>,
+    report: SyncReport,
+}
 
-    // 0. 本地重索引：外部改动（其他编辑器/App 直接改 vault 文件）后 DB 缓存
-    //    可能缺文件或 hash 过时——同步回合必须以磁盘为准（M1 契约：磁盘是事实源）
-    {
-        let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
-        let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-        fs_ops::reindex(&vault, conn).map_err(|e| format!("重索引失败: {e}"))?;
-    }
+impl RoundCore {
+    /// 步骤 0–2：本地 reindex → 双侧清单 + 基线 → 四分类
+    fn new(state: &Arc<AppState>, profile: &ServerProfile) -> Result<Self, String> {
+        let url = normalize_url(&profile.url)?;
+        let vault = state
+            .vault
+            .lock()
+            .map_err(|_| "vault 锁中毒".to_string())?
+            .clone()
+            .ok_or("尚未打开 vault")?;
 
-    // 1. 双侧清单 + 客户端基线（上轮结束时服务器的 hash 快照）
-    let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
-    let local = local_manifest(state)?;
-    let server_map: HashMap<String, FileMeta> =
-        server_manifest.iter().cloned().map(|m| (m.path.clone(), m)).collect();
-    let local_map: HashMap<String, FileMeta> =
-        local.iter().cloned().map(|m| (m.path.clone(), m)).collect();
-    let base_prev = load_sync_state(&vault, &profile.id);
+        // 0. 本地重索引：外部改动（其他编辑器/App 直接改 vault 文件）后 DB 缓存
+        //    可能缺文件或 hash 过时——同步回合必须以磁盘为准（M1 契约：磁盘是事实源）
+        {
+            let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+            let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+            fs_ops::reindex(&vault, conn).map_err(|e| format!("重索引失败: {e}"))?;
+        }
 
-    let mut to_pull: Vec<String> = Vec::new();
-    let mut to_push: Vec<(String, String)> = Vec::new(); // (path, base_hash)
-    let mut conflicts: Vec<(String, String)> = Vec::new(); // (path, server hash)
+        // 1. 双侧清单 + 客户端基线（M3b：+ tombstones）
+        let c = client();
+        let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
+        let local = local_manifest(state)?;
+        let server_map: HashMap<String, FileMeta> =
+            server_manifest.iter().cloned().map(|m| (m.path.clone(), m)).collect();
+        let local_map: HashMap<String, FileMeta> =
+            local.iter().cloned().map(|m| (m.path.clone(), m)).collect();
+        let base_prev = load_sync_state(&vault, &profile.id);
 
-    for (path, sm) in &server_map {
-        match local_map.get(path) {
-            None => to_pull.push(path.clone()),
-            Some(lm) => {
-                if lm.hash == sm.hash {
-                    report.skipped += 1;
-                } else {
-                    let base = base_prev.get(path);
-                    if base == Some(&lm.hash) {
-                        // 只有服务器改了 → 快进拉取（覆盖本地）
-                        to_pull.push(path.clone());
-                    } else if base == Some(&sm.hash) {
-                        // 只有本地改了 → 推送
-                        to_push.push((path.clone(), sm.hash.clone()));
+        let mut report = SyncReport::default();
+        let mut to_pull: Vec<String> = Vec::new();
+        let mut to_push: Vec<(String, String)> = Vec::new(); // (path, base_hash)
+        let mut conflicts: Vec<(String, String)> = Vec::new(); // (path, server hash)
+
+        // 2. 四分类（仅服务器有→拉 / 仅本地有→推 / hash 同→跳 / hash 异→三方对比）
+        for (path, sm) in &server_map {
+            match local_map.get(path) {
+                None => to_pull.push(path.clone()),
+                Some(lm) => {
+                    if lm.hash == sm.hash {
+                        report.skipped += 1;
                     } else {
-                        // 双方都改（或无基线，如首次同步/重新配对）→ 双份
-                        conflicts.push((path.clone(), sm.hash.clone()));
+                        let base = base_prev.get(path);
+                        if base == Some(&lm.hash) {
+                            // 只有服务器改了 → 快进拉取（覆盖本地）
+                            to_pull.push(path.clone());
+                        } else if base == Some(&sm.hash) {
+                            // 只有本地改了 → 推送
+                            to_push.push((path.clone(), sm.hash.clone()));
+                        } else {
+                            // 双方都改（或无基线，如首次同步/重新配对）→ 双份（M3c：LWW 裁决）
+                            conflicts.push((path.clone(), sm.hash.clone()));
+                        }
                     }
                 }
             }
         }
-    }
-    for path in local_map.keys() {
-        if !server_map.contains_key(path) {
-            to_push.push((path.clone(), String::new()));
+        for path in local_map.keys() {
+            if !server_map.contains_key(path) {
+                to_push.push((path.clone(), String::new()));
+            }
         }
+
+        // 8（基线起点）：= 回合开始时的服务器清单（步骤 8 按本回合结果更新）
+        let baseline = server_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.hash.clone()))
+            .collect();
+
+        Ok(RoundCore {
+            state: state.clone(),
+            profile: profile.clone(),
+            vault,
+            url,
+            c,
+            server_map,
+            local_map,
+            base_prev,
+            to_pull,
+            to_push,
+            conflicts,
+            baseline,
+            report,
+        })
     }
 
-    // 2. 冲突：服务器版本 → 本地冲突副本；本地版本原样保留，稍后以 server hash 为 base 推送
-    {
+    /// 步骤 5（M2 语义：本地恒赢；M3c 以 mtime LWW 仲裁取代）：
+    /// 服务器版本 → 本地冲突副本；本地版本原样保留，稍后以服务器 hash 为 base 推送
+    fn resolve_conflicts(&mut self) -> Result<(), String> {
+        let state = &self.state;
+        let profile = &self.profile;
         let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
         let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-        for (path, sm_hash) in &conflicts {
-            let (files, missing) = pull_batch(&c, &url, &profile.token, std::slice::from_ref(path))?;
+        for (path, sm_hash) in self.conflicts.iter().cloned() {
+            let (files, missing) =
+                pull_batch(&self.c, &self.url, &profile.token, std::slice::from_ref(&path))?;
             if let Some((p, why)) = missing.first() {
-                report.errors.push(format!("冲突副本拉取失败 {p}: {why}"));
+                self.report.errors.push(format!("冲突副本拉取失败 {p}: {why}"));
                 continue;
             }
             let Some(f) = files.first() else {
-                report.errors.push(format!("冲突副本拉取为空: {path}"));
+                self.report.errors.push(format!("冲突副本拉取为空: {path}"));
                 continue;
             };
             let bytes = match b64_decode(&f.content_base64) {
                 Ok(b) => b,
                 Err(e) => {
-                    report.errors.push(format!("冲突副本解码失败 {path}: {e}"));
+                    self.report.errors.push(format!("冲突副本解码失败 {path}: {e}"));
                     continue;
                 }
             };
-            match write_conflict_copy(&vault, conn, path, &f.kind, &bytes, fs_ops::now_ms()) {
-                Ok(copy) => report.conflicts.push(copy),
-                Err(e) => report.errors.push(format!("冲突副本落盘失败 {path}: {e}")),
+            match write_conflict_copy(&self.vault, conn, &path, &f.kind, &bytes, fs_ops::now_ms()) {
+                Ok(copy) => self.report.conflicts.push(copy),
+                Err(e) => self.report.errors.push(format!("冲突副本落盘失败 {path}: {e}")),
             }
-            to_push.push((path.clone(), sm_hash.clone()));
+            self.to_push.push((path, sm_hash));
         }
+        Ok(())
     }
 
-    // 3. 拉取（分批）
-    for chunk in to_pull.chunks(PULL_BATCH) {
-        let (files, missing) = pull_batch(&c, &url, &profile.token, chunk)?;
-        for (p, why) in missing {
-            report.errors.push(format!("拉取失败 {p}: {why}"));
-        }
-        let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
-        let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-        for f in files {
-            match store_pulled(&vault, conn, &f) {
-                None => report.pulled.push(f.path),
-                Some(e) => report.errors.push(e),
+    /// 步骤 6：拉取（批量 32）。实拉 hash 进基线（步骤 8：拉取路径 → 实拉 hash）
+    fn pull_phase(&mut self) -> Result<(), String> {
+        for chunk in self.to_pull.chunks(PULL_BATCH) {
+            let (files, missing) =
+                pull_batch(&self.c, &self.url, &self.profile.token, chunk)?;
+            for (p, why) in missing {
+                self.report.errors.push(format!("拉取失败 {p}: {why}"));
+            }
+            let conn_guard = self.state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+            let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+            for f in files {
+                match store_pulled(&self.vault, conn, &f) {
+                    None => {
+                        self.report.pulled.push(f.path.clone());
+                        self.baseline.insert(f.path.clone(), f.hash.clone());
+                    }
+                    Some(e) => self.report.errors.push(e),
+                }
             }
         }
+        Ok(())
     }
 
-    // 4. 推送（分批；base_hash 空 = 服务器没有，非空 = 客户端所见服务器旧版）
-    let mut pushed_hashes: Vec<(String, String)> = Vec::new();
-    for chunk in to_push.chunks(PUSH_BATCH) {
-        let mut batch = Vec::new();
-        for (path, base_hash) in chunk {
-            let Some(lm) = local_map.get(path).cloned() else { continue };
-            let Some(pf) = read_push_file(&vault, path, &lm.kind, base_hash) else {
-                report.errors.push(format!("推送读取失败: {path}"));
+    /// 步骤 7：推送（批量 8；base_hash 空 = 服务器没有，非空 = 客户端所见服务器旧版）。
+    /// M3a（步骤 8 配套）：基线取 `serverHash`（操作后最终 hash）；
+    /// 推送被服务器仲裁降级（serverHash ≠ 所推 hash）→ 纠正拉取服务器 P 对齐本地
+    fn push_phase(&mut self) -> Result<(), String> {
+        // take 出来再分块：块内 corrective_pull 要 &mut self，与 to_push 借用冲突
+        let to_push = std::mem::take(&mut self.to_push);
+        for chunk in to_push.chunks(PUSH_BATCH) {
+            let mut batch = Vec::new();
+            for (path, base_hash) in chunk {
+                let Some(lm) = self.local_map.get(path).cloned() else { continue };
+                let Some(pf) = read_push_file(&self.vault, path, &lm.kind, base_hash) else {
+                    self.report.errors.push(format!("推送读取失败: {path}"));
+                    continue;
+                };
+                batch.push(pf);
+            }
+            if batch.is_empty() {
                 continue;
-            };
-            batch.push(pf);
-        }
-        if batch.is_empty() {
-            continue;
-        }
-        let results = push_batch(&c, &url, &profile.token, &batch)?;
-        for r in results {
-            if r.ok {
-                report.pushed.push(r.path.clone());
-                if let Some(cp) = r.conflict_saved_as {
-                    report.conflicts.push(cp);
+            }
+            let results = push_batch(&self.c, &self.url, &self.profile.token, &batch)?;
+            for r in results {
+                let Some(pf) = batch.iter().find(|f| f.path == r.path) else {
+                    continue;
+                };
+                if !r.ok {
+                    self.report
+                        .errors
+                        .push(format!("推送失败 {}: {}", r.path, r.error.unwrap_or_default()));
+                    continue;
                 }
-                // 服务器端现值 = 我们推送的内容
-                if let Some(pf) = batch.iter().find(|f| f.path == r.path) {
-                    pushed_hashes.push((r.path.clone(), pf.hash.clone()));
+                match &r.server_hash {
+                    // 被服务器仲裁降级：原路径上是更新的版本（docs/07 §5 步骤 8）
+                    Some(sh) if sh != &pf.hash => match self.corrective_pull(&r.path, sh) {
+                        Ok(actual) => {
+                            self.report.pulled.push(r.path.clone());
+                            self.baseline.insert(r.path.clone(), actual);
+                            // 输家（本次推送内容）已在服务器侧存为冲突副本，下回合作普通文件拉回
+                        }
+                        Err(e) => {
+                            self.report.errors.push(e);
+                            // 兜底：基线 = 所推 hash → 下回合「只有服务器改」快进拉取
+                            //（M2 行为：内容在服务器侧副本中安全，无丢失）
+                            self.baseline.insert(r.path.clone(), pf.hash.clone());
+                        }
+                    },
+                    Some(sh) => {
+                        // 干净落盘 / 来件仲裁获胜：服务器 P = 所推内容
+                        self.report.pushed.push(r.path.clone());
+                        if let Some(cp) = r.conflict_saved_as {
+                            self.report.conflicts.push(cp);
+                        }
+                        self.baseline.insert(r.path.clone(), sh.clone());
+                    }
+                    // 旧服务器（无 serverHash 字段）→ M2 行为：ok = 落盘成功
+                    None => {
+                        self.report.pushed.push(r.path.clone());
+                        if let Some(cp) = r.conflict_saved_as {
+                            self.report.conflicts.push(cp);
+                        }
+                        self.baseline.insert(r.path.clone(), pf.hash.clone());
+                    }
                 }
-            } else {
-                report
-                    .errors
-                    .push(format!("推送失败 {}: {}", r.path, r.error.unwrap_or_default()));
             }
         }
+        Ok(())
     }
 
-    // 5. 更新基线：清单（拉取后服务器现值）+ 本回合推送成功的文件
-    let mut new_state: HashMap<String, String> = server_map
-        .iter()
-        .map(|(k, v)| (k.clone(), v.hash.clone()))
-        .collect();
-    for (path, hash) in pushed_hashes {
-        new_state.insert(path, hash);
+    /// M3a：推送被服务器仲裁降级后，拉服务器 P 现值对齐本地。
+    /// 先拉后覆写（hash 校验通过才落盘）；输家内容已有服务器侧冲突副本，无丢失。
+    /// 返回实拉 hash。
+    fn corrective_pull(&mut self, path: &str, expect_hash: &str) -> Result<String, String> {
+        let (files, missing) = pull_batch(
+            &self.c,
+            &self.url,
+            &self.profile.token,
+            std::slice::from_ref(&path.to_string()),
+        )
+        .map_err(|e| format!("{path}: 降级纠正拉取失败: {e}"))?;
+        if let Some((p, why)) = missing.first() {
+            return Err(format!("{p}: 降级纠正拉取被拒: {why}"));
+        }
+        let f = files
+            .first()
+            .ok_or_else(|| format!("{path}: 降级纠正拉取为空"))?;
+        if f.hash != expect_hash {
+            // push 与 pull 之间服务器又被别的客户端改了——拉回内容已 hash 校验，以实拉为准
+            log::warn!(
+                "同步: {} 降级参照 {} 与实拉 {} 不一致（服务器又变了），以实拉为准",
+                path,
+                expect_hash,
+                f.hash
+            );
+        }
+        let conn_guard = self.state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+        let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+        if let Some(e) = store_pulled(&self.vault, conn, f) {
+            return Err(format!("{path}: 降级纠正写入失败: {e}"));
+        }
+        Ok(f.hash.clone())
     }
-    save_sync_state(&vault, &profile.id, &new_state)?;
 
-    Ok(report)
+    /// 步骤 8–9：持久化基线 + 返回报告
+    fn finish(self) -> Result<SyncReport, String> {
+        save_sync_state(&self.vault, &self.profile.id, &self.baseline)?;
+        Ok(self.report)
+    }
+}
+
+/// 一个完整同步回合（docs/07 §5 回合语义 v2 的 M3a 子集：M2 + serverHash 基线修复
+/// + 仲裁降级纠正拉取）。阻塞；调用方负责放到 blocking 线程。
+pub fn sync_round(state: &Arc<AppState>, profile: &ServerProfile) -> Result<SyncReport, String> {
+    let mut core = RoundCore::new(state, profile)?;
+    core.resolve_conflicts()?;
+    core.pull_phase()?;
+    core.push_phase()?;
+    core.finish()
 }
 
 // ---------- mDNS 发现 ----------
@@ -580,6 +716,40 @@ mod tests {
         (dir, state)
     }
 
+    /// 测试：显式设定文件 mtime（LWW 仲裁确定性；真实场景由保存时间自然分布）
+    fn set_mtime(state: &Arc<AppState>, rel: &str, ms: i64) {
+        let vault = state.vault.lock().unwrap().clone().unwrap();
+        let abs = vault.join(rel);
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms.max(0) as u64);
+        let times = std::fs::FileTimes::new().set_modified(t);
+        std::fs::File::open(&abs).unwrap().set_times(times).unwrap();
+    }
+
+    /// 测试：vault 全量快照（相对路径 → 内容 hash；跳过点目录与孤儿 tmp）
+    fn vault_snapshot(vault: &Path) -> std::collections::BTreeMap<String, String> {
+        fn walk(dir: &Path, vault: &Path, out: &mut std::collections::BTreeMap<String, String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                let s = e.file_name().to_string_lossy().to_string();
+                if s.starts_with('.') {
+                    continue; // .lanmark/（索引/回收站/基线）不参与收敛比对
+                }
+                if p.is_dir() {
+                    walk(&p, vault, out);
+                } else if p.is_file() && !s.contains("lanmark-tmp") {
+                    if let Ok(b) = std::fs::read(&p) {
+                        let rel = fs_ops::rel_to_string(p.strip_prefix(vault).unwrap());
+                        out.insert(rel, fs_ops::content_hash(&b));
+                    }
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(vault, vault, &mut out);
+        out
+    }
+
     #[test]
     fn pair_requires_correct_code() {
         let phone_dir = tempfile::TempDir::new().unwrap();
@@ -715,17 +885,22 @@ mod tests {
         let manifest = fetch_manifest(&c, &base, &token).unwrap();
         let stale_hash = manifest.iter().find(|m| m.path == note.path).unwrap().hash.clone();
 
-        // 2) 桌面基于旧版修改；服务器在 manifest 之后被改成「手机版本二」
+        // 2) 桌面基于旧版修改；服务器在 manifest 之后被改成「手机版本二」。
+        //    显式设定 mtime：桌面版本更新（M3a 仲裁下来件获胜，M2 断言保持成立）
         note_write_op(&desk, &note.path, "桌面版本").unwrap();
+        set_mtime(&desk, &note.path, fs_ops::now_ms() + 3_600_000);
         note_write_op(&phone, &note.path, "手机版本二").unwrap();
 
-        // 3) 客户端带着过期 base_hash 推送 → 服务器侧冲突命名
+        // 3) 客户端带着过期 base_hash 推送 → 服务器仲裁（来件新）：原版本冲突命名
         let pf = read_push_file(desk_dir.path(), &note.path, "note", &stale_hash).unwrap();
+        let pushed_hash = pf.hash.clone();
         let results = push_batch(&c, &base, &token, &[pf]).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].ok, "竞态 push 应成功: {:?}", results[0].error);
         let server_copy = results[0].conflict_saved_as.clone().expect("服务器侧应有冲突副本");
         assert!(server_copy.contains("冲突"), "服务器侧冲突命名: {server_copy}");
+        // M3a：来件获胜 → serverHash = 所推 hash
+        assert_eq!(results[0].server_hash.as_deref(), Some(pushed_hash.as_str()));
 
         // 服务器：原路径 = 桌面版本，冲突副本 = 手机版本二（双份都在）
         assert_eq!(std::fs::read_to_string(phone_dir.path().join(&note.path)).unwrap(), "桌面版本");
@@ -744,6 +919,208 @@ mod tests {
             "手机版本二"
         );
         // 三份内容都在，无丢失：桌面（桌面版本 + 手机版本二副本）、服务器同
+    }
+
+    // ---------- M3a 双客户端集成（docs/07 §9） ----------
+
+    /// 三端（手机服务器 + 桌面×2）顺序改动 → 收敛，终轮全跳过
+    #[test]
+    #[allow(non_snake_case)]
+    fn dual_client_sequential_convergence() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let s_note = note_create_op(&phone, "", "服务器笔记").unwrap();
+        note_write_op(&phone, &s_note.path, "服务器内容").unwrap();
+        let _s_asset = asset_save_op(&phone, &b64_encode(b"phone-asset"), "png").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        // 两个客户端各用独立 id（基线按 id 隔离，模拟两台桌面）
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+
+        // 两客户端首次同步：各拉回 2（笔记 + 附件）
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert_eq!(r.pulled.len(), 2, "{r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert_eq!(r.pulled.len(), 2, "{r:?}");
+
+        // A 改：修改服务器笔记 + 新建笔记
+        note_write_op(&deskA, &s_note.path, "服务器内容-A 改").unwrap();
+        let na = note_create_op(&deskA, "", "A 新笔记").unwrap();
+        note_write_op(&deskA, &na.path, "A 新笔记内容").unwrap();
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert_eq!(r.pushed.len(), 2, "{r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        // B 同步 → 互见
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert_eq!(r.pulled.len(), 2, "{r:?}");
+
+        // B 改：修改 A 的新笔记 + 新建附件
+        note_write_op(&deskB, &na.path, "A 新笔记内容-B 改").unwrap();
+        let _b_asset = asset_save_op(&deskB, &b64_encode(b"b-asset"), "png").unwrap();
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert_eq!(r.pushed.len(), 2, "{r:?}");
+        // A 同步 → 互见
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert_eq!(r.pulled.len(), 2, "{r:?}");
+
+        // 三端快照一致（收敛）
+        let snap_phone = vault_snapshot(phone_dir.path());
+        assert_eq!(snap_phone, vault_snapshot(dA.path()), "A 与服务器不一致");
+        assert_eq!(snap_phone, vault_snapshot(dB.path()), "B 与服务器不一致");
+        assert_eq!(snap_phone.len(), 4, "4 个同步单元: {snap_phone:?}");
+
+        // 终轮：全跳过
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.pulled.is_empty() && r.pushed.is_empty() && r.conflicts.is_empty(), "{r:?}");
+        assert_eq!(r.skipped, 4, "{r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.pulled.is_empty() && r.pushed.is_empty(), "{r:?}");
+        assert_eq!(r.skipped, 4, "{r:?}");
+    }
+
+    /// 双端离线改同一篇（较新者走冲突分支）→ 较新者留原路径、较旧者成可见副本
+    #[test]
+    #[allow(non_snake_case)]
+    fn dual_client_interleaved_same_file_newer_wins() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "交错笔记").unwrap();
+        note_write_op(&phone, &p.path, "原始").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // 离线：A 改旧版（mtime -1h），B 改新版（mtime +1h）
+        note_write_op(&deskA, &p.path, "A 版本").unwrap();
+        set_mtime(&deskA, &p.path, fs_ops::now_ms() - 3_600_000);
+        note_write_op(&deskB, &p.path, "B 版本").unwrap();
+        set_mtime(&deskB, &p.path, fs_ops::now_ms() + 3_600_000);
+
+        // A 先同步：干净推送 A 版本
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert_eq!(r.pushed.len(), 1, "{r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        // B 同步：双方都改 → 冲突分支（B 本地更新）：A 版本 → B 侧副本，B 版本推走
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert_eq!(r.pushed.len(), 1, "{r:?}");
+        assert_eq!(r.conflicts.len(), 1, "{r:?}");
+        let b_copy = r.conflicts[0].clone();
+        // A 再同步：快进拉 B 版本
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert_eq!(r.pulled.len(), 1, "{r:?}");
+
+        // 三端原路径 = B 版本（较新者赢）
+        assert_eq!(std::fs::read_to_string(dA.path().join(&p.path)).unwrap(), "B 版本");
+        assert_eq!(std::fs::read_to_string(dB.path().join(&p.path)).unwrap(), "B 版本");
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&p.path)).unwrap(), "B 版本");
+
+        // 副本传播：B 推 → A 拉 → 三端互见（铁律：A 版本内容不丢）
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert_eq!(r.pushed.len(), 1, "{r:?}");
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert_eq!(r.pulled.len(), 1, "{r:?}");
+
+        let snap_phone = vault_snapshot(phone_dir.path());
+        assert_eq!(snap_phone, vault_snapshot(dA.path()));
+        assert_eq!(snap_phone, vault_snapshot(dB.path()));
+        let copy_rel = snap_phone
+            .keys()
+            .find(|k| k.contains("冲突"))
+            .cloned()
+            .expect("冲突副本应在三端");
+        assert_eq!(std::fs::read_to_string(dA.path().join(&copy_rel)).unwrap(), "A 版本");
+        assert_eq!(copy_rel, b_copy, "A 拉回的副本 = B 侧落地的副本");
+    }
+
+    /// 同文件并发竞态：A 的旧版推送晚于 B 的新版落服务器（到达顺序 ≠ mtime 顺序）
+    /// → 服务器仲裁降级 A → A 回合内纠正拉取 → 最终 P = mtime 新者，输家副本落点正确
+    #[test]
+    #[allow(non_snake_case)]
+    fn round_demoted_push_corrective_pull_converges() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "竞态笔记").unwrap();
+        note_write_op(&phone, &p.path, "基础版").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 离线改「旧版」（mtime -1h），回合开始：此刻服务器还是「基础版」
+        note_write_op(&deskA, &p.path, "A 旧版").unwrap();
+        set_mtime(&deskA, &p.path, fs_ops::now_ms() - 3_600_000);
+        let mut core = RoundCore::new(&deskA, &profile_a).unwrap();
+        // A 的回合分类：只有本地改 → 推送（base = 基础版 hash，即将过期）
+
+        // 注入竞态：B 在 A 的 manifest 之后、推送之前完成整回合（新版 mtime +1h）
+        note_write_op(&deskB, &p.path, "B 新版").unwrap();
+        set_mtime(&deskB, &p.path, fs_ops::now_ms() + 3_600_000);
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert_eq!(r.pushed.len(), 1, "B 新版干净落盘: {r:?}");
+
+        // A 继续回合：推送 A 旧版（base 已过期）→ 服务器仲裁降级 → 回合内纠正拉取
+        core.resolve_conflicts().unwrap();
+        core.pull_phase().unwrap();
+        core.push_phase().unwrap();
+        let report = core.finish().unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        // 铁律核查：A 旧版内容已在服务器侧副本落盘
+        let server_snap = vault_snapshot(phone_dir.path());
+        assert!(
+            server_snap.values().any(|h| *h == fs_ops::content_hash("A 旧版".as_bytes())),
+            "降级来件必须已有服务器侧副本: {server_snap:?}"
+        );
+        // A 本地原路径 = B 新版（纠正拉取对齐，未被快进覆盖）
+        assert_eq!(std::fs::read_to_string(dA.path().join(&p.path)).unwrap(), "B 新版");
+        // A 基线 = 服务器操作后 hash（G3：不再误判「只有本地改」重推旧版）
+        let base_file = dA.path().join(fs_ops::META_DIR).join("sync-sa.json");
+        let base_state: HashMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(base_file).unwrap()).unwrap();
+        assert_eq!(
+            base_state.get(&p.path),
+            Some(&fs_ops::content_hash("B 新版".as_bytes())),
+            "基线必须 = serverHash（G3 修复）"
+        );
+
+        // 收敛：A、B 各补一回合 → 三端 P = B 新版 + 副本（A 旧版）
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert_eq!(r.pulled.len(), 1, "A 拉回降级副本: {r:?}");
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert_eq!(r.pulled.len(), 1, "B 拉回降级副本: {r:?}");
+        let snap_phone = vault_snapshot(phone_dir.path());
+        assert_eq!(snap_phone, vault_snapshot(dA.path()));
+        assert_eq!(snap_phone, vault_snapshot(dB.path()));
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&p.path)).unwrap(), "B 新版");
+        let copy_rel = snap_phone
+            .keys()
+            .find(|k| k.contains("冲突"))
+            .cloned()
+            .expect("输家副本应在三端");
+        assert_eq!(std::fs::read_to_string(dA.path().join(&copy_rel)).unwrap(), "A 旧版");
+        // 终轮全跳过
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.pulled.is_empty() && r.pushed.is_empty() && r.conflicts.is_empty(), "{r:?}");
+        assert_eq!(r.skipped, snap_phone.len());
     }
 
     #[test]

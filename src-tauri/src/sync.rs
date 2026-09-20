@@ -61,6 +61,11 @@ pub struct PushResult {
     pub error: Option<String>,
     /// 服务器侧原有版本被改名保留时的新路径（冲突命名）
     pub conflict_saved_as: Option<String>,
+    /// 该路径在服务器上**操作后的最终 hash**（docs/07 §3，M3a 新增）：
+    /// 干净落盘/来件仲裁获胜 = 所推 hash；来件被仲裁降级 = 原路径现有 hash。
+    /// 旧服务器不返回该字段（None）→ 客户端退化 M2 行为（ok = 落盘）。
+    #[serde(default)]
+    pub server_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +179,26 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
         });
     }
     Ok(out)
+}
+
+// ---------- 版本元组（LWW 裁决，docs/07 §4.1） ----------
+
+/// 版本元组：`(mtime_ms, size, hash_hex)`，字典序比较，**大者赢**。
+/// mtime 不同 → mtime 新者赢；同毫秒 → size 大者赢；size 同 → hash 字典序大者赢
+/// （hash 相同 = 内容相同，本不会进裁决）。M3b 删除参与裁决时取
+/// `(tombstone.mtime_ms, 0, tombstone.hash)`——size 记 0，mtime 平手时编辑恒赢删除。
+pub fn version_gt(a: (i64, i64, &str), b: (i64, i64, &str)) -> bool {
+    (a.0, a.1, a.2) > (b.0, b.1, b.2)
+}
+
+/// 文件 mtime（unix 毫秒），读失败记 0（与 local_manifest 同口径）
+pub fn meta_mtime_ms(abs: &Path) -> i64 {
+    std::fs::metadata(abs)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 // ---------- 冲突命名 ----------
@@ -318,6 +343,21 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_tuple_ordering() {
+        // mtime 不同 → mtime 新者赢
+        assert!(version_gt((2, 0, "a"), (1, 0, "b")));
+        assert!(!version_gt((1, 0, "b"), (2, 0, "a")));
+        // mtime 同 → size 大者赢
+        assert!(version_gt((1, 10, "a"), (1, 5, "b")));
+        assert!(!version_gt((1, 5, "b"), (1, 10, "a")));
+        // size 同 → hash 字典序大者赢
+        assert!(version_gt((1, 5, "cafe"), (1, 5, "beef")));
+        assert!(!version_gt((1, 5, "beef"), (1, 5, "cafe")));
+        // 完全相同 → 非严格大于（平手）
+        assert!(!version_gt((1, 5, "cafe"), (1, 5, "cafe")));
+    }
 
     #[test]
     fn conflict_name_format_and_suffix() {

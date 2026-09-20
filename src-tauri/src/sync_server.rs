@@ -365,8 +365,10 @@ pub struct PushBody {
 }
 
 /// POST /api/v1/push —— 客户端推送更新。
-/// 冲突判定：服务器现 hash ≠ base_hash（客户端所见旧版）→ 服务器现有版本先改名保留（双份铁律），
-/// 再落客户端内容。内容 hash 校验不符则拒绝该文件。
+/// 冲突判定（M3a 起，docs/07 §5.1）：服务器现 hash ≠ base_hash（含 base 空 + 文件已存在）
+/// → 版本元组 (mtime, size, hash) 仲裁：来件新 → 来件落原路径、原版本改名保留；
+/// 来件旧/平手 → 来件改名保留、原路径不动（serverHash 回传操作后最终 hash）。
+/// 内容 hash 校验不符则拒绝该文件。
 async fn push(
     State(ctx): State<Arc<ServerCtx>>,
     headers: HeaderMap,
@@ -393,21 +395,78 @@ fn push_blocking(
     for pf in files {
         let result = write_pushed_file(ctx, &vault, pf);
         match result {
-            Ok(conflict_saved_as) => results.push(PushResult {
+            Ok(Landed { conflict_saved_as, server_hash }) => results.push(PushResult {
                 path: pf.path.clone(),
                 ok: true,
                 error: None,
                 conflict_saved_as,
+                server_hash: Some(server_hash),
             }),
             Err(e) => results.push(PushResult {
                 path: pf.path.clone(),
                 ok: false,
                 error: Some(e),
                 conflict_saved_as: None,
+                server_hash: None,
             }),
         }
     }
     Ok(results)
+}
+
+/// push 落盘结果：冲突副本去向 + 原路径**操作后的最终 hash**（docs/07 §3）
+struct Landed {
+    conflict_saved_as: Option<String>,
+    server_hash: String,
+}
+
+/// 服务器侧 push 仲裁（docs/07 §5.1，M3a 核心语义变更）：
+/// 当前 P 存在且 hash ≠ base_hash（含 base 为空 + 文件已存在 = 竞态创建窗口，
+/// 修掉 M2 该场景静默覆盖的洞）→ 版本元组 (mtime_ms, size, hash) 与当前 P 比较：
+/// - 来件更大 → 来件赢：当前 P 存为服务器侧冲突副本，来件落原路径（M2 既有行为）
+/// - 来件更小/平手 → 来件降级：来件存冲突副本，当前 P 保留（serverHash = 当前 hash）
+/// 返回 None = 无需仲裁（文件不存在或 base 与现状一致 → 干净落盘）。
+///
+/// 序列化前提不变：runtime 单线程、handler 天然串行，仲裁的检查-落盘无竞态。
+fn arbitrate_existing(
+    vault: &std::path::Path,
+    conn: &rusqlite::Connection,
+    kind: &str,
+    pf: &PushFile,
+    incoming_bytes: &[u8],
+) -> Result<Option<Landed>, String> {
+    let abs = match fs_ops::resolve_in_vault(vault, &pf.path) {
+        Ok(a) if a.is_file() => a,
+        _ => return Ok(None),
+    };
+    // 读原始字节（非 UTF-8 文件 M2 走 read_note 会 Err 而静默跳过仲裁）
+    let cur_bytes = std::fs::read(&abs).map_err(|e| format!("读取当前版本失败: {e}"))?;
+    let cur_hash = fs_ops::content_hash(&cur_bytes);
+    if cur_hash == pf.base_hash {
+        return Ok(None);
+    }
+    let incoming = (pf.mtime_ms, incoming_bytes.len() as i64, pf.hash.as_str());
+    let current = (crate::sync::meta_mtime_ms(&abs), cur_bytes.len() as i64, cur_hash.as_str());
+    if crate::sync::version_gt(incoming, current) {
+        // 来件赢：当前 P → 冲突副本（进索引），移除原位置，来件随后落原路径
+        let saved = write_conflict_copy(vault, conn, &pf.path, kind, &cur_bytes, fs_ops::now_ms())
+            .map_err(|e| format!("冲突副本落盘失败: {e}"))?;
+        if let Err(e) = std::fs::remove_file(&abs) {
+            log::warn!("同步: 仲裁胜出后移除原路径 {} 失败: {e}", pf.path);
+        }
+        Ok(Some(Landed {
+            conflict_saved_as: Some(saved),
+            server_hash: pf.hash.clone(),
+        }))
+    } else {
+        // 来件降级（更旧/平手）：来件 → 冲突副本，当前 P 保留（铁律：双份都在）
+        let saved = write_conflict_copy(vault, conn, &pf.path, kind, incoming_bytes, fs_ops::now_ms())
+            .map_err(|e| format!("冲突副本落盘失败: {e}"))?;
+        Ok(Some(Landed {
+            conflict_saved_as: Some(saved),
+            server_hash: cur_hash,
+        }))
+    }
 }
 
 /// 单文件落盘逻辑（阻塞，从 handler 分离便于测试）
@@ -415,7 +474,7 @@ fn write_pushed_file(
     ctx: &Arc<ServerCtx>,
     vault: &std::path::Path,
     pf: &PushFile,
-) -> Result<Option<String>, String> {
+) -> Result<Landed, String> {
     // 点目录（.lanmark/ 等）禁止写入：否则远程可写 .lanmark/evil.md 进索引
     // 并每回合重复拉取，或污染元数据目录
     if has_dot_segment(&pf.path) {
@@ -439,27 +498,14 @@ fn write_pushed_file(
                 .lock()
                 .map_err(|_| "DB 锁中毒".to_string())?;
             let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-            // 服务器侧冲突命名：现有版本 hash ≠ 客户端所见 base_hash 且非空 → 改名保留
-            let mut conflict_saved_as = None;
-            if !pf.base_hash.is_empty() {
-                if let Ok(existing) = fs_ops::read_note(vault, &pf.path) {
-                    if fs_ops::content_hash(existing.as_bytes()) != pf.base_hash {
-                        let saved = write_conflict_copy(
-                            vault,
-                            conn,
-                            &pf.path,
-                            "note",
-                            existing.as_bytes(),
-                            fs_ops::now_ms(),
-                        )
-                        .map_err(|e| format!("冲突副本落盘失败: {e}"))?;
-                        // 从原位置移除（已在副本中），避免 write_note 覆盖两份一样
-                        let abs = fs_ops::resolve_in_vault(vault, &pf.path).map_err(|e| e.to_string())?;
-                        let _ = std::fs::remove_file(&abs);
-                        conflict_saved_as = Some(saved);
-                    }
+            // M3a 仲裁：baseHash 与现状不符 → mtime 元组裁决（取代 M2 无条件改名）
+            let landed = match arbitrate_existing(vault, conn, "note", pf, &bytes)? {
+                Some(l) if l.server_hash != pf.hash => {
+                    // 来件被降级：原路径保留，来件已成副本 → 不落盘
+                    return Ok(l);
                 }
-            }
+                other => other,
+            };
             // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）；
             // 目录须通过符号链接逃逸校验（否则 create_dir_all 会在 vault 外建目录）
             if let Some(parent) = fs_ops::resolve_in_vault(vault, &pf.path)
@@ -475,20 +521,40 @@ fn write_pushed_file(
                 Err(_) => fs_ops::write_note_bytes(vault, &pf.path, &bytes, conn),
             }
             .map_err(|e| format!("写入失败: {e}"))?;
-            Ok(conflict_saved_as)
+            Ok(Landed {
+                conflict_saved_as: landed.and_then(|l| l.conflict_saved_as),
+                server_hash: pf.hash.clone(),
+            })
         }
         "asset" => {
             // 附件按原路径落盘（内容 hash 已在上方验证）：vault 里的附件可能
-            // 不是内容寻址名（Obsidian 导入/演示库的人名文件），路径即身份
+            // 不是内容寻址名（Obsidian 导入/演示库的人名文件），路径即身份。
+            // M3a 起附件同样参与 mtime 仲裁（堵 M2 同路径不同内容静默覆盖的洞）
             if !pf.path.starts_with("assets/") || pf.path.contains("..") {
                 return Err(format!("附件路径非法: {}", pf.path));
             }
+            let conn_guard = ctx
+                .app
+                .db
+                .lock()
+                .map_err(|_| "DB 锁中毒".to_string())?;
+            let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+            let landed = match arbitrate_existing(vault, conn, "asset", pf, &bytes)? {
+                Some(l) if l.server_hash != pf.hash => {
+                    // 来件被降级：原路径保留，来件已成副本 → 不落盘
+                    return Ok(l);
+                }
+                other => other,
+            };
             let abs = fs_ops::resolve_in_vault(vault, &pf.path).map_err(|e| e.to_string())?;
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
             }
             std::fs::write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
-            Ok(None)
+            Ok(Landed {
+                conflict_saved_as: landed.and_then(|l| l.conflict_saved_as),
+                server_hash: pf.hash.clone(),
+            })
         }
         other => Err(format!("未知类型: {other}")),
     }
@@ -532,6 +598,7 @@ fn delete_blocking(app: &Arc<AppState>, paths: &[String]) -> Vec<PushResult> {
                 ok: false,
                 error: Some("点目录路径禁止删除".into()),
                 conflict_saved_as: None,
+                server_hash: None,
             });
             continue;
         }
@@ -541,12 +608,14 @@ fn delete_blocking(app: &Arc<AppState>, paths: &[String]) -> Vec<PushResult> {
                 ok: true,
                 error: None,
                 conflict_saved_as: Some(trash),
+                server_hash: None,
             }),
             Err(e) => results.push(PushResult {
                 path: path.clone(),
                 ok: false,
                 error: Some(e),
                 conflict_saved_as: None,
+                server_hash: None,
             }),
         }
     }
@@ -996,11 +1065,16 @@ mod tests {
         assert_eq!(pushed.len(), 1);
         assert!(pushed[0].ok, "push 应成功: {:?}", pushed[0].error);
         assert!(pushed[0].conflict_saved_as.is_none(), "base_hash 相同不是冲突");
+        // M3a：干净落盘 → serverHash = 所推 hash
+        let desktop_hash = fs_ops::content_hash(desktop_content.as_bytes());
+        assert_eq!(pushed[0].server_hash.as_deref(), Some(desktop_hash.as_str()));
         let after = std::fs::read_to_string(dir.path().join(&note.path)).unwrap();
         assert_eq!(after, desktop_content);
 
-        // 8. 冲突 push：base_hash 与服务器现 hash 不一致 → 服务器版本改名保留 + 客户端内容落原路径
+        // 8. 仲裁（来件新）：base_hash 与服务器现 hash 不一致且来件 mtime 更新
+        //    → 服务器版本改名保留 + 客户端内容落原路径（M2 行为保留，mtime 定向）
         let third = "第三方版本";
+        let future_ms = fs_ops::now_ms() + 3_600_000;
         let pushed2: Vec<PushResult> = client
             .post(format!("{base}/api/v1/push"))
             .header("authorization", &auth)
@@ -1010,7 +1084,7 @@ mod tests {
                     "kind": "note",
                     "contentBase64": b64_encode(third.as_bytes()),
                     "hash": fs_ops::content_hash(third.as_bytes()),
-                    "mtimeMs": 456,
+                    "mtimeMs": future_ms,
                     "baseHash": "stale-hash".to_string(),
                 }]
             }))
@@ -1021,6 +1095,7 @@ mod tests {
         assert!(pushed2[0].ok, "冲突 push 也应成功: {:?}", pushed2[0].error);
         let conflict_path = pushed2[0].conflict_saved_as.clone().expect("应有冲突副本");
         assert!(conflict_path.contains("冲突"), "冲突命名: {conflict_path}");
+        assert_eq!(pushed2[0].server_hash.as_deref(), Some(fs_ops::content_hash(third.as_bytes()).as_str()), "来件获胜 → serverHash = 所推 hash");
         // 双份都在：原路径 = 第三方版本，冲突副本 = 桌面版本
         assert_eq!(std::fs::read_to_string(dir.path().join(&note.path)).unwrap(), third);
         assert_eq!(
@@ -1034,6 +1109,38 @@ mod tests {
         )
         .unwrap()
         .is_some());
+
+        // 8b. 仲裁（来件旧）：来件 mtime 更旧 → 来件降级为冲突副本，原路径保留（M3a 新方向）
+        let fourth = "更旧版本";
+        let past_ms = fs_ops::now_ms() - 3_600_000;
+        let current_hash = fs_ops::content_hash(third.as_bytes());
+        let pushed2b: Vec<PushResult> = client
+            .post(format!("{base}/api/v1/push"))
+            .header("authorization", &auth)
+            .json(&json!({
+                "files": [{
+                    "path": note.path,
+                    "kind": "note",
+                    "contentBase64": b64_encode(fourth.as_bytes()),
+                    "hash": fs_ops::content_hash(fourth.as_bytes()),
+                    "mtimeMs": past_ms,
+                    "baseHash": "stale-hash-2".to_string(),
+                }]
+            }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert!(pushed2b[0].ok, "降级 push 也应成功（内容进副本）: {:?}", pushed2b[0].error);
+        let loser_copy = pushed2b[0].conflict_saved_as.clone().expect("降级来件应有冲突副本");
+        assert_ne!(loser_copy, conflict_path, "两次降级命名不撞: {loser_copy} vs {conflict_path}");
+        // serverHash = 原路径现 hash（third），来件未落原路径
+        assert_eq!(pushed2b[0].server_hash.as_deref(), Some(current_hash.as_str()));
+        assert_eq!(std::fs::read_to_string(dir.path().join(&note.path)).unwrap(), third);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&loser_copy)).unwrap(),
+            fourth
+        );
 
         // 9. push 内容 hash 造假的被拒
         let pushed3: Vec<PushResult> = client
@@ -1101,6 +1208,102 @@ mod tests {
             .unwrap();
         assert!(!deleted2[0].ok && !deleted2[1].ok, "点目录 delete 必须拒绝");
         assert!(dir.path().join(".lanmark/lanmark.db").exists(), "索引库必须还在");
+    }
+
+    /// M3a 仲裁单测（docs/07 §9：来件新 / 来件旧 / 平手三向）。
+    /// 直接调 arbitrate_existing——HTTP 层无法钉住服务器侧文件的 mtime
+    #[test]
+    fn arbitrate_mtime_directions_and_tie() {
+        use crate::commands::open_vault_at;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let guard = app.db.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        let vault = dir.path();
+
+        const T_MS: i64 = 1_700_000_000_000;
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(T_MS as u64);
+        // 把当前 P 写成 content 并钉 mtime = T，返回其 hash
+        let set_current = |content: &str| {
+            fs_ops::write_note(vault, "p.md", content, conn).unwrap();
+            let abs = vault.join("p.md");
+            let times = std::fs::FileTimes::new().set_modified(t);
+            std::fs::File::open(&abs).unwrap().set_times(times).unwrap();
+            fs_ops::content_hash(content.as_bytes())
+        };
+        let make_pf = |path: &str, content: &str, mtime_ms: i64| PushFile {
+            path: path.into(),
+            kind: "note".into(),
+            content_base64: b64_encode(content.as_bytes()),
+            hash: fs_ops::content_hash(content.as_bytes()),
+            mtime_ms,
+            base_hash: "stale-base".into(),
+        };
+
+        // 1) 来件新 → 赢：当前 P → 冲突副本并移除（随后由调用方落来件）
+        set_current("cur");
+        let pf = make_pf("p.md", "newer", T_MS + 1_000);
+        let landed = arbitrate_existing(vault, conn, "note", &pf, "newer".as_bytes())
+            .unwrap()
+            .expect("base 与现状不符必须仲裁");
+        assert_eq!(landed.server_hash, pf.hash, "来件获胜 → serverHash = 所推 hash");
+        assert!(!vault.join("p.md").exists(), "获胜后原路径已移除，等调用方落来件");
+        let copy = landed.conflict_saved_as.unwrap();
+        assert_eq!(std::fs::read_to_string(vault.join(&copy)).unwrap(), "cur");
+        // 调用方落来件（write_pushed_file 流程）
+        fs_ops::write_note(vault, "p.md", "newer", conn).unwrap();
+        assert_eq!(std::fs::read_to_string(vault.join("p.md")).unwrap(), "newer");
+
+        // 2) 来件旧 → 降级：当前 P 保留，来件 → 冲突副本
+        let h_cur = set_current("cur2");
+        let pf = make_pf("p.md", "older", T_MS - 1_000);
+        let landed = arbitrate_existing(vault, conn, "note", &pf, "older".as_bytes())
+            .unwrap()
+            .expect("base 与现状不符必须仲裁");
+        assert_eq!(landed.server_hash, h_cur, "来件降级 → serverHash = 原路径现 hash");
+        assert_eq!(std::fs::read_to_string(vault.join("p.md")).unwrap(), "cur2");
+        let copy = landed.conflict_saved_as.unwrap();
+        assert_eq!(std::fs::read_to_string(vault.join(&copy)).unwrap(), "older");
+
+        // 3) 平手（同 mtime 同 size）→ hash 字典序大者赢
+        let h_c3 = set_current("cur3");
+        let pf = make_pf("p.md", "cur4", T_MS);
+        let landed = arbitrate_existing(vault, conn, "note", &pf, "cur4".as_bytes())
+            .unwrap()
+            .expect("平手也必须仲裁");
+        if pf.hash > h_c3 {
+            assert_eq!(landed.server_hash, pf.hash, "平手：hash 大者赢");
+            let copy = landed.conflict_saved_as.unwrap();
+            assert_eq!(std::fs::read_to_string(vault.join(&copy)).unwrap(), "cur3");
+            fs_ops::write_note(vault, "p.md", "cur4", conn).unwrap();
+            assert_eq!(std::fs::read_to_string(vault.join("p.md")).unwrap(), "cur4");
+        } else {
+            assert_eq!(landed.server_hash, h_c3, "平手：hash 小者降级");
+            assert_eq!(std::fs::read_to_string(vault.join("p.md")).unwrap(), "cur3");
+            let copy = landed.conflict_saved_as.unwrap();
+            assert_eq!(std::fs::read_to_string(vault.join(&copy)).unwrap(), "cur4");
+        }
+
+        // 4) base 与现状一致 → 无需仲裁（干净落盘，即使来件 mtime 更新）
+        let h_now = set_current("same");
+        let mut pf = make_pf("p.md", "same", T_MS + 9999);
+        pf.base_hash = h_now;
+        assert!(
+            arbitrate_existing(vault, conn, "note", &pf, "same".as_bytes())
+                .unwrap()
+                .is_none(),
+            "base 匹配不得仲裁"
+        );
+
+        // 5) 当前 P 不存在 → 无需仲裁
+        let pf = make_pf("fresh.md", "fresh", T_MS + 1);
+        assert!(
+            arbitrate_existing(vault, conn, "note", &pf, "fresh".as_bytes())
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// 等服务器就绪（最多 2s）
