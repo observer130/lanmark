@@ -37,6 +37,8 @@ export interface SyncPairingInfo {
   port: number | null;
   deviceName: string;
   pairingCode: string;
+  /** 最近一次客户端回合时间（unix ms；服务器重启后为 null） */
+  lastRoundAt: number | null;
 }
 
 /** 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本（M3c，docs/07 §3/§6） */
@@ -64,6 +66,8 @@ export interface SyncReport {
 export const sync = {
   pairingInfo: () => invoke<SyncPairingInfo>("sync_pairing_info"),
   serverStart: () => invoke<number>("sync_server_start"),
+  /** vault 内冲突副本数（手机端可发现性，docs/07 §6） */
+  conflictCount: () => invoke<number>("sync_conflict_count"),
 
   /** 桌面端 */
   discover: () => invoke<Discovered[]>("sync_discover"),

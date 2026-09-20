@@ -40,9 +40,10 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-/** 手机端面板：服务器状态 + 配对码（给桌面端输入用） */
+/** 手机端面板：服务器状态 + 配对码（给桌面端输入用）+ 冲突副本可发现性（docs/07 §6） */
 function ServerPanel() {
   const pairing = useSyncStore((s) => s.pairing);
+  const conflictCount = useSyncStore((s) => s.conflictCount);
   const refreshPairing = useSyncStore((s) => s.refreshPairing);
 
   useEffect(() => {
@@ -87,6 +88,18 @@ function ServerPanel() {
           <CopyButton text={pairing.pairingCode} />
         </div>
       )}
+
+      {/* M3e 可发现性：最近回合时间 + 库中冲突副本（docs/07 §6） */}
+      {pairing.running && (
+        <div className="flex items-center gap-3 px-1 text-[11px] text-ink-3">
+          <span>
+            最近回合 {pairing.lastRoundAt ? fmtClock(pairing.lastRoundAt) : "本次启动后暂无"}
+          </span>
+          {conflictCount != null && conflictCount > 0 && (
+            <span className="text-amber-600">库中 {conflictCount} 个冲突副本</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -101,6 +114,7 @@ function ClientPanel() {
     lastReport,
     syncAuto,
     setSyncAuto,
+    probeStates,
     discover,
     pair,
     removeServer,
@@ -138,8 +152,10 @@ function ClientPanel() {
         </button>
       </div>
 
-      {/* 已配对服务器 */}
-      {servers.map((s) => (
+      {/* 已配对服务器（M3e：在线状态 + 最近同步时间） */}
+      {servers.map((s) => {
+        const online = probeStates[s.id]?.online ?? null;
+        return (
         <div
           key={s.id}
           className="rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card"
@@ -147,8 +163,25 @@ function ClientPanel() {
           <div className="flex items-center gap-2">
             <Smartphone size={14} className="shrink-0 text-accent" />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium text-ink">{s.name}</div>
-              <div className="truncate text-[11px] text-ink-3">{s.url}</div>
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-sm font-medium text-ink">{s.name}</span>
+                <span
+                  title={online === true ? "在线" : online === false ? "离线" : "尚未探测"}
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    online === true
+                      ? "bg-emerald-500"
+                      : online === false
+                        ? "bg-red-400"
+                        : "bg-ink-3/40"
+                  }`}
+                />
+              </div>
+              <div className="truncate text-[11px] text-ink-3">
+                {s.url}
+                {s.lastSuccessAt != null && (
+                  <span> · 上次同步 {fmtClock(s.lastSuccessAt)}</span>
+                )}
+              </div>
             </div>
             <button
               title="移除服务器"
@@ -167,7 +200,8 @@ function ClientPanel() {
             {syncing ? "同步中…" : "立即同步"}
           </button>
         </div>
-      ))}
+        );
+      })}
 
       {/* 最近一次同步结果 */}
       {lastReport && (

@@ -164,6 +164,8 @@ interface SyncStore {
   syncAuto: boolean | null;
   /** M3：per-server 探测状态机（UI 展示在线状态用） */
   probeStates: Record<string, ServerProbeState>;
+  /** M3e：vault 内冲突副本数（手机端可发现性，docs/07 §6） */
+  conflictCount: number | null;
 
   refreshPairing: () => Promise<void>;
   refreshServers: () => Promise<void>;
@@ -198,10 +200,16 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   error: null,
   syncAuto: null,
   probeStates: {},
+  conflictCount: null,
 
   refreshPairing: async () => {
     try {
-      set({ pairing: await sync.pairingInfo() });
+      // 并行取配对信息 + 冲突副本计数（同 5s 轮询周期）
+      const [pairing, count] = await Promise.all([
+        sync.pairingInfo(),
+        sync.conflictCount().catch(() => null),
+      ]);
+      set({ pairing, conflictCount: count });
     } catch (e) {
       set({ error: String(e) });
     }

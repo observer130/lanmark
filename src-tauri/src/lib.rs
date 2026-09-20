@@ -105,6 +105,7 @@ pub fn run() {
             commands::asset_save,
             sync_server::sync_pairing_info,
             sync_server::sync_server_start,
+            sync_server::sync_conflict_count,
             sync_client::sync_discover,
             sync_client::sync_pair,
             sync_client::sync_servers,

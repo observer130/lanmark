@@ -14,6 +14,9 @@ pub struct AppState {
     pub db: Mutex<Option<Connection>>,
     /// M2 同步服务器实际监听端口（None = 未启动）；幂等启动的判据
     pub sync_port: Mutex<Option<u16>>,
+    /// M3e：最近一次客户端回合触达同步服务器的时间（unix ms，0 = 从未；
+    /// /manifest 是每回合签名动作，服务器 handler 更新；手机端面板展示）
+    pub last_sync_round_at: std::sync::atomic::AtomicI64,
 }
 
 fn default_sync_auto() -> bool {

@@ -295,6 +295,8 @@ async fn manifest(
     headers: HeaderMap,
 ) -> Result<Json<Vec<FileMeta>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
+    // 每回合客户端必先拉 manifest → 记「最近回合」（手机端面板展示）
+    ctx.app.last_sync_round_at.store(crate::fs_ops::now_ms(), std::sync::atomic::Ordering::Relaxed);
     // 重活（读全库 + 逐文件 sha256）移出单线程 runtime，防服务器停摆
     let app = ctx.app.clone();
     let list = tokio::task::spawn_blocking(move || local_manifest(&app))
@@ -825,6 +827,9 @@ pub struct SyncPairingInfo {
     pub port: Option<u16>,
     pub device_name: String,
     pub pairing_code: String,
+    /// 最近一次客户端回合时间（unix ms；服务器重启后为 None）
+    #[serde(default)]
+    pub last_round_at: Option<i64>,
 }
 
 /// 同步服务器状态 + 配对信息（手机端 UI 展示）
@@ -838,12 +843,50 @@ pub fn sync_pairing_info(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<Sy
         .clone()
         .ok_or("尚未打开 vault")?;
     let cfg = load_sync_config(&vault);
+    // 最近回合时间（进程内状态：服务器/应用重启后归零，属展示信息）
+    let last_round_at = {
+        let t = state.last_sync_round_at.load(std::sync::atomic::Ordering::Relaxed);
+        (t > 0).then_some(t)
+    };
     Ok(SyncPairingInfo {
         running: port.is_some(),
         port,
         device_name: cfg.device_name,
         pairing_code: cfg.pairing_code,
+        last_round_at,
     })
+}
+
+/// vault 内冲突副本计数（docs/07 §6 手机端可发现性）：
+/// 笔记走 DB 索引（路径含「冲突」，无逐文件 hash），附件浅层扫描。
+#[tauri::command]
+pub fn sync_conflict_count(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<u32> {
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| "锁中毒")?
+        .clone()
+        .ok_or("尚未打开 vault")?;
+    let mut count = 0u32;
+    if let Ok(guard) = state.db.lock() {
+        if let Some(c) = guard.as_ref() {
+            if let Ok(n) = c.query_row(
+                "SELECT COUNT(*) FROM files WHERE is_note=1 AND path LIKE '%冲突%'",
+                [],
+                |r| r.get::<_, i64>(0),
+            ) {
+                count += n as u32;
+            }
+        }
+    }
+    if let Ok(d) = std::fs::read_dir(vault.join(fs_ops::ASSETS_DIR)) {
+        for e in d.flatten() {
+            if e.file_name().to_string_lossy().contains("冲突") {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
 }
 
 /// 启动同步服务器（幂等；Android 端在 vault 打开后自动调用，桌面端可手动开）
