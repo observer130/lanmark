@@ -190,7 +190,24 @@ pub fn entry_move_op(state: &Arc<AppState>, path: &str, new_dir: &str) -> CmdRes
 }
 
 pub fn entry_delete_op(state: &Arc<AppState>, path: &str) -> CmdResult<String> {
-    with_vault(state, |vault| with_db(state, |conn| fs_ops::delete_entry(vault, path, conn).map_err(|e| e.to_string())))
+    with_vault(state, |vault| {
+        with_db(state, |conn| {
+            // M3b：删除前记 tombstone（文件夹 = 展开其下全部同步单元；hash 以磁盘为准），
+            // 本地 UI 删除与服务器 /delete 都走这里 → 两侧墓碑统一
+            if let Ok(files) = fs_ops::entry_file_list(vault, path, conn) {
+                let now = fs_ops::now_ms();
+                for f in &files {
+                    if let Ok(bytes) = std::fs::read(vault.join(f)) {
+                        let h = fs_ops::content_hash(&bytes);
+                        if let Err(e) = crate::sync::record_tombstone(vault, f, &h, now) {
+                            log::warn!("记 tombstone 失败 {f}: {e}");
+                        }
+                    }
+                }
+            }
+            fs_ops::delete_entry(vault, path, conn).map_err(|e| e.to_string())
+        })
+    })
 }
 
 #[derive(Serialize)]

@@ -70,6 +70,20 @@ pub fn remove_prefix(conn: &Connection, prefix: &str) -> Result<()> {
     Ok(())
 }
 
+/// 列出前缀（自身 + 子树）下的全部索引笔记路径。M3b tombstone 文件夹展开用。
+/// 同 remove_prefix：substr 按字符计数，不用 LIKE。
+pub fn list_prefix_paths(conn: &Connection, prefix: &str) -> Result<Vec<String>> {
+    let with_slash = format!("{prefix}/");
+    let chars = with_slash.chars().count() as i64;
+    let mut stmt = conn.prepare(
+        "SELECT path FROM files WHERE is_note=1 AND (path=?1 OR substr(path,1,?2)=?3)",
+    )?;
+    let out = stmt
+        .query_map(params![prefix, chars, with_slash], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(out)
+}
+
 /// 前缀重命名（重命名/移动目录时，自身 + 子树路径改写）。
 /// 不用 LIKE，避免路径里的 %/_ 干扰；substr 按字符计数。
 pub fn rename_paths(conn: &Connection, old_prefix: &str, new_prefix: &str) -> Result<()> {

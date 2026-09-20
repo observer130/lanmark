@@ -22,15 +22,15 @@ use crate::commands::{self, CmdResult};
 use crate::fs_ops;
 use crate::sync::{
     b64_decode, b64_encode, local_manifest, write_conflict_copy, FileMeta, PullFile, PullRequest,
-    PullResponse, PushFile, PushResult,
+    PullResponse, PushFile, PushResult, Tombstone,
 };
 use crate::vault::AppState;
 
 pub const SERVICE_TYPE: &str = "_lanmark._tcp.local.";
 pub const DEFAULT_PORT: u16 = 4180;
 /// 生产单实例下 10 个足够；测试并行各起常驻服务器（无停机机制），
-/// 范围太窄会 AddrInUse（4180..4190 全占的回归已踩过）
-const MAX_PORT_TRIES: u16 = 20;
+/// 范围太窄会 AddrInUse（M3 测试矩阵扩到 80+ 后 4180..4200 已不够，再放宽）
+const MAX_PORT_TRIES: u16 = 60;
 
 /// vault 内同步元数据（.lanmark/sync.json）：设备名 + 配对码 + 已发 token
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -551,6 +551,10 @@ fn write_pushed_file(
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
             }
             std::fs::write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
+            // M3b D4：push 干净落盘/仲裁获胜 → 清除该路径 tombstone（笔记分支经 write_note 自动清）
+            if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &pf.path) {
+                log::warn!("清 tombstone 失败 {}: {e}", pf.path);
+            }
             Ok(Landed {
                 conflict_saved_as: landed.and_then(|l| l.conflict_saved_as),
                 server_hash: pf.hash.clone(),
@@ -563,6 +567,36 @@ fn write_pushed_file(
 /// 路径任一段以 `.` 开头（.lanmark、.obsidian…）
 fn has_dot_segment(path: &str) -> bool {
     path.split('/').any(|seg| seg.starts_with('.'))
+}
+
+/// GET /api/v1/tombstones —— 删除墓碑列表（需鉴权；docs/07 §3）。
+/// 旧服务器无此端点 → 404，客户端按空列表处理（删除传播静默关闭，退化 M2 行为）。
+/// 顺带做 TTL 清理（30 天，惰性执行）。
+async fn tombstones(
+    State(ctx): State<Arc<ServerCtx>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Tombstone>>, (StatusCode, String)> {
+    ctx.check_token(&headers)?;
+    let app = ctx.app.clone();
+    let list = tokio::task::spawn_blocking(move || -> Result<Vec<Tombstone>, (StatusCode, String)> {
+        let vault = ctx2_vault(&app)?;
+        let now = crate::fs_ops::now_ms();
+        crate::sync::purge_expired_tombstones(&vault, now)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tombstone 清理失败: {e}")))?;
+        Ok(crate::sync::load_tombstones(&vault))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
+    Ok(Json(list?))
+}
+
+/// 当前 vault（阻塞线程内用）
+fn ctx2_vault(app: &Arc<AppState>) -> Result<PathBuf, (StatusCode, String)> {
+    app.vault
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "vault 锁中毒".to_string()))?
+        .clone()
+        .ok_or_else(|| (StatusCode::CONFLICT, "尚未打开 vault".to_string()))
 }
 
 #[derive(Deserialize)]
@@ -630,6 +664,7 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/api/v1/pull", post(pull))
         .route("/api/v1/push", post(push))
         .route("/api/v1/delete", post(delete_files))
+        .route("/api/v1/tombstones", get(tombstones))
         .with_state(ctx)
 }
 

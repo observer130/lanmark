@@ -83,8 +83,89 @@ pub struct SyncReport {
     pub pushed: Vec<String>,
     /// 冲突副本（服务器版本在本地落成的 <stem>-冲突<mmdd-HHMM>.md）
     pub conflicts: Vec<String>,
+    /// 已同步的删除（本地软删 / 服务器 /delete，均进回收站，M3b）
+    #[serde(default)]
+    pub deleted: Vec<String>,
     pub skipped: usize,
     pub errors: Vec<String>,
+}
+
+// ---------- tombstone（M3b 删除传播，docs/07 §3/§5） ----------
+
+/// 删除墓碑：一端删除 → 另一端软删（铁律：永不硬删）。
+/// `mtime_ms` = 删除时刻（LWW 裁决时间源，与编辑侧的文件 mtime 比较）；
+/// `deleted_at` = 删除时刻（TTL 清理依据）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Tombstone {
+    pub path: String,
+    /// 被删版本的内容 hash（hash 相同 = 删后没再改 → 静默传播）
+    pub hash: String,
+    pub mtime_ms: i64,
+    pub deleted_at: i64,
+}
+
+/// tombstone TTL：30 天（docs/07 §9 M3b）
+pub const TOMBSTONE_TTL_MS: i64 = 30 * 86_400_000;
+
+fn tombstones_path(vault: &Path) -> std::path::PathBuf {
+    // 与基线 sync-<id>.json 同模式（.lanmark/ 不参与同步，walk 跳过 dot 目录）
+    vault.join(fs_ops::META_DIR).join("tombstones.json")
+}
+
+/// 读本地 tombstone（文件不可恢复 → 空列表）
+pub fn load_tombstones(vault: &Path) -> Vec<Tombstone> {
+    std::fs::read_to_string(tombstones_path(vault))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_tombstones(vault: &Path, list: &[Tombstone]) -> std::io::Result<()> {
+    let path = tombstones_path(vault);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(list).map_err(std::io::Error::other)?;
+    fs_ops::atomic_write(&path, json.as_bytes())
+}
+
+/// 记 tombstone（按 path upsert）。`deleted_ms` = 删除时刻
+pub fn record_tombstone(vault: &Path, path: &str, hash: &str, deleted_ms: i64) -> std::io::Result<()> {
+    let mut list = load_tombstones(vault);
+    list.retain(|t| t.path != path);
+    list.push(Tombstone {
+        path: path.into(),
+        hash: hash.into(),
+        mtime_ms: deleted_ms,
+        deleted_at: deleted_ms,
+    });
+    save_tombstones(vault, &list)
+}
+
+/// D4：路径被（重新）创建 → 清除该路径 tombstone（不存在则无操作）
+pub fn clear_tombstone_if_present(vault: &Path, path: &str) -> std::io::Result<()> {
+    let list = load_tombstones(vault);
+    let filtered: Vec<Tombstone> = list.iter().filter(|t| t.path != path).cloned().collect();
+    if filtered.len() != list.len() {
+        save_tombstones(vault, &filtered)?;
+    }
+    Ok(())
+}
+
+/// TTL 清理：删超过 30 天的 tombstone。返回清理数
+pub fn purge_expired_tombstones(vault: &Path, now_ms: i64) -> std::io::Result<usize> {
+    let list = load_tombstones(vault);
+    let kept: Vec<Tombstone> = list
+        .iter()
+        .filter(|t| now_ms.saturating_sub(t.deleted_at) < TOMBSTONE_TTL_MS)
+        .cloned()
+        .collect();
+    let removed = list.len() - kept.len();
+    if removed > 0 {
+        save_tombstones(vault, &kept)?;
+    }
+    Ok(removed)
 }
 
 // ---------- 清单 ----------
@@ -343,6 +424,7 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn version_tuple_ordering() {

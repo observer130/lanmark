@@ -244,6 +244,10 @@ pub fn create_note(vault: &Path, dir_rel: &str, raw_name: &str) -> std::io::Resu
     let target = unique_target(&dir, &name)?;
     fs::write(&target, "")?;
     let rel = rel_to_string(target.strip_prefix(vault).unwrap());
+    // M3b D4：路径被（重新）创建 → 清 tombstone（best effort；回合开头有权威判定兜底）
+    if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &rel) {
+        log::warn!("清 tombstone 失败 {rel}: {e}");
+    }
     Ok(Node {
         title: Some(title_from_stem(&name)),
         path: rel.clone(),
@@ -292,10 +296,14 @@ pub fn rename_entry(
         return Ok(rel_path.to_string());
     }
     let target = unique_target(&parent, &new_name)?;
+    // M3b：重命名 = 旧路径消失 → 记旧路径 tombstone（文件夹展开），
+    // 对端收敛为「旧路径删除 + 新路径推送」，内容在新路径保留（铁律）
+    record_tombstones_for_entry(vault, rel_path, conn);
     fs::rename(&old_abs, &target)?;
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    clear_tombstones_for_entry(vault, &new_rel, conn);
     // 重命名文件后，索引里的 title 需要更新。
     // 与 write_note 同纪律：优先 frontmatter title，而不是无脑退回文件名 stem
     // （带 title: 的笔记重命名后 recents/favorites 显示不应回退）
@@ -349,11 +357,81 @@ pub fn move_entry(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let target = unique_target(&new_dir, &name)?;
+    // M3b：移动 = 旧路径消失 → 同 rename 的 tombstone 处理
+    record_tombstones_for_entry(vault, rel_path, conn);
     fs::rename(&old_abs, &target)?;
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    clear_tombstones_for_entry(vault, &new_rel, conn);
     Ok(new_rel)
+}
+
+/// 列出条目下全部同步单元（文件）：文件 → 自身；文件夹 → 其下全部笔记（DB）+ 附件（磁盘 walk）。
+/// tombstone 文件夹展开用（M3b）。只列同步单元（笔记/assets），外来文件不列。
+pub fn entry_file_list(vault: &Path, rel: &str, conn: &Connection) -> std::io::Result<Vec<String>> {
+    let abs = resolve_in_vault(vault, rel)?;
+    if abs.is_file() {
+        return Ok(vec![rel.to_string()]);
+    }
+    if !abs.is_dir() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "条目不存在"));
+    }
+    let mut out: Vec<String> = db::list_prefix_paths(conn, rel)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    // 附件不进 DB，磁盘 walk；file_type 不跟随符号链接（防逃逸/循环）
+    fn walk(dir: &Path, vault: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+        for e in fs::read_dir(dir)? {
+            let e = e?;
+            let ft = e.file_type()?;
+            if ft.is_symlink() {
+                continue;
+            }
+            let p = e.path();
+            if ft.is_dir() {
+                walk(&p, vault, out)?;
+            } else if ft.is_file() {
+                let r = rel_to_string(
+                    p.strip_prefix(vault)
+                        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "路径越界"))?,
+                );
+                if r.starts_with(ASSETS_DIR) {
+                    out.push(r);
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(&abs, vault, &mut out)?;
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// M3b：为条目下全部同步单元记 tombstone（hash 以磁盘为准，时间 = 现在）
+fn record_tombstones_for_entry(vault: &Path, rel: &str, conn: &Connection) {
+    if let Ok(files) = entry_file_list(vault, rel, conn) {
+        let now = now_ms();
+        for f in &files {
+            if let Ok(bytes) = fs::read(vault.join(f)) {
+                let h = content_hash(&bytes);
+                if let Err(e) = crate::sync::record_tombstone(vault, f, &h, now) {
+                    log::warn!("记 tombstone 失败 {f}: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// M3b D4：清除条目下全部同步单元的 tombstone
+fn clear_tombstones_for_entry(vault: &Path, rel: &str, conn: &Connection) {
+    if let Ok(files) = entry_file_list(vault, rel, conn) {
+        for f in &files {
+            if let Err(e) = crate::sync::clear_tombstone_if_present(vault, f) {
+                log::warn!("清 tombstone 失败 {f}: {e}");
+            }
+        }
+    }
 }
 
 /// 回收站名冲突消解：`<ms>-<name>` 已存在则追加 -2、-3…
@@ -450,6 +528,10 @@ pub fn write_note(
         .unwrap_or_else(|| title_from_stem(&abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()));
     db::upsert_file(conn, rel_path, &title, content, mtime, &hash, true)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    // M3b D4：路径被（重新）写入 = （重新）创建 → 清 tombstone（含同步拉取落地）
+    if let Err(e) = crate::sync::clear_tombstone_if_present(vault, rel_path) {
+        log::warn!("清 tombstone 失败 {rel_path}: {e}");
+    }
     Ok((mtime, hash))
 }
 
@@ -470,6 +552,10 @@ pub fn write_note_bytes(
         .unwrap_or_else(|| title_from_stem(&name));
     db::upsert_file(conn, rel_path, &title, &String::from_utf8_lossy(bytes), mtime, &hash, true)
         .map_err(|e| std::io::Error::other(e))?;
+    // M3b D4：同 write_note
+    if let Err(e) = crate::sync::clear_tombstone_if_present(vault, rel_path) {
+        log::warn!("清 tombstone 失败 {rel_path}: {e}");
+    }
     Ok((mtime, hash))
 }
 
@@ -505,7 +591,12 @@ pub fn save_asset(vault: &Path, bytes: &[u8], ext: &str) -> std::io::Result<Stri
     if !target.exists() {
         fs::write(&target, bytes)?;
     }
-    Ok(format!("{ASSETS_DIR}/{name}"))
+    let rel = format!("{ASSETS_DIR}/{name}");
+    // M3b D4：附件路径被（重新）落盘 → 清 tombstone
+    if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &rel) {
+        log::warn!("清 tombstone 失败 {rel}: {e}");
+    }
+    Ok(rel)
 }
 
 /// 全量重索引：以磁盘为准同步 DB（外部编辑/Obsidian 改动后调用）

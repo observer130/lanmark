@@ -173,6 +173,46 @@ fn push_batch(
     resp.json().map_err(|e| format!("推送响应解析失败: {e}"))
 }
 
+/// GET /api/v1/tombstones（docs/07 §3）：旧服务器 404 → 空列表（删除传播静默关闭，退化 M2 行为，不报错）
+fn fetch_tombstones(
+    c: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+) -> Result<Vec<crate::sync::Tombstone>, String> {
+    let resp = c
+        .get(format!("{url}/api/v1/tombstones"))
+        .header("authorization", auth_bearer(token))
+        .send()
+        .map_err(|e| format!("拉取 tombstone 失败: {e}"))?;
+    match resp.status() {
+        s if s.is_success() => resp.json().map_err(|e| format!("tombstone 解析失败: {e}")),
+        reqwest::StatusCode::NOT_FOUND => {
+            log::debug!("服务器无 /tombstones（旧版本），按空列表处理");
+            Ok(Vec::new())
+        }
+        s => Err(format!("拉取 tombstone 失败（HTTP {s}）")),
+    }
+}
+
+/// POST /api/v1/delete（批量；服务器软删入回收站 + 记 tombstone）
+fn delete_batch(
+    c: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+    paths: &[String],
+) -> Result<Vec<crate::sync::PushResult>, String> {
+    let resp = c
+        .post(format!("{url}/api/v1/delete"))
+        .header("authorization", auth_bearer(token))
+        .json(&serde_json::json!({ "paths": paths }))
+        .send()
+        .map_err(|e| format!("删除传播失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("删除传播失败（HTTP {}）", resp.status()));
+    }
+    resp.json().map_err(|e| format!("删除传播响应解析失败: {e}"))
+}
+
 // ---------- 落盘辅助 ----------
 
 /// 把拉取内容落到本地（笔记走 write_note 进索引；附件校验内容寻址）。
@@ -290,11 +330,14 @@ pub(crate) struct RoundCore {
     vault: PathBuf,
     url: String,
     c: reqwest::blocking::Client,
-    #[allow(dead_code)] // M3b tombstone 阶段（本地 tombstone vs 服务器 manifest）会消费
     server_map: HashMap<String, FileMeta>,
     local_map: HashMap<String, FileMeta>,
+    /// 服务器 tombstone（旧服务器 404 → 空列表，docs/07 §3）
+    server_tombstones: Vec<crate::sync::Tombstone>,
+    /// 本地 tombstone（回合开头 D4 判定后；步骤 3/4 消费与更新）
+    local_tombstones: Vec<crate::sync::Tombstone>,
     /// 上轮基线（上次回合结束时服务器的 hash 快照）
-    #[allow(dead_code)] // M3b 的 tombstone 阶段会用到完整基线比较
+    #[allow(dead_code)] // 分类在 new() 内消费；M3c 起阶段间需要时再放开
     base_prev: HashMap<String, String>,
     /// 仅服务器有 → 拉
     to_pull: Vec<String>,
@@ -327,9 +370,45 @@ impl RoundCore {
             fs_ops::reindex(&vault, conn).map_err(|e| format!("重索引失败: {e}"))?;
         }
 
-        // 1. 双侧清单 + 客户端基线（M3b：+ tombstones）
+        // 1. 双侧清单 + 客户端基线 + 服务器 tombstones（docs/07 §5 步骤 1）
         let c = client();
         let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
+        let server_tombstones = fetch_tombstones(&c, &url, &profile.token)?;
+
+        // M3b：本地 tombstone TTL 清理（30 天）
+        if let Err(e) = crate::sync::purge_expired_tombstones(&vault, fs_ops::now_ms()) {
+            log::warn!("tombstone TTL 清理失败: {e}");
+        }
+        // 回合开头 D4 判定：本地 tombstone 的路径重新出现在磁盘上（回收站恢复/重建）
+        let local_tombstones = {
+            let mut keep: Vec<crate::sync::Tombstone> = Vec::new();
+            for t in crate::sync::load_tombstones(&vault) {
+                let abs = vault.join(&t.path);
+                if abs.is_file() {
+                    if crate::sync::meta_mtime_ms(&abs) > t.mtime_ms {
+                        // 重建比删除新 → 路径复活（D4）：清 tombstone，正常同步流程推送
+                        if let Err(e) = crate::sync::clear_tombstone_if_present(&vault, &t.path) {
+                            log::warn!("回合开头清 tombstone 失败 {}: {e}", t.path);
+                        }
+                    } else {
+                        // 陈旧恢复（mtime ≤ 删除时刻）：删除仍然有效 → 再软删（内容进回收站，铁律）
+                        let res = {
+                            let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+                            let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+                            fs_ops::delete_entry(&vault, &t.path, conn).map_err(|e| e.to_string())
+                        };
+                        if let Err(e) = res {
+                            log::warn!("陈旧恢复文件再软删失败 {}: {e}", t.path);
+                        }
+                        keep.push(t);
+                    }
+                } else {
+                    keep.push(t);
+                }
+            }
+            keep
+        };
+
         let local = local_manifest(state)?;
         let server_map: HashMap<String, FileMeta> =
             server_manifest.iter().cloned().map(|m| (m.path.clone(), m)).collect();
@@ -385,6 +464,8 @@ impl RoundCore {
             c,
             server_map,
             local_map,
+            server_tombstones,
+            local_tombstones,
             base_prev,
             to_pull,
             to_push,
@@ -392,6 +473,109 @@ impl RoundCore {
             baseline,
             report,
         })
+    }
+
+    /// 步骤 3：服务器 tombstone 处理（docs/07 §5 步骤 3）
+    /// hash 同 → 本地软删 + 记本地 tombstone；hash 异 → edit/delete LWW（删除元组 size=0，
+    /// mtime 平手时编辑恒赢）；本地无 → 补记本地 tombstone 跳过
+    fn server_tombstones_phase(&mut self) -> Result<(), String> {
+        // take 出来再遍历：块内要 &mut self（upsert/软删/清 tombstone）
+        let server_tombstones = std::mem::take(&mut self.server_tombstones);
+        for t in server_tombstones {
+            // 防御：服务器 manifest 仍有该路径（tombstone 未清的不一致态）→ 跳过，正常流程优先
+            if self.server_map.contains_key(&t.path) {
+                continue;
+            }
+            match self.local_map.get(&t.path) {
+                None => {
+                    // 双方已删 → 补记本地 tombstone（供传播到其他服务器），跳过
+                    self.upsert_local_tombstone(&t);
+                }
+                Some(lm) => {
+                    let edit = (lm.mtime_ms, lm.size, lm.hash.as_str());
+                    let del = (t.mtime_ms, 0, t.hash.as_str());
+                    if crate::sync::version_gt(edit, del) {
+                        // 编辑赢 → 推送复活（服务器落盘时 D4 清 tombstone）；清陈旧本地 tombstone
+                        if let Err(e) = crate::sync::clear_tombstone_if_present(&self.vault, &t.path) {
+                            log::warn!("清 tombstone 失败 {}: {e}", t.path);
+                        }
+                        self.local_tombstones.retain(|x| x.path != t.path);
+                        // 分类里「仅本地」应已在 to_push；不在则补（base 空 = 服务器无此文件）
+                        if !self.to_push.iter().any(|(p, _)| p == &t.path) {
+                            self.to_push.push((t.path.clone(), String::new()));
+                        }
+                    } else {
+                        // 删除赢 → 本地软删 + 继承服务器的删除事件
+                        self.soft_delete_local(&t.path)?;
+                        self.upsert_local_tombstone(&t);
+                        // 分类可能已把该路径放进 to_push/to_pull（不一致态）→ 撤掉
+                        self.to_push.retain(|(p, _)| p != &t.path);
+                        self.to_pull.retain(|p| p != &t.path);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 步骤 4：本地 tombstone vs 服务器 manifest（docs/07 §5 步骤 4，方向对调）
+    /// hash 同 → 调 /delete 静默传播；hash 异 → edit/delete LWW（服务器编辑新 → 拉取复活 + 清
+    /// 本地 tombstone；删除新 → /delete）；服务器无此文件 → 无操作
+    fn local_tombstones_phase(&mut self) -> Result<(), String> {
+        let mut to_delete: Vec<String> = Vec::new();
+        // take 出来再遍历：块内要 &mut self（清 tombstone/撤 to_pull）
+        let local_tombstones = std::mem::take(&mut self.local_tombstones);
+        for t in local_tombstones {
+            let Some(sm) = self.server_map.get(&t.path) else {
+                continue;
+            };
+            let edit_wins =
+                crate::sync::version_gt((sm.mtime_ms, sm.size, sm.hash.as_str()), (t.mtime_ms, 0, t.hash.as_str()));
+            if sm.hash == t.hash || !edit_wins {
+                // 删后没再改（静默传播）/ 删除比服务器编辑新 → 服务器也软删
+                to_delete.push(t.path.clone());
+                // 分类已把它放进 to_pull（仅服务器有）→ 撤掉，否则快进拉取会把已删文件拉回来
+                self.to_pull.retain(|p| p != &t.path);
+            } else {
+                // 服务器编辑更新 → 复活：保留 to_pull（分类已放，正常拉取），清本地 tombstone（D4）
+                if let Err(e) = crate::sync::clear_tombstone_if_present(&self.vault, &t.path) {
+                    log::warn!("清 tombstone 失败 {}: {e}", t.path);
+                }
+                self.local_tombstones.retain(|x| x.path != t.path);
+            }
+        }
+        if !to_delete.is_empty() {
+            let results = delete_batch(&self.c, &self.url, &self.profile.token, &to_delete)?;
+            for r in results {
+                if r.ok {
+                    self.report.deleted.push(r.path.clone());
+                } else {
+                    self.report
+                        .errors
+                        .push(format!("删除传播失败 {}: {}", r.path, r.error.unwrap_or_default()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 本地软删（进回收站，铁律）+ 报告计数
+    fn soft_delete_local(&mut self, path: &str) -> Result<(), String> {
+        let conn_guard = self.state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+        let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+        fs_ops::delete_entry(&self.vault, path, conn)
+            .map_err(|e| format!("{path}: 本地软删失败: {e}"))?;
+        self.report.deleted.push(path.to_string());
+        Ok(())
+    }
+
+    /// 本地 tombstone upsert（内存 + 磁盘）
+    fn upsert_local_tombstone(&mut self, t: &crate::sync::Tombstone) {
+        self.local_tombstones.retain(|x| x.path != t.path);
+        self.local_tombstones.push(t.clone());
+        if let Err(e) = crate::sync::record_tombstone(&self.vault, &t.path, &t.hash, t.deleted_at) {
+            log::warn!("记 tombstone 失败 {}: {e}", t.path);
+        }
     }
 
     /// 步骤 5（M2 语义：本地恒赢；M3c 以 mtime LWW 仲裁取代）：
@@ -559,10 +743,12 @@ impl RoundCore {
     }
 }
 
-/// 一个完整同步回合（docs/07 §5 回合语义 v2 的 M3a 子集：M2 + serverHash 基线修复
-/// + 仲裁降级纠正拉取）。阻塞；调用方负责放到 blocking 线程。
+/// 一个完整同步回合（docs/07 §5 回合语义 v2 的 M3a+M3b 子集：M2 + serverHash 基线修复
+/// + 仲裁降级纠正拉取 + tombstone 删除传播）。阻塞；调用方负责放到 blocking 线程。
 pub fn sync_round(state: &Arc<AppState>, profile: &ServerProfile) -> Result<SyncReport, String> {
     let mut core = RoundCore::new(state, profile)?;
+    core.server_tombstones_phase()?;
+    core.local_tombstones_phase()?;
     core.resolve_conflicts()?;
     core.pull_phase()?;
     core.push_phase()?;
@@ -702,10 +888,14 @@ pub async fn sync_now(
 pub type CmdResult<T> = Result<T, String>;
 
 #[cfg(test)]
+#[allow(non_snake_case)] // 测试惯用短标识（dA/deskA/profile_a…）
 mod tests {
     use super::*;
-    use crate::commands::{asset_save_op, note_create_op, note_write_op, open_vault_at};
-    use crate::sync::b64_encode;
+    use crate::commands::{
+        asset_save_op, entry_delete_op, entry_rename_op, folder_create_op, note_create_op,
+        note_write_op, open_vault_at,
+    };
+    use crate::sync::{b64_encode, load_tombstones};
     use crate::sync_server::test_util::start_phone_server;
     use crate::vault::AppState;
 
@@ -1121,6 +1311,519 @@ mod tests {
         let r = sync_round(&deskA, &profile_a).unwrap();
         assert!(r.pulled.is_empty() && r.pushed.is_empty() && r.conflicts.is_empty(), "{r:?}");
         assert_eq!(r.skipped, snap_phone.len());
+    }
+
+    // ---------- M3b tombstone（docs/07 §9） ----------
+
+    /// 删除传播：hash 相同（删后没再改）→ 三端软删，回收站都有，不再拉回复活
+    #[test]
+    fn delete_propagation_hash_match() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "删除笔记").unwrap();
+        note_write_op(&phone, &p.path, "内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 删除（本地 UI 路径：entry_delete_op → 回收站 + tombstone）
+        entry_delete_op(&deskA, &p.path).unwrap();
+        assert!(load_tombstones(dA.path()).iter().any(|t| t.path == p.path));
+
+        // A 回合：删除传播到服务器（/delete → 服务器回收站 + 服务器 tombstone）
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.deleted.iter().any(|x| x == &p.path), "A 报告删除: {r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(
+            load_tombstones(phone_dir.path()).iter().any(|t| t.path == p.path),
+            "服务器应记 tombstone"
+        );
+        assert!(!phone_dir.path().join(&p.path).exists(), "服务器原路径应已软删");
+
+        // B 回合：服务器 tombstone → B 本地软删 + 记本地 tombstone
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.deleted.iter().any(|x| x == &p.path), "B 报告删除: {r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!dB.path().join(&p.path).exists(), "B 本地应软删");
+        assert!(load_tombstones(dB.path()).iter().any(|t| t.path == p.path));
+
+        // 铁律：三端回收站都有（内容未丢）
+        for (label, vault) in [("A", dA.path()), ("B", dB.path()), ("服务器", phone_dir.path())] {
+            let trash = vault.join(fs_ops::TRASH_DIR);
+            let found = std::fs::read_dir(&trash)
+                .unwrap()
+                .flatten()
+                .any(|e| {
+                    e.path().is_file()
+                        && std::fs::read_to_string(e.path())
+                            .map(|c| c == "内容")
+                            .unwrap_or(false)
+                });
+            assert!(found, "{label} 回收站应保留被删内容");
+        }
+
+        // 后续回合：不拉回复活（M2 会复活，M3b 修掉）
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.pulled.iter().all(|x| x != &p.path), "不得拉回已删文件: {r:?}");
+        assert!(!dA.path().join(&p.path).exists());
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.pulled.iter().all(|x| x != &p.path), "{r:?}");
+        assert!(!dB.path().join(&p.path).exists());
+    }
+
+    /// 删后编辑：编辑更新（mtime > 删除时刻）→ 推送复活，服务器 D4 清 tombstone
+    #[test]
+    fn delete_vs_edit_edit_newer_resurrects() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "复活笔记").unwrap();
+        note_write_op(&phone, &p.path, "原始").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 删除并同步（服务器 tombstone）
+        entry_delete_op(&deskA, &p.path).unwrap();
+        let del_ms = load_tombstones(dA.path())
+            .into_iter()
+            .find(|t| t.path == p.path)
+            .unwrap()
+            .mtime_ms;
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+
+        // B 离线编辑（mtime 晚于删除时刻）
+        note_write_op(&deskB, &p.path, "B 的新编辑").unwrap();
+        set_mtime(&deskB, &p.path, del_ms + 3_600_000);
+
+        // B 回合：服务器 tombstone vs 本地编辑 → 编辑赢 → 推送复活
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.pushed.iter().any(|x| x == &p.path), "B 应推送复活: {r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&p.path)).unwrap(), "B 的新编辑");
+        assert_eq!(std::fs::read_to_string(dB.path().join(&p.path)).unwrap(), "B 的新编辑");
+        assert!(
+            load_tombstones(phone_dir.path()).iter().all(|t| t.path != p.path),
+            "服务器 D4：复活后 tombstone 应清除"
+        );
+
+        // A 回合：拉回复活后的 P；本地 tombstone 被 D4（服务器编辑更新）清除
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.pulled.iter().any(|x| x == &p.path), "A 应拉回复活文件: {r:?}");
+        assert_eq!(std::fs::read_to_string(dA.path().join(&p.path)).unwrap(), "B 的新编辑");
+        assert!(load_tombstones(dA.path()).iter().all(|t| t.path != p.path), "A 的 tombstone 应清除");
+    }
+
+    /// 删后编辑：删除更新（编辑 mtime < 删除时刻）→ 本地再软删，内容进回收站
+    #[test]
+    fn delete_vs_edit_delete_newer_soft_deletes() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "删除赢笔记").unwrap();
+        note_write_op(&phone, &p.path, "原始").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // B 先离线编辑（mtime 旧）
+        note_write_op(&deskB, &p.path, "B 的旧编辑").unwrap();
+        let old_ms = fs_ops::now_ms() - 3_600_000;
+        set_mtime(&deskB, &p.path, old_ms);
+
+        // A 删除（晚于编辑）并同步
+        entry_delete_op(&deskA, &p.path).unwrap();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+
+        // B 回合：编辑（旧）vs 删除（新）→ 删除赢 → B 软删 + 本地 tombstone
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.deleted.iter().any(|x| x == &p.path), "B 应软删: {r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!dB.path().join(&p.path).exists(), "B 原路径应消失");
+        let trash = dB.path().join(fs_ops::TRASH_DIR);
+        let kept = std::fs::read_dir(&trash)
+            .unwrap()
+            .flatten()
+            .any(|e| {
+                e.path().is_file()
+                    && std::fs::read_to_string(e.path())
+                        .map(|c| c == "B 的旧编辑")
+                        .unwrap_or(false)
+            });
+        assert!(kept, "铁律：B 的旧编辑内容必须留在回收站");
+        // 终态：三端都没有该文件，不复活
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.pulled.iter().all(|x| x != &p.path), "{r:?}");
+        assert!(!dB.path().join(&p.path).exists());
+        assert!(!dA.path().join(&p.path).exists(), "A 端保持删除");
+    }
+
+    /// 平手（编辑 mtime == 删除时刻）→ 编辑恒赢（删除元组 size=0）
+    #[test]
+    fn delete_vs_edit_tie_edit_wins() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "平手笔记").unwrap();
+        note_write_op(&phone, &p.path, "原始").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (_dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 删除并同步（服务器墓碑时间 = /delete 处理时刻，B 回合看到的就是它）
+        entry_delete_op(&deskA, &p.path).unwrap();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let del_ms = load_tombstones(phone_dir.path())
+            .into_iter()
+            .find(|t| t.path == p.path)
+            .unwrap()
+            .mtime_ms;
+
+        // B 编辑，mtime 恰好 == 服务器删除时刻（平手）
+        note_write_op(&deskB, &p.path, "B 平手编辑").unwrap();
+        set_mtime(&deskB, &p.path, del_ms);
+
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.pushed.iter().any(|x| x == &p.path), "平手时编辑必须赢（size=0 规则）: {r:?}");
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&p.path)).unwrap(), "B 平手编辑");
+        assert_eq!(std::fs::read_to_string(dB.path().join(&p.path)).unwrap(), "B 平手编辑");
+    }
+
+    /// 双方已删 → 跳过，无错误无复活
+    #[test]
+    fn delete_both_sides_already_deleted_skip() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "双删笔记").unwrap();
+        note_write_op(&phone, &p.path, "内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 删除 + 同步；B 直接删除（未同步，服务器已有 tombstone）
+        entry_delete_op(&deskA, &p.path).unwrap();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        entry_delete_op(&deskB, &p.path).unwrap();
+
+        // B 回合：双方已删 → 静默跳过
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.pulled.iter().all(|x| x != &p.path), "{r:?}");
+        assert!(!dB.path().join(&p.path).exists());
+        // A 再回合：无动作
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!dA.path().join(&p.path).exists());
+    }
+
+    /// D4：删除后同路径重新创建 → tombstone 清除，文件推送复活
+    #[test]
+    fn d4_recreation_clears_tombstone() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "重建笔记").unwrap();
+        note_write_op(&phone, &p.path, "旧内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 删除 + 同步（服务器 tombstone），然后同路径重建（create_note → D4 清本地 tombstone）
+        entry_delete_op(&deskA, &p.path).unwrap();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let created = note_create_op(&deskA, "", "重建笔记").unwrap();
+        assert_eq!(created.path, p.path, "同路径重建: {:?}", created.path);
+        note_write_op(&deskA, &created.path, "重建内容").unwrap();
+        assert!(
+            load_tombstones(dA.path()).iter().all(|t| t.path != p.path),
+            "D4：重建后本地 tombstone 应清除"
+        );
+
+        // A 回合：推送重建内容（base 空）→ 服务器 D4 清 tombstone
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.pushed.iter().any(|x| x == &p.path), "{r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(
+            load_tombstones(phone_dir.path()).iter().all(|t| t.path != p.path),
+            "服务器 tombstone 应清除"
+        );
+        // B 回合：正常拉取（当作新文件），无删除传播
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.deleted.is_empty(), "{r:?}");
+        assert_eq!(std::fs::read_to_string(dB.path().join(&p.path)).unwrap(), "重建内容");
+    }
+
+    /// TTL：30 天以上的 tombstone 回合开头清理；新鲜 tombstone 保留
+    #[test]
+    fn tombstone_ttl_purge() {
+        let (_dir, desk) = client_vault();
+        let vault = desk.vault.lock().unwrap().clone().unwrap();
+        let now = fs_ops::now_ms();
+
+        crate::sync::record_tombstone(&vault, "过期.md", "h1", now - crate::sync::TOMBSTONE_TTL_MS - 1).unwrap();
+        crate::sync::record_tombstone(&vault, "新鲜.md", "h2", now - 86_400_000).unwrap();
+        assert_eq!(load_tombstones(&vault).len(), 2);
+
+        let removed = crate::sync::purge_expired_tombstones(&vault, now).unwrap();
+        assert_eq!(removed, 1);
+        let kept = load_tombstones(&vault);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, "新鲜.md");
+    }
+
+    /// 文件夹删除：tombstone 展开为文件级 → 三端内容全部软删（铁律）
+    #[test]
+    fn folder_delete_expands_tombstones() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let f = folder_create_op(&phone, "", "项目").unwrap();
+        let n1 = note_create_op(&phone, &f.path, "笔记一").unwrap();
+        let n2 = note_create_op(&phone, &f.path, "笔记二").unwrap();
+        note_write_op(&phone, &n1.path, "一").unwrap();
+        note_write_op(&phone, &n2.path, "二").unwrap();
+        let asset = asset_save_op(&phone, &b64_encode(b"dir-asset"), "png").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 删整个文件夹
+        entry_delete_op(&deskA, &f.path).unwrap();
+        let ts = load_tombstones(dA.path());
+        for expected in [&n1.path, &n2.path] {
+            assert!(ts.iter().any(|t| t.path == *expected), "文件夹应展开为文件 tombstone: {ts:?}");
+        }
+        assert!(ts.iter().all(|t| t.path != asset), "根级附件不得被文件夹展开波及: {ts:?}");
+
+        // A 回合：传播到服务器
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!phone_dir.path().join(&n1.path).exists(), "服务器 n1 应软删");
+        assert!(!phone_dir.path().join(&n2.path).exists(), "服务器 n2 应软删");
+        assert!(phone_dir.path().join(&asset).exists(), "根级附件必须存活");
+
+        // B 回合：服务器 tombstone → B 本地软删
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!dB.path().join(&n1.path).exists(), "B n1 应软删: {r:?}");
+        assert!(!dB.path().join(&n2.path).exists(), "B n2 应软删");
+        assert!(dB.path().join(&asset).exists(), "B 根级附件必须存活");
+        // 铁律：B 回收站保留文件夹内 2 个文件内容
+        let trash = dB.path().join(fs_ops::TRASH_DIR);
+        let contents: Vec<Vec<u8>> = std::fs::read_dir(&trash)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .filter_map(|e| std::fs::read(e.path()).ok())
+            .collect();
+        for expect in ["一".as_bytes().to_vec(), "二".as_bytes().to_vec()] {
+            assert!(contents.iter().any(|c| *c == expect), "B 回收站缺内容: {expect:?}");
+        }
+
+        // 终态：三端快照一致（文件夹内笔记全没了，根级附件都在）
+        let snap_phone = vault_snapshot(phone_dir.path());
+        assert_eq!(snap_phone, vault_snapshot(dA.path()));
+        assert_eq!(snap_phone, vault_snapshot(dB.path()));
+        assert!(snap_phone.iter().all(|(k, _)| !k.starts_with(&f.path)));
+        assert!(snap_phone.contains_key(&asset));
+    }
+
+    /// 回收站恢复（mtime 保留旧值）→ 删除仍然有效：再软删，不复活
+    #[test]
+    fn stale_restore_from_trash_keeps_deletion() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "恢复笔记").unwrap();
+        note_write_op(&phone, &p.path, "内容甲").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+
+        // 删除 + 同步（服务器 tombstone）
+        let trash_path = entry_delete_op(&deskA, &p.path).unwrap();
+        let del_ms = load_tombstones(dA.path())
+            .into_iter()
+            .find(|t| t.path == p.path)
+            .unwrap()
+            .mtime_ms;
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+
+        // 从回收站恢复（fs::rename，mtime 保留删除前 < del_ms）
+        let abs = dA.path().join(&p.path);
+        std::fs::rename(dA.path().join(&trash_path), &abs).unwrap();
+        assert!(crate::sync::meta_mtime_ms(&abs) <= del_ms, "恢复文件 mtime 应保留旧值");
+
+        // 回合：陈旧恢复 → 再软删（删除仍有效），不推不拉
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.pushed.iter().all(|x| x != &p.path), "陈旧恢复不得推送: {r:?}");
+        assert!(!abs.exists(), "应再软删");
+        // 服务器也仍然没有
+        assert!(!phone_dir.path().join(&p.path).exists());
+    }
+
+    /// 恢复后再编辑（mtime > 删除时刻）→ D4 复活，推送服务器
+    #[test]
+    fn restore_and_edit_resurrects() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "恢复编辑笔记").unwrap();
+        note_write_op(&phone, &p.path, "内容甲").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 删除 + 同步；恢复 + 编辑（mtime 新）
+        let trash_path = entry_delete_op(&deskA, &p.path).unwrap();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let abs = dA.path().join(&p.path);
+        std::fs::rename(dA.path().join(&trash_path), &abs).unwrap();
+        note_write_op(&deskA, &p.path, "恢复后的编辑").unwrap(); // 编辑 → mtime = now > 删除时刻
+
+        // A 回合：D4 清 tombstone + 推送复活
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.pushed.iter().any(|x| x == &p.path), "应推送复活: {r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&p.path)).unwrap(), "恢复后的编辑");
+        // B 回合：拉取
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.pulled.iter().any(|x| x == &p.path), "{r:?}");
+        assert_eq!(std::fs::read_to_string(dB.path().join(&p.path)).unwrap(), "恢复后的编辑");
+    }
+
+    /// 重命名 = 旧路径删除传播 + 新路径推送（内容保留，铁律）
+    #[test]
+    fn rename_propagates_old_path_deletion() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "改名前").unwrap();
+        note_write_op(&phone, &p.path, "保留的内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+
+        let (dA, deskA) = client_vault();
+        let (dB, deskB) = client_vault();
+        let _ = sync_round(&deskA, &profile_a).unwrap();
+        let _ = sync_round(&deskB, &profile_b).unwrap();
+
+        // A 重命名
+        let new_rel = entry_rename_op(&deskA, &p.path, "改名后").unwrap();
+        assert_ne!(new_rel, p.path);
+        assert!(load_tombstones(dA.path()).iter().any(|t| t.path == p.path), "旧路径应记 tombstone");
+
+        // A 回合：旧路径 /delete + 新路径推送
+        let r = sync_round(&deskA, &profile_a).unwrap();
+        assert!(r.deleted.iter().any(|x| x == &p.path), "旧路径应传播删除: {r:?}");
+        assert!(r.pushed.iter().any(|x| x == &new_rel), "新路径应推送: {r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!phone_dir.path().join(&p.path).exists(), "服务器旧路径应消失");
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&new_rel)).unwrap(), "保留的内容");
+
+        // B 回合：旧路径软删 + 新路径拉取
+        let r = sync_round(&deskB, &profile_b).unwrap();
+        assert!(r.deleted.iter().any(|x| x == &p.path), "{r:?}");
+        assert!(!dB.path().join(&p.path).exists());
+        assert_eq!(std::fs::read_to_string(dB.path().join(&new_rel)).unwrap(), "保留的内容");
+        // 铁律：B 回收站保留旧路径内容
+        let trash = dB.path().join(fs_ops::TRASH_DIR);
+        let kept = std::fs::read_dir(&trash)
+            .unwrap()
+            .flatten()
+            .any(|e| {
+                e.path().is_file()
+                    && std::fs::read_to_string(e.path())
+                        .map(|c| c == "保留的内容")
+                        .unwrap_or(false)
+            });
+        assert!(kept, "B 回收站应保留旧路径内容");
+    }
+
+    /// 旧服务器（无 /tombstones）→ 404 按空列表处理，不报错
+    #[test]
+    fn fetch_tombstones_404_degrades_to_empty() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                listener.set_nonblocking(true).unwrap();
+                let tl = tokio::net::TcpListener::from_std(listener).unwrap();
+                // 空路由 = 模拟旧服务器（任何路径 404）
+                let _ = axum::serve(tl, axum::Router::new()).await;
+            });
+        });
+        let c = client();
+        let base = format!("http://127.0.0.1:{port}");
+        // 等就绪
+        for _ in 0..40 {
+            if c.get(format!("{base}/api/v1/info")).send().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let ts = fetch_tombstones(&c, &base, "any-token").unwrap();
+        assert!(ts.is_empty(), "404 必须按空列表处理");
     }
 
     #[test]
