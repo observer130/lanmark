@@ -29,10 +29,23 @@ export interface SyncPairingInfo {
   pairingCode: string;
 }
 
+/** 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本（M3c，docs/07 §3/§6） */
+export interface MergeEvent {
+  path: string;
+  /** "local" | "server" */
+  winner: string;
+  /** 输家副本落成的原路径（进目录树，可点击打开） */
+  loserCopy: string;
+  winnerMtimeMs: number;
+  /** 0 = 未知 */
+  loserMtimeMs: number;
+}
+
 export interface SyncReport {
   pulled: string[];
   pushed: string[];
-  conflicts: string[];
+  merges: MergeEvent[];
+  deleted: string[];
   skipped: number;
   errors: string[];
 }

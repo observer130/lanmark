@@ -76,13 +76,29 @@ pub struct PullResponse {
     pub missing: Vec<(String, String)>,
 }
 
+/// 一次 LWW 自动合并（docs/07 §3/§6）：较新版留原路径，较旧版降级为可见冲突副本。
+/// 报告仅 IPC 消费（非 wire 字段）；UI 据此展示「自动合并 N（较新留原名）」明细。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeEvent {
+    pub path: String,
+    /// "local" | "server"
+    pub winner: String,
+    /// 输家副本落成的原路径（进目录树，可点击打开）
+    pub loser_copy: String,
+    pub winner_mtime_ms: i64,
+    /// 0 = 未知（如服务器侧被仲裁保留的旧版本 mtime 未随 wire 回传）
+    pub loser_mtime_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncReport {
     pub pulled: Vec<String>,
     pub pushed: Vec<String>,
-    /// 冲突副本（服务器版本在本地落成的 <stem>-冲突<mmdd-HHMM>.md）
-    pub conflicts: Vec<String>,
+    /// LWW 自动合并明细（M3c；M2 的 Vec<String> 冲突列表由此取代）
+    #[serde(default)]
+    pub merges: Vec<MergeEvent>,
     /// 已同步的删除（本地软删 / 服务器 /delete，均进回收站，M3b）
     #[serde(default)]
     pub deleted: Vec<String>,

@@ -10,7 +10,13 @@ import {
   Trash2,
 } from "lucide-react";
 import { useSyncStore } from "../stores/sync";
+import { useVaultStore } from "../stores/vault";
 import { isAndroid } from "../lib/sync";
+
+/** mtime(ms) → "HH:MM"（合并报告里展示输家版本的保存时间） */
+function fmtClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 /** 复制到剪贴板的小按钮 */
 function CopyButton({ text }: { text: string }) {
@@ -142,14 +148,38 @@ function ClientPanel() {
           <div className="flex flex-wrap gap-x-3 gap-y-0.5">
             <span className="text-emerald-600">拉取 {lastReport.pulled.length}</span>
             <span className="text-accent">推送 {lastReport.pushed.length}</span>
-            {lastReport.conflicts.length > 0 && (
-              <span className="text-amber-500">冲突 {lastReport.conflicts.length}</span>
+            {lastReport.merges.length > 0 && (
+              <span className="text-amber-500">
+                自动合并 {lastReport.merges.length}（较新留原名）
+              </span>
+            )}
+            {lastReport.deleted.length > 0 && (
+              <span>已同步删除 {lastReport.deleted.length}（进回收站）</span>
             )}
             <span>跳过 {lastReport.skipped}</span>
           </div>
-          {lastReport.conflicts.length > 0 && (
-            <div className="mt-1 text-amber-600">
-              冲突已保留双份：{lastReport.conflicts.join("、")}
+          {lastReport.merges.length > 0 && (
+            <div className="mt-1 space-y-0.5">
+              {lastReport.merges.map((m, i) => (
+                <div key={i} className="break-all text-amber-600">
+                  {m.path} →{" "}
+                  <button
+                    type="button"
+                    title="打开保留的较旧版本副本"
+                    className="underline decoration-dotted underline-offset-2 hover:text-amber-700"
+                    onClick={() => {
+                      void useVaultStore.getState().openNote(m.loserCopy).catch(() => {
+                        /* 副本尚未同步到本端时打开失败，静默 */
+                      });
+                    }}
+                  >
+                    副本 {m.loserCopy}
+                  </button>
+                  {m.loserMtimeMs > 0 && (
+                    <span className="text-ink-3">（保留 {fmtClock(m.loserMtimeMs)} 版）</span>
+                  )}
+                </div>
+              ))}
             </div>
           )}
           {lastReport.errors.length > 0 && (

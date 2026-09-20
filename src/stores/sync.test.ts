@@ -50,7 +50,7 @@ vi.mock("../lib/sync", () => ({
 
 import { useSyncStore } from "./sync";
 
-const REPORT = { pulled: ["b.md"], pushed: [], conflicts: [], skipped: 2, errors: [] };
+const REPORT = { pulled: ["b.md"], pushed: [], merges: [], deleted: [], skipped: 2, errors: [] };
 
 function setVaultState(patch: Partial<typeof m.vaultState>) {
   Object.assign(m.vaultState, {

@@ -506,6 +506,21 @@ fn tmp_path_for(abs: &Path) -> PathBuf {
     parent.join(format!("{name}.{}.{}.lanmark-tmp", std::process::id(), seq))
 }
 
+/// 设定文件 mtime（LWW 时间源跨端保真，docs/07 §2：裁决按「文件 mtime」而非
+/// 「服务器到达顺序」——push/pull 落地时若不保留源端保存时间，服务器侧文件
+/// mtime 会被写成落地时刻，离线早改、晚上线的设备会被晚到的旧版覆盖）。
+/// `ms <= 0` 视为无效（读不到 mtime 的退化值），跳过不覆写。best effort。
+pub fn set_file_mtime(abs: &Path, ms: i64) {
+    if ms <= 0 {
+        return;
+    }
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64);
+    let times = std::fs::FileTimes::new().set_modified(t);
+    if let Ok(f) = std::fs::File::open(abs) {
+        let _ = f.set_times(times);
+    }
+}
+
 /// 原子写（tmp+rename）。崩溃最多留一个孤儿 tmp，绝不产生截断的正式文件。
 pub fn atomic_write(abs: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = tmp_path_for(abs);

@@ -521,6 +521,10 @@ fn write_pushed_file(
                 Err(_) => fs_ops::write_note_bytes(vault, &pf.path, &bytes, conn),
             }
             .map_err(|e| format!("写入失败: {e}"))?;
+            // LWW 时间源保真（docs/07 §2）：保留源端保存时间，服务器 mtime 不得是落地时刻
+            if let Ok(abs) = fs_ops::resolve_in_vault(vault, &pf.path) {
+                fs_ops::set_file_mtime(&abs, pf.mtime_ms);
+            }
             Ok(Landed {
                 conflict_saved_as: landed.and_then(|l| l.conflict_saved_as),
                 server_hash: pf.hash.clone(),
@@ -551,6 +555,8 @@ fn write_pushed_file(
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
             }
             std::fs::write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
+            // LWW 时间源保真（docs/07 §2）：同笔记分支
+            fs_ops::set_file_mtime(&abs, pf.mtime_ms);
             // M3b D4：push 干净落盘/仲裁获胜 → 清除该路径 tombstone（笔记分支经 write_note 自动清）
             if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &pf.path) {
                 log::warn!("清 tombstone 失败 {}: {e}", pf.path);
