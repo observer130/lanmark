@@ -31,6 +31,9 @@ pub struct ServerProfile {
     pub url: String,
     #[serde(default)]
     pub token: String,
+    /// 最近一次回合成功时间（unix ms；M3e 状态 UI 展示，重启不丢）
+    #[serde(default)]
+    pub last_success_at: Option<i64>,
 }
 
 /// mDNS 发现结果
@@ -39,6 +42,16 @@ pub struct ServerProfile {
 pub struct Discovered {
     pub name: String,
     pub url: String,
+}
+
+/// 轻量探测结果（docs/07 §7：自动同步循环的眼睛；GET /info 无鉴权，3s 超时）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeResult {
+    pub online: bool,
+    pub name: String,
+    pub notes: u64,
+    pub assets: u64,
 }
 
 // ---------- 服务器配置持久化 ----------
@@ -912,7 +925,8 @@ pub async fn sync_pair(
         let mut servers = load_servers(&app);
         let hash = fs_ops::content_hash(format!("{url}{token}").as_bytes());
         let id = format!("s{}", &hash[..8]);
-        let profile = ServerProfile { id: id.clone(), name, url: normalize_url(&url)?, token };
+        let profile =
+            ServerProfile { id: id.clone(), name, url: normalize_url(&url)?, token, last_success_at: None };
         servers.retain(|s| s.url != profile.url);
         servers.push(profile.clone());
         save_servers(&app, &servers)?;
@@ -963,9 +977,78 @@ pub async fn sync_now(
         .find(|s| s.id == id)
         .ok_or_else(|| format!("未找到服务器: {id}"))?;
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || sync_round(&state, &profile))
+    let report = tauri::async_runtime::spawn_blocking(move || sync_round(&state, &profile))
         .await
         .map_err(|e| format!("同步任务失败: {e}"))?
+        .map_err(|e| e)?;
+    // M3e：回合成功 → 记最近成功时间（profile JSON 持久化，重启不丢）
+    let mut servers = load_servers(&app);
+    if let Some(s) = servers.iter_mut().find(|s| s.id == id) {
+        s.last_success_at = Some(fs_ops::now_ms());
+        let _ = save_servers(&app, &servers);
+    }
+    Ok(report)
+}
+
+/// M3 自动同步循环的轻量探测（阻塞，可单测）：GET /info（无鉴权、3s 超时）。
+/// 不读清单、不算 hash——单线程服务器上被刷请求会停摆，循环每 60s 一探测必须廉价。
+/// 网络错误/超时/非 2xx 一律 online=false（探测永不抛错：循环按退避继续）。
+pub(crate) fn probe_server(url: &str, name: &str) -> ProbeResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Info {
+        name: String,
+        notes: u64,
+        assets: u64,
+    }
+    let ok = (|| -> Option<(String, u64, u64)> {
+        let c = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(3))
+            .build()
+            .ok()?;
+        let r = c.get(format!("{url}/api/v1/info")).send().ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let i: Info = r.json().ok()?;
+        Some((i.name, i.notes, i.assets))
+    })();
+    match ok {
+        Some((name, notes, assets)) => ProbeResult { online: true, name, notes, assets },
+        None => ProbeResult { online: false, name: name.to_string(), notes: 0, assets: 0 },
+    }
+}
+
+/// Tauri 命令封装（薄层：定位 profile → blocking 线程探测）
+#[tauri::command]
+pub async fn sync_probe(app: tauri::AppHandle, id: String) -> CmdResult<ProbeResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let servers = load_servers(&app);
+        let profile = servers
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| format!("未找到服务器: {id}"))?;
+        let url = normalize_url(&profile.url)?;
+        Ok(probe_server(&url, &profile.name))
+    })
+    .await
+    .map_err(|e| format!("探测任务失败: {e}"))?
+}
+
+/// M3 P2（mDNS 连续监听兜底）：探测连续失败后 browse 到同名服务器 → 更新 url 重连。
+/// 与 pair 同纪律：normalize_url 校验 + 原子写 profile。
+#[tauri::command]
+pub fn sync_server_set_url(app: tauri::AppHandle, id: String, url: String) -> CmdResult<ServerProfile> {
+    let url = normalize_url(&url)?;
+    let mut servers = load_servers(&app);
+    let s = servers
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("未找到服务器: {id}"))?;
+    s.url = url.clone();
+    save_servers(&app, &servers)?;
+    Ok(servers.into_iter().find(|s| s.id == id).unwrap())
 }
 
 pub type CmdResult<T> = Result<T, String>;
@@ -1055,7 +1138,7 @@ mod tests {
         // 配对 → round 1：手机 → 桌面（2 文件），桌面 → 手机（1 笔记）
         let (token, name) = pair(&base, &code).unwrap();
         assert!(!name.is_empty());
-        let profile = ServerProfile { id: "s1".into(), name: name.clone(), url: base.clone(), token };
+        let profile = ServerProfile { id: "s1".into(), name: name.clone(), url: base.clone(), token, last_success_at: None };
         let r1 = sync_round(&desk, &profile).unwrap();
         assert_eq!(r1.pulled.len(), 2, "拉回笔记+附件: {:?}", r1);
         assert_eq!(r1.pushed.len(), 1, "推走桌面笔记: {:?}", r1);
@@ -1099,7 +1182,7 @@ mod tests {
 
         let (desk_dir, desk) = client_vault();
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         // 先同步让桌面拿到原始内容
         let r0 = sync_round(&desk, &profile).unwrap();
@@ -1151,7 +1234,7 @@ mod tests {
 
         let (desk_dir, desk) = client_vault();
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
 
         let r0 = sync_round(&desk, &profile).unwrap();
         assert_eq!(r0.pulled.len(), 1);
@@ -1212,8 +1295,8 @@ mod tests {
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
         // 两个客户端各用独立 id（基线按 id 隔离，模拟两台桌面）
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1272,8 +1355,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1335,8 +1418,8 @@ mod tests {
         note_write_op(&phone, &p.path, "基础版").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1417,8 +1500,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1489,8 +1572,8 @@ mod tests {
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
-        let base_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let base_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let base_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let base_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
         let _ = sync_round(&deskA, &base_a).unwrap();
         let _ = sync_round(&deskB, &base_b).unwrap();
         let stale_base = c
@@ -1544,8 +1627,8 @@ mod tests {
         note_write_op(&phone, &p.path, "内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1607,8 +1690,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1656,8 +1739,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1706,8 +1789,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (_dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1743,8 +1826,8 @@ mod tests {
         note_write_op(&phone, &p.path, "内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1777,8 +1860,8 @@ mod tests {
         note_write_op(&phone, &p.path, "旧内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1842,8 +1925,8 @@ mod tests {
         let asset = asset_save_op(&phone, &b64_encode(b"dir-asset"), "png").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1901,7 +1984,7 @@ mod tests {
         note_write_op(&phone, &p.path, "内容甲").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let _ = sync_round(&deskA, &profile_a).unwrap();
@@ -1939,8 +2022,8 @@ mod tests {
         note_write_op(&phone, &p.path, "内容甲").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1975,8 +2058,8 @@ mod tests {
         note_write_op(&phone, &p.path, "保留的内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -2055,7 +2138,7 @@ mod tests {
 
         let (desk_dir, desk) = client_vault();
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
 
         let r = sync_round(&desk, &profile).unwrap();
         assert_eq!(r.pulled, vec![asset.clone()]);
@@ -2069,7 +2152,7 @@ mod tests {
     #[test]
     fn sync_round_fails_gracefully_without_vault_or_server() {
         let (_dir, desk) = client_vault();
-        let profile = ServerProfile { id: "s".into(), name: "x".into(), url: "http://127.0.0.1:1".into(), token: "t".into() };
+        let profile = ServerProfile { id: "s".into(), name: "x".into(), url: "http://127.0.0.1:1".into(), token: "t".into(), last_success_at: None };
         let err = sync_round(&desk, &profile).unwrap_err();
         assert!(!err.is_empty());
 
@@ -2080,7 +2163,7 @@ mod tests {
         let (token, _) = pair(&base, &code).unwrap();
         // 无 vault 的 state
         let empty = Arc::new(AppState::default());
-        let profile2 = ServerProfile { id: "s".into(), name: "x".into(), url: base, token };
+        let profile2 = ServerProfile { id: "s".into(), name: "x".into(), url: base, token, last_success_at: None };
         assert!(sync_round(&empty, &profile2).is_err());
     }
 
@@ -2107,7 +2190,7 @@ mod tests {
         std::fs::write(desk_dir.path().join(foreign), [0xC4, 0xE3, 0xBA, 0xC3]).unwrap();
 
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
 
         let r = sync_round(&desk, &profile).unwrap();
         assert!(r.errors.is_empty(), "应无错误: {:?}", r.errors);
@@ -2159,6 +2242,34 @@ mod tests {
         let (files, missing) = pull_batch(&c, &base, &token, &[note.path.clone()]).unwrap();
         assert!(missing.is_empty());
         assert_eq!(files[0].hash, crate::fs_ops::content_hash("外部改过的内容".as_bytes()));
+    }
+
+    /// M3 探测：在线服务器 → online + 设备统计；离线（未监听端口）→ online=false 不抛错
+    #[test]
+    fn probe_server_online_and_offline() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        note_create_op(&phone, "", "探测笔记").unwrap();
+        let (base, _code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+
+        // 服务器线程启动有延迟，探测重试到在线（最多 2s）
+        let mut online = None;
+        for _ in 0..40 {
+            let p = probe_server(&base, "phone");
+            if p.online {
+                online = Some(p);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let p = online.expect("2s 内应探测到在线");
+        assert!(p.notes >= 1, "{p:?}");
+
+        // 离线：未监听的端口 → online=false（探测永不抛错）
+        let off = probe_server("http://127.0.0.1:1", "phone");
+        assert!(!off.online, "{off:?}");
+        assert_eq!(off.name, "phone");
     }
 
     #[test]

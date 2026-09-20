@@ -248,6 +248,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     try {
       await vault.writeNote(activePath, content);
       set({ dirty: false, savedAt: Date.now() });
+      // M3d 触发 C：保存完成 → 通知自动同步循环（轻量 CustomEvent，避免两 store 循环依赖；
+      // 循环侧 5s 尾沿后回合，docs/07 §7）
+      window.dispatchEvent(new CustomEvent("lanmark:vault-saved"));
       return true;
     } catch (e) {
       set({ error: String(e) });

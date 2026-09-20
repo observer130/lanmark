@@ -39,6 +39,8 @@ export interface VaultStatus {
   configured: boolean;
   open: boolean;
   path: string | null;
+  /** M3：桌面端自动同步开关（默认 true） */
+  syncAuto: boolean;
 }
 
 export interface PathTitle {
@@ -48,6 +50,9 @@ export interface PathTitle {
 
 export const vault = {
   status: () => invoke<VaultStatus>("vault_status"),
+  /** M3：自动同步开关（持久化到 app_config_dir/config.json） */
+  setSyncAuto: (enabled: boolean) =>
+    invoke<boolean>("vault_set_sync_auto", { enabled }),
   pickAndSet: async (mode: "open" | "create") => {
     const path = await pickFolder();
     if (!path) throw new Error("已取消选择");

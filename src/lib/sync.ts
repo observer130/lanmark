@@ -20,6 +20,16 @@ export interface ServerProfile {
   name: string;
   url: string;
   token: string;
+  /** 最近一次回合成功时间（unix ms；M3e 状态 UI） */
+  lastSuccessAt: number | null;
+}
+
+/** 轻量探测结果（M3 自动同步循环；GET /info，3s 超时） */
+export interface ProbeResult {
+  online: boolean;
+  name: string;
+  notes: number;
+  assets: number;
 }
 
 export interface SyncPairingInfo {
@@ -61,6 +71,11 @@ export const sync = {
     invoke<ServerProfile>("sync_pair", { url, code }),
   servers: () => invoke<ServerProfile[]>("sync_servers"),
   serverRemove: (id: string) => invoke<void>("sync_server_remove", { id }),
+  /** M3 P2：探测失败后 mDNS browse 到同名服务器 → 更新 url 重连 */
+  serverSetUrl: (id: string, url: string) =>
+    invoke<ServerProfile>("sync_server_set_url", { id, url }),
+  /** M3 自动同步循环：轻量在线探测 */
+  probe: (id: string) => invoke<ProbeResult>("sync_probe", { id }),
   syncNow: (id: string) => invoke<SyncReport>("sync_now", { id }),
 };
 

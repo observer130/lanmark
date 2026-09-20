@@ -11,7 +11,7 @@ use tauri::State;
 
 use crate::db;
 use crate::fs_ops::{self, Node};
-use crate::vault::{self, AppState, AppConfig};
+use crate::vault::{self, AppState};
 
 pub type CmdResult<T> = Result<T, String>;
 
@@ -33,6 +33,8 @@ pub struct VaultStatus {
     pub configured: bool,
     pub open: bool,
     pub path: Option<String>,
+    /// M3：自动同步开关（默认 true）
+    pub sync_auto: bool,
 }
 
 #[tauri::command]
@@ -43,6 +45,7 @@ pub fn vault_status(app: tauri::AppHandle, state: State<Arc<AppState>>) -> CmdRe
         configured: cfg.vault_path.is_some(),
         open,
         path: cfg.vault_path.clone(),
+        sync_auto: cfg.sync_auto,
     })
 }
 
@@ -65,12 +68,23 @@ pub async fn vault_set_path(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
         pick_and_set_op(&state, &p, &mode)?;
-        let cfg = AppConfig { vault_path: Some(path.clone()) };
+        // 读旧配置只改 vault_path：syncAuto 等既有字段不得被开库重置
+        let mut cfg = vault::load_config(&app);
+        cfg.vault_path = Some(path.clone());
         vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
         Ok(path)
     })
     .await
     .map_err(|e| format!("开库任务失败: {e}"))?
+}
+
+/// M3：自动同步开关（app_config_dir/config.json 持久化，docs/07 §7）
+#[tauri::command]
+pub fn vault_set_sync_auto(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
+    let mut cfg = vault::load_config(&app);
+    cfg.sync_auto = enabled;
+    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+    Ok(enabled)
 }
 
 /// 纯逻辑：校验目录 → 开库（对话框与配置持久化由上层负责）

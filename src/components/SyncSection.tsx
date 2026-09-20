@@ -91,7 +91,7 @@ function ServerPanel() {
   );
 }
 
-/** 桌面端面板：服务器列表 + 添加 + 立即同步 */
+/** 桌面端面板：自动同步开关 + 服务器列表 + 添加 + 立即同步 */
 function ClientPanel() {
   const {
     servers,
@@ -99,6 +99,8 @@ function ClientPanel() {
     discovering,
     syncing,
     lastReport,
+    syncAuto,
+    setSyncAuto,
     discover,
     pair,
     removeServer,
@@ -108,9 +110,34 @@ function ClientPanel() {
   const [code, setCode] = useState("");
 
   const canPair = url.trim().startsWith("http") && code.trim().length === 8;
+  const autoOn = syncAuto === true; // 尚未加载（null）按默认开渲染
 
   return (
     <div className="space-y-3 px-3">
+      {/* M3：自动同步开关（关闭时仅保留手动「立即同步」） */}
+      <div className="flex items-center justify-between gap-2 rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-ink">自动同步</div>
+          <div className="text-[11px] leading-4 text-ink-3">
+            保存后与每 60s 自动回合；应用完全关闭后无后台同步
+          </div>
+        </div>
+        <button
+          role="switch"
+          aria-checked={autoOn}
+          title={autoOn ? "关闭自动同步" : "开启自动同步"}
+          onClick={() => void setSyncAuto(!autoOn)}
+          className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+            autoOn ? "bg-accent" : "bg-ink-3/30"
+          }`}
+        >
+          <span
+            className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"
+            style={{ transform: autoOn ? "translateX(16px)" : "translateX(0)" }}
+          />
+        </button>
+      </div>
+
       {/* 已配对服务器 */}
       {servers.map((s) => (
         <div

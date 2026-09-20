@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Menu, TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
+import { useSyncStore } from "./stores/sync";
+import { isAndroid } from "./lib/sync";
 import { VaultPicker } from "./components/VaultPicker";
 import { Sidebar } from "./components/Sidebar";
 import { EditorPane } from "./components/EditorPane";
@@ -45,16 +47,29 @@ function Toast() {
 
 function App() {
   const status = useVaultStore((s) => s.status);
+  const syncAuto = useSyncStore((s) => s.syncAuto);
   const narrow = useIsNarrow();
   const [navOpen, setNavOpen] = useState(false);
 
   useEffect(() => {
     void useVaultStore.getState().init();
+    void useSyncStore.getState().loadSyncAuto();
     // 窗口关闭前尽力落盘（best effort）
     const flush = () => void useVaultStore.getState().saveNow();
     window.addEventListener("beforeunload", flush);
     return () => window.removeEventListener("beforeunload", flush);
   }, []);
+
+  // M3 自动同步循环：仅桌面端（手机是服务器，无循环）+ vault 已打开 + 开关开。
+  // 桌面应用完全关闭后无后台同步（app 模型；手机侧才是常驻中心）
+  useEffect(() => {
+    if (isAndroid() || status !== "ready" || syncAuto !== true) {
+      useSyncStore.getState().stopAutoLoop();
+      return;
+    }
+    useSyncStore.getState().startAutoLoop();
+    return () => useSyncStore.getState().stopAutoLoop();
+  }, [status, syncAuto]);
 
   if (status === "loading") {
     return (

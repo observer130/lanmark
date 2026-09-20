@@ -16,10 +16,23 @@ pub struct AppState {
     pub sync_port: Mutex<Option<u16>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+fn default_sync_auto() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub vault_path: Option<String>,
+    /// M3：桌面端自动同步开关（默认开；旧配置无此字段 → serde default，docs/07 §7）
+    #[serde(default = "default_sync_auto")]
+    pub sync_auto: bool,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self { vault_path: None, sync_auto: true }
+    }
 }
 
 pub fn config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -54,10 +67,17 @@ mod tests {
 
     #[test]
     fn config_roundtrip() {
-        let cfg = AppConfig { vault_path: Some("/tmp/vault".into()) };
+        let cfg = AppConfig { vault_path: Some("/tmp/vault".into()), sync_auto: false };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.vault_path.as_deref(), Some("/tmp/vault"));
+        assert!(!back.sync_auto);
         assert_eq!(AppConfig::default().vault_path, None);
+        assert!(AppConfig::default().sync_auto, "默认开");
+        // M2 旧配置（无 syncAuto 字段）→ 默认 true，不丢 vault_path
+        let legacy = r#"{"vaultPath": "/tmp/vault"}"#;
+        let back: AppConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.vault_path.as_deref(), Some("/tmp/vault"));
+        assert!(back.sync_auto, "旧配置兼容：syncAuto 默认 true");
     }
 }
