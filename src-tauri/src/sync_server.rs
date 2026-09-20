@@ -108,12 +108,20 @@ fn gen_token(code: &str) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// 服务器侧同步改动 vault 后发给前端的事件名（前端 App.tsx 监听；
+/// 仅手机端会触发——服务器只在 Android 上启动，桌面端回合后自行刷新）
+pub const VAULT_CHANGED_EVENT: &str = "lanmark:vault-changed";
+
 /// 服务器上下文：AppState + 内存中的 sync 配置（落盘 .lanmark/sync.json）
 pub struct ServerCtx {
     pub app: Arc<AppState>,
     pub cfg: Mutex<SyncConfig>,
     /// /pair 爆破保护：连续失败计数 + 锁定截止时间
     pair_guard: Mutex<PairGuard>,
+    /// M3f：push 落盘/delete 生效后通知前端刷新（手机 UI 无客户端循环）；
+    /// 生产由 spawn 从 AppState.sync_notify 取（Tauri setup 注册的 emit 闭包），
+    /// 测试注入计数器或保持 None（无操作）
+    ui_notify: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Default)]
@@ -128,7 +136,25 @@ const PAIR_LOCK_SECS: u64 = 60;
 
 impl ServerCtx {
     pub fn new(app: Arc<AppState>, cfg: SyncConfig) -> Self {
-        Self { app, cfg: Mutex::new(cfg), pair_guard: Mutex::new(PairGuard::default()) }
+        Self {
+            app,
+            cfg: Mutex::new(cfg),
+            pair_guard: Mutex::new(PairGuard::default()),
+            ui_notify: None,
+        }
+    }
+
+    /// 注入 UI 刷新通知（生产：spawn 从 AppState.sync_notify 取，桌面/测试无 Tauri 环境时为 None）
+    pub fn with_ui_notify(mut self, f: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
+        self.ui_notify = f;
+        self
+    }
+
+    /// 服务器侧同步改动了 vault（push 落盘 / delete 生效）→ 通知前端刷新
+    fn notify_ui(&self) {
+        if let Some(f) = &self.ui_notify {
+            f();
+        }
     }
 
     fn vault(&self) -> Result<PathBuf, String> {
@@ -383,6 +409,10 @@ async fn push(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
         .map_err(|(s, m)| (s, m))?;
+    // M3f：有成功落盘 = vault 已变更 → 通知手机端 UI 刷新（树/最近/当前笔记）
+    if results.iter().any(|r| r.ok) {
+        ctx.notify_ui();
+    }
     Ok(Json(results))
 }
 
@@ -625,6 +655,10 @@ async fn delete_files(
         tokio::task::spawn_blocking(move || delete_blocking(&app, &body.paths))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
+    // M3f：有成功删除 = vault 已变更 → 通知手机端 UI 刷新（否则目录仍列已删笔记）
+    if results.iter().any(|r| r.ok) {
+        ctx.notify_ui();
+    }
     Ok(Json(results))
 }
 
@@ -720,7 +754,9 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     // 保留一份 app 引用给线程退出路径复位 sync_port（否则服务器死后
     // UI 仍报 running，且 spawn 幂等早退无法自愈）
     let app_for_cleanup = Arc::clone(&app);
-    let ctx = Arc::new(ServerCtx::new(app, cfg));
+    // M3f：UI 刷新通知（Tauri setup 注册的 emit 闭包；测试直接建 ctx 时为 None = 无操作）
+    let ui_notify = app.sync_notify.lock().map_err(|_| "sync_notify 锁中毒".to_string())?.clone();
+    let ctx = Arc::new(ServerCtx::new(app, cfg).with_ui_notify(ui_notify));
 
     // mDNS 广播（best effort；Android 需 multicast lock，失败不阻断服务器）
     let mdns_name = {
@@ -989,6 +1025,93 @@ mod tests {
             .send()
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "新库 token 应可用");
+    }
+
+    /// M3f 回归：服务器侧 push 落盘 / delete 生效后必须通知前端刷新
+    /// （修复前：移动端目录仍列远端已删的笔记，点击报「笔记不存在」）
+    #[test]
+    fn push_and_delete_notify_ui_on_change() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (port, listener) = bind_listener().unwrap();
+        let cfg = load_sync_config(dir.path());
+        let code = cfg.pairing_code.clone();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let ctx = Arc::new(
+            ServerCtx::new(app, cfg)
+                .with_ui_notify(Some(Arc::new(move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }))),
+        );
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let _ = serve_on(listener, ctx).await;
+            });
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::blocking::Client::new();
+        wait_ready(&client, &base);
+        let paired: serde_json::Value = client
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": code }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        let auth = format!("Bearer {}", paired["token"].as_str().unwrap());
+        let read_hits = || hits.load(std::sync::atomic::Ordering::SeqCst);
+
+        // push 新笔记 → 成功 → 通知一次
+        let r: Vec<PushResult> = client
+            .post(format!("{base}/api/v1/push"))
+            .header("authorization", auth.clone())
+            .json(&json!({ "files": [{
+                "path": "notify.md",
+                "kind": "note",
+                "contentBase64": b64_encode(b"hello"),
+                "hash": fs_ops::content_hash(b"hello"),
+                "baseHash": "",
+                "mtimeMs": fs_ops::now_ms(),
+            }] }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert!(r[0].ok, "push 应成功: {:?}", r[0].error);
+        assert!(dir.path().join("notify.md").is_file(), "文件应落盘");
+        assert_eq!(read_hits(), 1, "成功 push 应恰好通知一次");
+
+        // delete → 成功 → 再通知一次
+        let r: Vec<PushResult> = client
+            .post(format!("{base}/api/v1/delete"))
+            .header("authorization", auth.clone())
+            .json(&json!({ "paths": ["notify.md"] }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert!(r[0].ok, "delete 应成功: {:?}", r[0].error);
+        assert!(!dir.path().join("notify.md").exists(), "文件应入回收站");
+        assert_eq!(read_hits(), 2);
+
+        // 删不存在的路径 → 全部失败 → 不通知
+        let r: Vec<PushResult> = client
+            .post(format!("{base}/api/v1/delete"))
+            .header("authorization", auth)
+            .json(&json!({ "paths": ["ghost.md"] }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert!(!r[0].ok, "删不存在文件应失败");
+        assert_eq!(read_hits(), 2, "全失败不应通知");
     }
 
     #[test]

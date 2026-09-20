@@ -1,7 +1,7 @@
 //! Vault 全局配置（app_config_dir/config.json）与运行时状态。
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,11 @@ pub struct AppState {
     /// M3e：最近一次客户端回合触达同步服务器的时间（unix ms，0 = 从未；
     /// /manifest 是每回合签名动作，服务器 handler 更新；手机端面板展示）
     pub last_sync_round_at: std::sync::atomic::AtomicI64,
+    /// M3f：服务器侧同步改动 vault（push 落盘/delete 生效）→ UI 刷新回调。
+    /// Tauri setup 注册（经 AppHandle emit 事件）；手机是服务器、无客户端循环，
+    /// 不通知则目录仍列远端已删笔记（点击报「笔记不存在」）。
+    /// 测试用 AppState::default() = None = 无操作。
+    pub sync_notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 fn default_sync_auto() -> bool {

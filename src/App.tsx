@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Menu, TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
 import { useSyncStore } from "./stores/sync";
@@ -58,6 +59,36 @@ function App() {
     const flush = () => void useVaultStore.getState().saveNow();
     window.addEventListener("beforeunload", flush);
     return () => window.removeEventListener("beforeunload", flush);
+  }, []);
+
+  // M3f：手机端是同步服务器，远端 push/delete 会改动本地 vault（Rust 侧
+  // 成功后 emit lanmark:vault-changed）。手机无客户端循环（桌面 runRound
+  // 回合后自行刷新，且桌面不启动服务器），不刷新则目录仍列远端已删的
+  // 笔记，点击报「笔记不存在」
+  useEffect(() => {
+    const apply = () => void useVaultStore.getState().remoteChanged();
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listen("lanmark:vault-changed", apply).then((u) => {
+      if (disposed) u();
+      else unlisten = u;
+    });
+    // 熄屏兜底：同步发生在 WebView 暂停期间时事件可能丢失 → 回前台补刷
+    // （仅 Android；桌面由自动循环触发器 D 覆盖）。3s 防抖避免事件与可见性连发
+    let last = 0;
+    const onVis = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - last < 3000) return;
+      last = now;
+      apply();
+    };
+    if (isAndroid()) document.addEventListener("visibilitychange", onVis);
+    return () => {
+      disposed = true;
+      unlisten?.();
+      if (isAndroid()) document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
   // M3 自动同步循环：仅桌面端（手机是服务器，无循环）+ vault 已打开 + 开关开。

@@ -199,3 +199,48 @@ describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
     expect(favorites).toHaveBeenCalled();
   });
 });
+
+describe("M3f 远端同步改动刷新（remoteChanged）", () => {
+  it("vault 未打开 → 无操作", async () => {
+    useVaultStore.setState({ status: "unconfigured" });
+    await useVaultStore.getState().remoteChanged();
+    expect(tree).not.toHaveBeenCalled();
+    expect(readNote).not.toHaveBeenCalled();
+  });
+
+  it("刷新树与 meta", async () => {
+    tree.mockResolvedValueOnce([{ path: "b.md", kind: "note", name: "b.md", title: null }]);
+    await useVaultStore.getState().remoteChanged();
+    expect(tree).toHaveBeenCalled();
+    expect(recents).toHaveBeenCalled();
+    expect(useVaultStore.getState().tree).toHaveLength(1);
+  });
+
+  it("打开中的笔记（未编辑）被远端更新 → 内容重载", async () => {
+    useVaultStore.setState({ activePath: "a.md", content: "旧版", dirty: false });
+    readNote.mockResolvedValueOnce({ content: "新版", title: "a.md" });
+    await useVaultStore.getState().remoteChanged();
+    const s = useVaultStore.getState();
+    expect(s.content).toBe("新版");
+    expect(s.dirty).toBe(false);
+  });
+
+  it("打开中的笔记在编辑（dirty）→ 不动内容，防吞掉进行中的输入", async () => {
+    useVaultStore.setState({ activePath: "a.md", content: "输入中", dirty: true });
+    await useVaultStore.getState().remoteChanged();
+    const s = useVaultStore.getState();
+    expect(s.content).toBe("输入中");
+    expect(s.dirty).toBe(true);
+    expect(readNote).not.toHaveBeenCalled();
+  });
+
+  it("打开中的笔记被远端删除（读失败）→ 保留当前状态、不报错", async () => {
+    useVaultStore.setState({ activePath: "a.md", content: "最后内容", dirty: false });
+    readNote.mockRejectedValueOnce(new Error("笔记不存在"));
+    await useVaultStore.getState().remoteChanged();
+    const s = useVaultStore.getState();
+    expect(s.activePath).toBe("a.md");
+    expect(s.content).toBe("最后内容");
+    expect(s.error).toBeNull();
+  });
+});

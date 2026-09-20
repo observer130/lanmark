@@ -63,6 +63,17 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let state = app.state::<Arc<AppState>>().inner().clone();
+            // M3f：同步服务器改动 vault（push 落盘/delete 生效）→ 推事件让前端刷新。
+            // 手机端是服务器、无客户端循环（桌面 runRound 回合后自行刷新，且桌面不启动服务器）
+            if let Ok(mut slot) = state.sync_notify.lock() {
+                let nh = handle.clone();
+                *slot = Some(Arc::new(move || {
+                    let _ = nh.emit(
+                        sync_server::VAULT_CHANGED_EVENT,
+                        serde_json::json!({ "source": "sync" }),
+                    );
+                }));
+            }
             tauri::async_runtime::spawn(async move {
                 let cfg = vault::load_config(&handle);
                 if let Some(p) = cfg.vault_path.filter(|p| !p.is_empty()) {

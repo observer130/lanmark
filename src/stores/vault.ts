@@ -33,6 +33,8 @@ interface VaultStore {
   refreshTree: () => Promise<void>;
   refreshMeta: () => Promise<void>;
   reindex: () => Promise<void>;
+  /** M3f：远端同步改动后刷新（服务器侧 push 落盘 / delete 生效 → Rust 推事件） */
+  remoteChanged: () => Promise<void>;
   openNote: (path: string, silent?: boolean) => Promise<void>;
   closeNote: () => Promise<void>;
   setContent: (content: string) => void;
@@ -182,6 +184,29 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       await get().refreshMeta();
     } catch (e) {
       set({ error: String(e) });
+    }
+  },
+
+  /** 远端同步改动后刷新（手机端是服务器、无客户端循环：不刷新则目录仍列
+   * 远端已删的笔记，点击报「笔记不存在」）。DB 已由服务器侧 handler 维护
+   * （write_note upsert / remove_prefix 清三表），此处只重取树与 meta；
+   * 当前打开的笔记若未在编辑则重载内容，防陈旧内容被下一次输入覆盖
+   * （与桌面 runRound 同守卫）；读失败（远端已删）保留当前状态——
+   * 用户编辑保存后按 LWW edit/delete 复活（docs/07 §4.2） */
+  remoteChanged: async () => {
+    if (get().status !== "ready") return;
+    await get().refreshTree();
+    await get().refreshMeta();
+    const s = get();
+    if (s.activePath && !s.dirty) {
+      try {
+        const { content } = await vault.readNote(s.activePath);
+        if (content !== s.content) {
+          set({ content, dirty: false, savedAt: Date.now() });
+        }
+      } catch {
+        // 笔记被远端删除：保留当前状态
+      }
     }
   },
 
