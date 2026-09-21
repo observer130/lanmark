@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { FileText, FolderPlus, History, Plus, RefreshCw, Search, Star } from "lucide-react";
+import { FolderPlus, History, Plus, RefreshCw, Search, Star } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { TreeView } from "./TreeView";
 import { SyncSection } from "./SyncSection";
+import { CreateDialog } from "./CreateDialog";
+import { dragWindow, isLinuxDesktop } from "./WindowControls";
 import type { PathTitle } from "../lib/vault";
 
 function SectionLabel({ children }: { children: string }) {
@@ -50,10 +52,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     searchResults,
     recents,
     favorites,
-    activePath,
     openNote,
-    createNote,
-    createFolder,
+    openCreate,
     doSearch,
     reindex,
   } = useVaultStore();
@@ -84,8 +84,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-side">
-      {/* 头部 */}
-      <div className="flex items-center gap-2 px-3 py-3">
+      {/* 头部（Linux 无边框窗口：空白处可拖拽窗口，双击最大化） */}
+      <div
+        onMouseDown={isLinuxDesktop ? dragWindow : undefined}
+        className="flex items-center gap-2 px-3 py-3"
+      >
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent text-sm font-bold text-white shadow-slider">
           L
         </div>
@@ -155,22 +158,23 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             <SectionLabel>最近</SectionLabel>
             <MetaList items={recents} onOpen={openNoteAndClose} />
 
-            {/* 笔记本树：新建入口统一在标题右侧（交互修正，见 design/direction-approved.md） */}
+            {/* 笔记本树：新建入口统一在标题右侧（交互修正，见 design/direction-approved.md）；
+                点击弹对话框（命名 + 配色 / 选位置），不再「先建默认名再内联重命名」 */}
             <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
               <span className="text-[11px] font-medium text-ink-3">笔记本</span>
               <span className="flex gap-0.5">
                 <button
-                  title="在根目录新建笔记"
+                  title="新建笔记"
                   className="flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink"
-                  onClick={() => void createNote("")}
+                  onClick={() => openCreate("note", "")}
                 >
                   <Plus size={12} />
                   笔记
                 </button>
                 <button
-                  title="在根目录新建文件夹"
+                  title="新建文件夹"
                   className="flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink"
-                  onClick={() => void createFolder("")}
+                  onClick={() => openCreate("folder", "")}
                 >
                   <FolderPlus size={12} />
                   文件夹
@@ -182,17 +186,12 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         )}
       </div>
 
-      {/* M2 同步：手机=同步中心状态/配对码，桌面=服务器列表/立即同步 */}
-      <div className="border-t border-line px-2 pb-3 pt-1">
-        <SyncSection />
-      </div>
+      {/* M2 同步（方案 B 收纳，design/direction-approved.md）：
+          常驻只剩一行（状态+开关+同步），管理/配对在点击行后的上拉面板里 */}
+      <SyncSection />
 
-      {activePath && (
-        <div className="flex items-center gap-1.5 border-t border-line px-3 py-2 text-[11px] text-ink-3">
-          <FileText size={12} />
-          <span className="min-w-0 truncate">{activePath}</span>
-        </div>
-      )}
+      {/* 新建笔记 / 新建文件夹 / 文件夹配色 对话框 */}
+      <CreateDialog />
     </aside>
   );
 }

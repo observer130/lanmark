@@ -3,6 +3,7 @@ import { FolderOpen, FolderPlus, Home, Keyboard } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { useSyncStore } from "../stores/sync";
 import { isAndroid } from "../lib/sync";
+import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./WindowControls";
 
 /**
  * 首启选库。桌面走系统文件夹选择器；
@@ -43,8 +44,22 @@ export function VaultPicker() {
   }, [android, checkAllFilesAccess]);
 
   return (
-    <div className="flex h-screen items-center justify-center bg-canvas text-ink">
-      <div className="w-full max-w-md rounded-2xl border border-line bg-card p-8 text-center shadow-card">
+    <div
+      className="relative flex h-screen items-center justify-center bg-canvas text-ink"
+      onMouseDown={isLinuxDesktop ? dragWindow : undefined}
+    >
+      {/* Linux 无边框窗口：首启页也要有窗控/拖拽/缩放边缘（验收修正）；
+          卡片标记 data-no-drag 豁免拖拽，正文文本可正常选中 */}
+      {isLinuxDesktop && (
+        <div className="absolute right-2 top-1.5 z-10">
+          <WindowControls />
+        </div>
+      )}
+      <ResizeEdges />
+      <div
+        data-no-drag
+        className="w-full max-w-md rounded-2xl border border-line bg-card p-8 text-center shadow-card"
+      >
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent text-2xl font-bold text-white shadow-slider">
           L
         </div>

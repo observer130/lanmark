@@ -21,6 +21,12 @@ interface VaultStore {
   recents: PathTitle[];
   favorites: PathTitle[];
   error: string | null;
+  /** 目录颜色（relPath → "fd1"|"fd2"|"fd3"；设备本地，存 .lanmark/folder-colors.json） */
+  folderColors: Record<string, string>;
+  /** 收起的目录（relPath 集合；按 vault 持久化到 localStorage） */
+  collapsedDirs: Set<string>;
+  /** 新建/配色对话框状态（null = 关闭） */
+  pendingCreate: { kind: "note" | "folder" | "recolor"; parentDir: string } | null;
 
   init: () => Promise<void>;
   pickVault: (mode: "open" | "create") => Promise<void>;
@@ -42,8 +48,18 @@ interface VaultStore {
   saveNow: () => Promise<boolean>;
   setEditorMode: (m: "read" | "wysiwyg" | "source") => void;
   setRenaming: (path: string | null) => void;
-  createNote: (dir: string) => Promise<void>;
-  createFolder: (dir: string) => Promise<void>;
+  /** 打开新建/配色对话框（parentDir：文件夹模式为创建位置；笔记模式为所在目录） */
+  openCreate: (kind: "note" | "folder" | "recolor", parentDir: string) => void;
+  closeCreate: () => void;
+  /** 对话框确认：创建笔记（自动补 .md / 重名自动 -2）。返回是否成功 */
+  createNoteIn: (name: string, dir: string) => Promise<boolean>;
+  /** 对话框确认：创建文件夹（可同时设颜色）。返回是否成功 */
+  createFolderIn: (name: string, dir: string, color: string | null) => Promise<boolean>;
+  /** 设置/清除目录颜色（null = 恢复默认）。返回是否成功 */
+  setFolderColor: (path: string, color: string | null) => Promise<boolean>;
+  toggleDirCollapsed: (path: string) => void;
+  /** 展开路径的全部祖先目录（打开笔记/新建文件落在收起目录里时用） */
+  expandAncestors: (path: string) => void;
   commitRename: (path: string, newName: string) => Promise<void>;
   deleteNode: (path: string) => Promise<void>;
   moveNode: (path: string, newDir: string) => Promise<void>;
@@ -51,6 +67,31 @@ interface VaultStore {
   doSearch: (q: string) => Promise<void>;
   clearError: () => void;
 }
+
+/* ── 收起目录的 localStorage 持久化（按 vault 隔离） ── */
+function collapsedKey(vaultPath: string | null): string {
+  return `lanmark:collapsed-dirs:${vaultPath ?? ""}`;
+}
+
+function loadCollapsed(vaultPath: string | null): Set<string> {
+  try {
+    const raw = localStorage.getItem(collapsedKey(vaultPath));
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsed(vaultPath: string | null, set: Set<string>): void {
+  try {
+    localStorage.setItem(collapsedKey(vaultPath), JSON.stringify([...set]));
+  } catch {
+    /* 存储不可用（隐私模式等）时静默，仅本次会话生效 */
+  }
+}
+
+// 记录 collapsedDirs 已为哪个 vault 加载过，避免每次 refreshTree 重置用户操作
+let collapsedLoadedFor: string | null | undefined;
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 // openNote 单调序号：快速连开/开+关并发时，慢的旧响应不得覆盖新状态
@@ -74,6 +115,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   recents: [],
   favorites: [],
   error: null,
+  folderColors: {},
+  collapsedDirs: new Set<string>(),
+  pendingCreate: null,
 
   init: async () => {
     try {
@@ -154,8 +198,17 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   refreshTree: async () => {
     try {
-      const tree = await vault.tree();
-      set({ tree });
+      const [tree, folderColors] = await Promise.all([
+        vault.tree(),
+        vault.folderColors().catch(() => ({})),
+      ]);
+      set({ tree, folderColors: folderColors ?? {} });
+      // 换库后重载该 vault 的收起目录（每个 vault 只重载一次）
+      const vp = get().vaultPath;
+      if (collapsedLoadedFor !== vp) {
+        collapsedLoadedFor = vp;
+        set({ collapsedDirs: loadCollapsed(vp) });
+      }
     } catch (e) {
       set({ error: String(e) });
     }
@@ -294,28 +347,73 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   setRenaming: (path) => set({ renamingPath: path }),
 
-  createNote: async (dir) => {
+  openCreate: (kind, parentDir) => set({ pendingCreate: { kind, parentDir } }),
+  closeCreate: () => set({ pendingCreate: null }),
+
+  createNoteIn: async (name, dir) => {
     try {
-      const node = await vault.createNote(dir, "未命名");
+      const node = await vault.createNote(dir, name);
       await get().refreshTree();
       await get().openNote(node.path);
-      set({ renamingPath: node.path });
+      get().expandAncestors(node.path);
+      return true;
     } catch (e) {
       set({ error: String(e) });
+      return false;
     }
   },
 
-  createFolder: async (dir) => {
-    const before = new Set(get().tree.map((n) => n.path));
+  createFolderIn: async (name, dir, color) => {
     try {
-      await vault.createFolder(dir, "新建文件夹");
-      const fresh = await vault.tree();
-      // 用前后快照差集定位新建项（startsWith 匹配会误中旧的「新建文件夹」）
-      const created = fresh.find((n) => n.kind === "folder" && !before.has(n.path));
-      set({ tree: fresh, ...(created ? { renamingPath: created.path } : {}) });
+      const node = await vault.createFolder(dir, name);
+      if (color) await vault.setFolderColor(node.path, color);
+      await get().refreshTree();
+      get().expandAncestors(node.path);
+      return true;
     } catch (e) {
       set({ error: String(e) });
+      return false;
     }
+  },
+
+  setFolderColor: async (path, color) => {
+    // 乐观更新，失败回滚由错误提示兜底
+    const prev = get().folderColors;
+    const next = { ...prev };
+    if (color) next[path] = color;
+    else delete next[path];
+    set({ folderColors: next });
+    try {
+      await vault.setFolderColor(path, color);
+      return true;
+    } catch (e) {
+      set({ folderColors: prev, error: String(e) });
+      return false;
+    }
+  },
+
+  toggleDirCollapsed: (path) => {
+    const next = new Set(get().collapsedDirs);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    saveCollapsed(get().vaultPath, next);
+    set({ collapsedDirs: next });
+  },
+
+  expandAncestors: (path) => {
+    const segs = path.split("/");
+    const next = new Set(get().collapsedDirs);
+    let changed = false;
+    for (let i = 1; i < segs.length; i++) {
+      const dir = segs.slice(0, i).join("/");
+      if (next.has(dir)) {
+        changed = true;
+        next.delete(dir);
+      }
+    }
+    if (!changed) return;
+    saveCollapsed(get().vaultPath, next);
+    set({ collapsedDirs: next });
   },
 
   commitRename: async (path, newName) => {

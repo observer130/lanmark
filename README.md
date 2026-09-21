@@ -38,6 +38,11 @@ scripts/make-demo-vault.sh    # → ~/lanmark-demo-vault（中文笔记/图片/f
 ```
 然后在首启页「打开现有笔记库」指向它，按「欢迎使用 Lanmark.md」里的 验收清单走一遍。
 
+Linux 桌面首选用原生启动器：`lanmark-desktop.sh` 会在缺桌面入口时自动补装
+（`scripts/install-desktop-entry.sh`，用户级 `~/.local`，把任务栏/Alt+Tab 图标
+修复为应用自有图标 —— 依赖 `tauri.conf.json` 的 `enable-gtk-app-id` 与
+`com.lanmark.app.desktop` 的 app_id 匹配）。也可手动单独执行安装脚本。
+
 ## 开发
 
 ```bash

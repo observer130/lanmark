@@ -107,6 +107,8 @@ pub fn run() {
             commands::entry_rename,
             commands::entry_move,
             commands::entry_delete,
+            commands::folder_colors,
+            commands::folder_color_set,
             commands::note_read,
             commands::note_write,
             commands::search,

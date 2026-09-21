@@ -1,27 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ChevronRight,
   FileText,
   Folder,
   FolderPlus,
+  Palette,
   Pencil,
   Star,
   Trash2,
 } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
+import { FOLDER_COLOR_VARS } from "./CreateDialog";
 import type { VaultNode } from "../lib/vault";
 
 interface Props {
   onNavigate?: () => void;
   tree: VaultNode[];
-}
-
-/* 文件夹彩色编码：按顶层目录名散列取色（绿/琥珀/蓝循环），承载「这是哪个分区」的信息 */
-const FOLDER_HUES = ["var(--c-fd-1)", "var(--c-fd-2)", "var(--c-fd-3)"];
-function folderHue(path: string): string {
-  const root = path.split("/")[0];
-  let h = 0;
-  for (let i = 0; i < root.length; i++) h = (h * 31 + root.charCodeAt(i)) >>> 0;
-  return FOLDER_HUES[h % FOLDER_HUES.length];
 }
 
 /**
@@ -100,14 +94,39 @@ export function TreeView({ tree, onNavigate }: Props) {
   const favorites = useVaultStore((s) => s.favorites);
   const renamingPath = useVaultStore((s) => s.renamingPath);
   const openNote = useVaultStore((s) => s.openNote);
-  const createNote = useVaultStore((s) => s.createNote);
-  const createFolder = useVaultStore((s) => s.createFolder);
   const commitRename = useVaultStore((s) => s.commitRename);
   const deleteNode = useVaultStore((s) => s.deleteNode);
   const toggleFavorite = useVaultStore((s) => s.toggleFavorite);
   const setRenaming = useVaultStore((s) => s.setRenaming);
 
   const favSet = new Set(favorites.map((f) => f.path));
+
+  /* ── 展开/收起（状态在 vault store：新建/打开笔记时要能展开祖先目录） ── */
+  const folderColors = useVaultStore((s) => s.folderColors);
+  const openCreate = useVaultStore((s) => s.openCreate);
+  const collapsedDirs = useVaultStore((s) => s.collapsedDirs);
+  const toggleDirCollapsed = useVaultStore((s) => s.toggleDirCollapsed);
+  const expandAncestors = useVaultStore((s) => s.expandAncestors);
+
+  // 打开的笔记藏在收起目录里时，自动展开其全部祖先（否则用户找不到刚打开的笔记）
+  useEffect(() => {
+    if (activePath) expandAncestors(activePath);
+  }, [activePath, expandAncestors]);
+
+  // 展开态过滤：tree 是 DFS 前序扁平列表（子项紧跟父目录），收起 depth=d 的
+  // 目录后，后续 depth>d 的节点整块属于其子树，直接跳过
+  let hiddenUnderDepth: number | null = null;
+  const visibleTree = tree.filter((node) => {
+    const depth = node.path.split("/").length - 1;
+    if (hiddenUnderDepth !== null) {
+      if (depth > hiddenUnderDepth) return false;
+      hiddenUnderDepth = null;
+    }
+    if (node.kind === "folder" && collapsedDirs.has(node.path)) {
+      hiddenUnderDepth = depth;
+    }
+    return true;
+  });
 
   // 右键上下文菜单（VSCode 式：新建入口在分区标题，行级操作在菜单里）
   const [menu, setMenu] = useState<{ x: number; y: number; node: VaultNode } | null>(null);
@@ -156,12 +175,14 @@ export function TreeView({ tree, onNavigate }: Props) {
           库是空的，点上方「+ 笔记」开始，或右键文件夹新建
         </li>
       )}
-      {tree.map((node) => {
+      {visibleTree.map((node) => {
         const depth = node.path.split("/").length - 1;
         const isNote = node.kind === "note";
         const isActive = node.path === activePath;
         const isRenaming = node.path === renamingPath;
         const isFav = favSet.has(node.path);
+        const isCollapsed = collapsedDirs.has(node.path);
+        const colorToken = isNote ? undefined : folderColors[node.path];
 
         return (
           <li key={node.path} className="group">
@@ -173,17 +194,37 @@ export function TreeView({ tree, onNavigate }: Props) {
               }`}
               style={{ paddingLeft: depth * 14 + 8 }}
               onClick={() => {
-                if (isNote && !isRenaming) {
+                if (isRenaming) return;
+                if (isNote) {
                   void openNote(node.path);
                   onNavigate?.();
+                } else {
+                  toggleDirCollapsed(node.path);
                 }
               }}
+              aria-expanded={isNote ? undefined : !isCollapsed}
               onContextMenu={(e) => openMenu(e, node)}
             >
+              {/* 展开/收起箭头：目录行显示，笔记行占位对齐（VS Code 式） */}
+              <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                {!isNote && (
+                  <ChevronRight
+                    size={13}
+                    className={`text-ink-3 transition-transform ${
+                      isCollapsed ? "" : "rotate-90"
+                    }`}
+                  />
+                )}
+              </span>
+
               {isNote ? (
                 <FileText size={14} className="shrink-0 text-ink-3" />
               ) : (
-                <Folder size={15} className="shrink-0" style={{ color: folderHue(node.path) }} />
+                <Folder
+                  size={15}
+                  className="shrink-0"
+                  style={colorToken ? { color: FOLDER_COLOR_VARS[colorToken] } : undefined}
+                />
               )}
 
               {isRenaming ? (
@@ -198,13 +239,15 @@ export function TreeView({ tree, onNavigate }: Props) {
                 <span className="min-w-0 flex-1 truncate text-sm">{node.name}</span>
               )}
 
+              {/* 行内操作：h-5 w-5 与文本行高一致——曾用 p-1（21px）会撑高整行，
+                  hover 时图标/文字因 items-center 下移约 0.5px（用户报障） */}
               {!isRenaming && (
-                <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+                <span className="hidden h-5 shrink-0 items-center gap-0.5 group-hover:flex">
                   {isNote && (
                     <>
                       <button
                         title={isFav ? "取消收藏" : "收藏"}
-                        className="rounded-md p-1 hover:bg-line/60"
+                        className="flex h-5 w-5 items-center justify-center rounded-md hover:bg-line/60"
                         onClick={(e) => {
                           e.stopPropagation();
                           void toggleFavorite(node.path);
@@ -217,7 +260,7 @@ export function TreeView({ tree, onNavigate }: Props) {
                       </button>
                       <button
                         title="重命名"
-                        className="rounded-md p-1 hover:bg-line/60"
+                        className="flex h-5 w-5 items-center justify-center rounded-md hover:bg-line/60"
                         onClick={(e) => {
                           e.stopPropagation();
                           setRenaming(node.path);
@@ -229,7 +272,7 @@ export function TreeView({ tree, onNavigate }: Props) {
                   )}
                   <button
                     title="删除（移入回收站）"
-                    className="rounded-md p-1 hover:bg-line/60"
+                    className="flex h-5 w-5 items-center justify-center rounded-md hover:bg-line/60"
                     onClick={(e) => {
                       e.stopPropagation();
                       void deleteNode(node.path);
@@ -258,12 +301,17 @@ export function TreeView({ tree, onNavigate }: Props) {
               <MenuItem
                 icon={FileText}
                 label="新建笔记"
-                onClick={() => closeAnd(() => void createNote(menu.node.path))}
+                onClick={() => closeAnd(() => openCreate("note", menu.node.path))}
               />
               <MenuItem
                 icon={FolderPlus}
                 label="新建文件夹"
-                onClick={() => closeAnd(() => void createFolder(menu.node.path))}
+                onClick={() => closeAnd(() => openCreate("folder", menu.node.path))}
+              />
+              <MenuItem
+                icon={Palette}
+                label="设置颜色…"
+                onClick={() => closeAnd(() => openCreate("recolor", menu.node.path))}
               />
               <div className="my-1 h-px bg-line" />
             </>

@@ -4,6 +4,7 @@ import { Menu, TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
 import { useSyncStore } from "./stores/sync";
 import { isAndroid } from "./lib/sync";
+import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./components/WindowControls";
 import { VaultPicker } from "./components/VaultPicker";
 import { Sidebar } from "./components/Sidebar";
 import { EditorPane } from "./components/EditorPane";
@@ -104,7 +105,17 @@ function App() {
 
   if (status === "loading") {
     return (
-      <div className="flex h-screen items-center justify-center bg-canvas text-ink-2">
+      // Linux 无边框窗口：loading 屏也要有窗控/拖拽/缩放边缘（验收修正）
+      <div
+        className="relative flex h-screen items-center justify-center bg-canvas text-ink-2"
+        onMouseDown={isLinuxDesktop ? dragWindow : undefined}
+      >
+        <ResizeEdges />
+        {isLinuxDesktop && (
+          <div className="absolute right-2 top-1.5 z-10">
+            <WindowControls />
+          </div>
+        )}
         <div className="text-sm">正在打开笔记库…</div>
       </div>
     );
@@ -121,7 +132,9 @@ function App() {
 
   return (
     <>
+      {/* Linux 无边框窗口（decorations:false）：四周 4px 隐形缩放边缘 */}
       <div className="relative flex h-screen bg-canvas text-ink">
+        <ResizeEdges />
         {narrow ? (
           <>
             {/* 窄屏：侧栏为覆盖式抽屉（flex 让 aside 拉满高度，内部列表才能滚动） */}

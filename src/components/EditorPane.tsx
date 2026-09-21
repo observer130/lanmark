@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { BookOpen, Check, Code, Folder, NotebookText, PenLine, Star, X } from "lucide-react";
+import { BookOpen, Check, Code, Folder, NotebookText, PenLine, Star } from "lucide-react";
 import { Crepe, CrepeFeature } from "@milkdown/crepe";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
@@ -8,6 +8,7 @@ import { markdown } from "@codemirror/lang-markdown";
 
 import { useVaultStore } from "../stores/vault";
 import { uploadFile } from "../lib/image";
+import { dragWindow, isLinuxDesktop, WindowControls } from "./WindowControls";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
 import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
 import {
@@ -225,22 +226,36 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     setContent,
     scheduleSave,
     setEditorMode,
-    closeNote,
     toggleFavorite,
     favorites,
   } = useVaultStore();
 
   if (!activePath) {
     return (
-      <main className="flex flex-1 items-center justify-center bg-canvas text-ink-2">
-        <div className="text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent-soft text-accent-text">
-            <NotebookText size={26} />
+      <main className="flex min-w-0 flex-1 flex-col bg-canvas">
+        {/* Linux 无边框窗口：未开笔记也要有拖拽区与窗控（验收修正：窗控必须永远可达）。
+            padding 与有笔记时的头部保持一致，避免开笔记前后窗控横移 */}
+        {isLinuxDesktop && (
+          <div
+            onMouseDown={dragWindow}
+            className={`flex items-center gap-2 py-2.5 ${
+              narrow ? "pl-14 pr-2" : "px-4"
+            }`}
+          >
+            <span className="flex-1" />
+            <WindowControls />
           </div>
-          <p className="text-sm">从左侧选择笔记，或点「+ 笔记」新建</p>
-          <p className="mt-1 text-xs text-ink-3">
-            粘贴图片 / 拖入图片会自动存入 assets/
-          </p>
+        )}
+        <div className="flex flex-1 items-center justify-center p-4 text-ink-2">
+          <div className="text-center">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent-soft text-accent-text">
+              <NotebookText size={26} />
+            </div>
+            <p className="text-sm">从左侧选择笔记，或点「+ 笔记」新建</p>
+            <p className="mt-1 text-xs text-ink-3">
+              粘贴图片 / 拖入图片会自动存入 assets/
+            </p>
+          </div>
         </div>
       </main>
     );
@@ -251,8 +266,11 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
 
   return (
     <main className="flex min-w-0 flex-1 flex-col bg-canvas">
-      {/* 头部：窄屏时左侧让出悬浮抽屉按钮的宽度（按钮占 12→46px），避免遮挡标题 */}
+      {/* 头部：窄屏时左侧让出悬浮抽屉按钮的宽度（按钮占 12→46px），避免遮挡标题。
+          Linux 无边框窗口（decorations:false）：头部空白即拖拽区，双击最大化；
+          右端是自绘窗控（方案 A · 头部融合，design/direction-approved.md）。 */}
       <div
+        onMouseDown={isLinuxDesktop ? dragWindow : undefined}
         className={`flex items-center gap-2 py-2.5 ${
           narrow ? "pl-14 pr-2" : "px-4"
         }`}
@@ -299,14 +317,6 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           />
         </button>
 
-        <button
-          onClick={() => closeNote()}
-          className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
-          title="关闭当前笔记"
-        >
-          <X size={15} />
-        </button>
-
         {/* 模式切换：阅读 / 所见即所得 / 源码（图标 + 悬停提示） */}
         <div className="flex shrink-0 rounded-lg bg-ink/5 p-0.5 text-xs">
           <ModeButton
@@ -328,6 +338,9 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
             onClick={() => setEditorMode("source")}
           />
         </div>
+
+        {/* Linux 无边框窗口：自绘窗控（最小化/最大化/关闭） */}
+        {isLinuxDesktop && <WindowControls />}
       </div>
 
       {/* 编辑区：内容浮在冷白画布上的白色纸卡；key 强制按笔记+模式重建编辑器 */}

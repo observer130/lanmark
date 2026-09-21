@@ -196,11 +196,41 @@ pub fn folder_create_op(state: &Arc<AppState>, dir: &str, name: &str) -> CmdResu
 }
 
 pub fn entry_rename_op(state: &Arc<AppState>, path: &str, new_name: &str) -> CmdResult<String> {
-    with_vault(state, |vault| with_db(state, |conn| fs_ops::rename_entry(vault, path, new_name, conn).map_err(|e| e.to_string())))
+    with_vault(state, |vault| {
+        with_db(state, |conn| {
+            let new_path =
+                fs_ops::rename_entry(vault, path, new_name, conn).map_err(|e| e.to_string())?;
+            // 文件夹换名 → 迁移颜色键（best effort，失败不影响重命名本身）
+            if std::fs::metadata(vault.join(&new_path))
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
+                if let Err(e) = fs_ops::migrate_folder_colors(vault, path, &new_path) {
+                    log::warn!("迁移目录颜色失败 {path} → {new_path}: {e}");
+                }
+            }
+            Ok(new_path)
+        })
+    })
 }
 
 pub fn entry_move_op(state: &Arc<AppState>, path: &str, new_dir: &str) -> CmdResult<String> {
-    with_vault(state, |vault| with_db(state, |conn| fs_ops::move_entry(vault, path, new_dir, conn).map_err(|e| e.to_string())))
+    with_vault(state, |vault| {
+        with_db(state, |conn| {
+            let new_path =
+                fs_ops::move_entry(vault, path, new_dir, conn).map_err(|e| e.to_string())?;
+            // 文件夹移动 → 迁移颜色键（best effort）
+            if std::fs::metadata(vault.join(&new_path))
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
+                if let Err(e) = fs_ops::migrate_folder_colors(vault, path, &new_path) {
+                    log::warn!("迁移目录颜色失败 {path} → {new_path}: {e}");
+                }
+            }
+            Ok(new_path)
+        })
+    })
 }
 
 pub fn entry_delete_op(state: &Arc<AppState>, path: &str) -> CmdResult<String> {
@@ -219,8 +249,32 @@ pub fn entry_delete_op(state: &Arc<AppState>, path: &str) -> CmdResult<String> {
                     }
                 }
             }
-            fs_ops::delete_entry(vault, path, conn).map_err(|e| e.to_string())
+            let trash = fs_ops::delete_entry(vault, path, conn).map_err(|e| e.to_string())?;
+            // 目录删除 → 清理颜色键（best effort）
+            if let Err(e) = fs_ops::prune_folder_colors(vault, path) {
+                log::warn!("清理目录颜色失败 {path}: {e}");
+            }
+            Ok(trash)
         })
+    })
+}
+
+/// 目录颜色表（relPath → "fd1"|"fd2"|"fd3"）
+pub fn folder_colors_op(
+    state: &Arc<AppState>,
+) -> CmdResult<std::collections::BTreeMap<String, String>> {
+    with_vault(state, |vault| {
+        fs_ops::load_folder_colors(vault).map_err(|e| e.to_string())
+    })
+}
+
+pub fn folder_color_set_op(
+    state: &Arc<AppState>,
+    path: &str,
+    color: Option<&str>,
+) -> CmdResult<()> {
+    with_vault(state, |vault| {
+        fs_ops::set_folder_color(vault, path, color).map_err(|e| e.to_string())
     })
 }
 
@@ -344,6 +398,22 @@ pub fn entry_delete(state: State<Arc<AppState>>, path: String) -> CmdResult<Stri
 }
 
 #[tauri::command]
+pub fn folder_colors(
+    state: State<Arc<AppState>>,
+) -> CmdResult<std::collections::BTreeMap<String, String>> {
+    folder_colors_op(state.inner())
+}
+
+#[tauri::command]
+pub fn folder_color_set(
+    state: State<Arc<AppState>>,
+    path: String,
+    color: Option<String>,
+) -> CmdResult<()> {
+    folder_color_set_op(state.inner(), &path, color.as_deref())
+}
+
+#[tauri::command]
 pub fn note_read(state: State<Arc<AppState>>, path: String) -> CmdResult<NoteContent> {
     note_read_op(state.inner(), &path)
 }
@@ -462,6 +532,44 @@ mod e2e_tests {
         assert_eq!(b.path, "a-b-2.md"); // 同名自动 -2
         let c = note_create_op(s, "", "CON").unwrap();
         assert_eq!(c.path, "n-CON.md"); // Windows 保留名防护
+    }
+
+    #[test]
+    fn folder_colors_set_migrate_prune() {
+        let (_dir, state) = opened_vault();
+        let s = &state;
+        let folder = folder_create_op(s, "", "工作").unwrap();
+        folder_create_op(s, "工作", "面试").unwrap();
+
+        // 上色 + 读回
+        folder_color_set_op(s, "工作", Some("fd2")).unwrap();
+        folder_color_set_op(s, "工作/面试", Some("fd3")).unwrap();
+        let colors = folder_colors_op(s).unwrap();
+        assert_eq!(colors.get("工作").map(String::as_str), Some("fd2"));
+        assert_eq!(colors.get("工作/面试").map(String::as_str), Some("fd3"));
+
+        // 非法 token / 给笔记上色 → 拒绝
+        assert!(folder_color_set_op(s, "工作", Some("fd9")).is_err());
+        let note = note_create_op(s, "工作", "纪要").unwrap();
+        assert!(folder_color_set_op(s, &note.path, Some("fd1")).is_err());
+
+        // 重命名 → 颜色键随迁移（含子孙目录）
+        let new_path = entry_rename_op(s, "工作", "职场").unwrap();
+        let colors = folder_colors_op(s).unwrap();
+        assert_eq!(colors.get("职场").map(String::as_str), Some("fd2"));
+        assert_eq!(colors.get("职场/面试").map(String::as_str), Some("fd3"));
+        assert!(!colors.contains_key("工作"));
+        assert!(with_vault(s, |vault| Ok(vault.join(&new_path).is_dir())).unwrap());
+
+        // 删除 → 键清理（空表连文件一起清）
+        entry_delete_op(s, "职场").unwrap();
+        let colors = folder_colors_op(s).unwrap();
+        assert!(colors.is_empty());
+        let colors_file =
+            with_vault(s, |vault| Ok(vault.join(".lanmark/folder-colors.json"))).unwrap();
+        assert!(!colors_file.exists());
+        assert!(search_op(s, "纪要").is_ok()); // 索引仍可用（健全性）
+        let _ = folder; let _ = note;
     }
 
     #[test]

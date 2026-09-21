@@ -10,4 +10,10 @@ if [ "--build" = "$1" ] || [ ! -x "$BIN" ]; then
   (cd "$WS" && pnpm tauri build --no-bundle)
 fi
 
+# 任务栏图标/启动器入口缺失时补装一次（用户级 ~/.local，无需 root；
+# KDE Wayland 靠 com.lanmark.app.desktop 匹配 app_id 才能显示应用图标）
+if [ ! -f "$HOME/.local/share/applications/com.lanmark.app.desktop" ]; then
+  "$WS/scripts/install-desktop-entry.sh" "$BIN" || true
+fi
+
 exec "$BIN" "$@"

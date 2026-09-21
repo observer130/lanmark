@@ -82,6 +82,9 @@ export const vault = {
     invoke<VaultNode>("folder_create", { dir, name }),
   rename: (path: string, newName: string) =>
     invoke<string>("entry_rename", { path, newName }),
+  folderColors: () => invoke<Record<string, string>>("folder_colors"),
+  setFolderColor: (path: string, color: string | null) =>
+    invoke<void>("folder_color_set", { path, color }),
   move: (path: string, newDir: string) =>
     invoke<string>("entry_move", { path, newDir }),
   remove: (path: string) => invoke<string>("entry_delete", { path }),

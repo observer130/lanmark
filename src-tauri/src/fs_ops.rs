@@ -105,6 +105,117 @@ pub fn ensure_layout(vault: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/* ── 目录颜色（用户手动设置，取代旧的顶层名哈希取色） ──
+   存于 .lanmark/folder-colors.json（relPath → "fd1"|"fd2"|"fd3"）。
+   .lanmark/ 不参与同步 → 颜色是设备本地偏好；键为目录相对路径，
+   重命名/移动/删除时由对应 op 负责迁移与清理。 */
+
+pub const FOLDER_COLORS_FILE: &str = "folder-colors.json";
+
+/// 合法颜色 token（与前端调色板一致；None/空 = 恢复默认无色）
+fn is_valid_color_token(c: Option<&str>) -> bool {
+    matches!(c, None | Some("") | Some("fd1") | Some("fd2") | Some("fd3"))
+}
+
+pub fn load_folder_colors(vault: &Path) -> std::io::Result<std::collections::BTreeMap<String, String>> {
+    let p = vault.join(META_DIR).join(FOLDER_COLORS_FILE);
+    let bytes = match fs::read(&p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(e),
+    };
+    // 文件损坏按空表处理（下次 set 会重写整份），不让颜色问题挡住开库
+    Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+fn write_folder_colors(
+    vault: &Path,
+    map: &std::collections::BTreeMap<String, String>,
+) -> std::io::Result<()> {
+    let dir = vault.join(META_DIR);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(FOLDER_COLORS_FILE), serde_json::to_vec(map)?)
+}
+
+pub fn set_folder_color(vault: &Path, rel: &str, color: Option<&str>) -> std::io::Result<()> {
+    if !is_valid_color_token(color) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("未知颜色 token: {color:?}"),
+        ));
+    }
+    // 仅允许给真实存在的目录上色（顺带防路径穿越与给笔记上色）
+    let abs = resolve_in_vault(vault, rel)?;
+    if !abs.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "仅目录可设置颜色",
+        ));
+    }
+    let mut map = load_folder_colors(vault)?;
+    let rel = rel_to_string(Path::new(rel));
+    match color {
+        Some("") | None => {
+            map.remove(&rel);
+        }
+        Some(token) => {
+            map.insert(rel, token.to_string());
+        }
+    }
+    write_folder_colors(vault, &map)
+}
+
+/// 文件夹重命名/移动后迁移颜色键（old_rel → new_rel，含全部子孙目录）。
+/// 最好 effort 语义由调用方兜底：失败仅告警，不影响重命名本身。
+pub fn migrate_folder_colors(vault: &Path, old_rel: &str, new_rel: &str) -> std::io::Result<()> {
+    let old_rel = rel_to_string(Path::new(old_rel));
+    let new_rel = rel_to_string(Path::new(new_rel));
+    let mut map = load_folder_colors(vault)?;
+    let mut changed = false;
+    let prefix = format!("{old_rel}/");
+    let keys: Vec<String> = map.keys().cloned().collect();
+    for k in keys {
+        let mapped = if k == old_rel {
+            Some(new_rel.clone())
+        } else if k.starts_with(&prefix) {
+            Some(format!("{new_rel}/{}", &k[prefix.len()..]))
+        } else {
+            None
+        };
+        if let Some(nk) = mapped {
+            let v = map.remove(&k).unwrap();
+            map.insert(nk, v);
+            changed = true;
+        }
+    }
+    if changed {
+        write_folder_colors(vault, &map)?;
+    }
+    Ok(())
+}
+
+/// 删除目录后清理其颜色键（含子孙）。空表顺手删文件，避免残留空 json。
+pub fn prune_folder_colors(vault: &Path, removed_rel: &str) -> std::io::Result<()> {
+    let removed_rel = rel_to_string(Path::new(removed_rel));
+    let prefix = format!("{removed_rel}/");
+    let mut map = load_folder_colors(vault)?;
+    let before = map.len();
+    map.retain(|k, _| k != &removed_rel && !k.starts_with(&prefix));
+    if map.len() == before {
+        return Ok(());
+    }
+    if map.is_empty() {
+        let p = vault.join(META_DIR).join(FOLDER_COLORS_FILE);
+        match fs::remove_file(&p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    } else {
+        write_folder_colors(vault, &map)
+    }
+}
+
 fn is_note_file(p: &Path) -> bool {
     p.extension().map(|e| e == "md").unwrap_or(false)
 }
@@ -137,6 +248,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Node>) -> std::io::Result<()> {
     for (entry, ft) in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         if name == META_DIR || name.starts_with('.') {
+            continue;
+        }
+        // 附件目录不进目录树：assets/ 是粘贴/拖入图片的落盘处（save_asset），
+        // 用户无需在树里操作它。同步清单与搜索索引走各自的遍历器，不受影响
+        if name == ASSETS_DIR {
             continue;
         }
         // 符号链接一律跳过：指向 vault 外的链接会把外部文件列进树/索引/同步清单
@@ -1056,10 +1172,12 @@ mod tests {
         assert!(idx("技术/人工智能") < idx("技术/人工智能/CUDA C 权威编程指南.md"));
         assert!(idx("技术/人工智能/CUDA C 权威编程指南.md") < idx("技术/编程语言"));
 
-        // 2) 同目录内目录在前、按名升序：assets < 备忘 < 技术，根级笔记 README 在根级目录后
-        assert!(idx("assets") < idx("备忘"));
+        // 2) 同目录内目录在前、按名升序：备忘 < 技术，根级笔记 README 在根级目录后
         assert!(idx("备忘") < idx("技术"));
         assert!(idx("技术/系统与网络/Arch Linux使用笔记.md") < idx("README.md"));
+
+        // 2b) 附件目录不进树（assets/ 是 save_asset 的图片落盘处，UI 侧隐藏）
+        assert!(!paths.contains(&"assets"));
 
         // 3) 兄弟子块连续：备忘 的两个文件相邻，且按名升序（密 < 租）
         assert_eq!(idx("备忘/密码簿.md") + 1, idx("备忘/租房.md"));
