@@ -1,80 +1,65 @@
 # Lanmark
 
-局域网优先的 Markdown 笔记软件（Windows / Linux / Android），手机作为局域网同步中心节点。
+局域网优先的 Markdown 笔记。**手机就是同步中心**：笔记存在你自己选的文件夹里，是纯 `.md` 文件，随时可以用 Obsidian 或其他编辑器打开；手机与电脑在同一局域网时自动互相同步，不经过任何服务器。
 
-```
-Tauri 2 (Rust core) + React 19 + TypeScript + Tailwind CSS v4 + Zustand
-```
+---
 
-## 文档
+## 功能
 
-| 文档 | 内容 |
-|---|---|
-| [docs/01-可行性评估与需求确认.md](docs/01-可行性评估与需求确认.md) | 可行性、风险、已确认需求 |
-| [docs/02-技术选型与工程路线.md](docs/02-技术选型与工程路线.md) | 选型论证、架构、同步协议、里程碑 |
-| [docs/03-M0-环境与构建指南.md](docs/03-M0-环境与构建指南.md) | 本机开发环境、构建、Android 安装 |
-| [docs/04-M1-数据与组织模型.md](docs/04-M1-数据与组织模型.md) | vault/目录树/编辑器/搜索设计、实现决策与验证记录 |
-| [docs/05-M2-移动端与同步设计.md](docs/05-M2-移动端与同步设计.md) | 手机同步服务器、协议、Android 专项、真机验收与 review 修复记录 |
-| [docs/06-Android端内嵌HTTP服务器保活调研.md](docs/06-Android端内嵌HTTP服务器保活调研.md) | 前台服务/wakelock/Doze 保活调研（结论附来源） |
-| [docs/07-M3-同步引擎深化设计.md](docs/07-M3-同步引擎深化设计.md) | M3：自动同步循环、删除传播（tombstone）、冲突 LWW 裁决设计 |
+**写作**
 
-> 代理/协作开发约定见 [AGENTS.md](AGENTS.md)；调研记录在 [docs/research/](docs/research/)。
+- 所见即所得编辑（Typora 式），也可切「阅读模式」与「源码模式」直接看 Markdown
+- 打字即自动保存，切换笔记 / 关闭笔记前必定落盘
+- 图片可直接粘贴或拖入，自动存入笔记库的 `assets/` 并插入引用
+- 支持 frontmatter 与 `[[双链]]` 写法，保存时原样保留，不会被编辑器改写
 
-## 快速开始（桌面端）
+**组织**
 
-```bash
-pnpm install
-pnpm tauri dev            # 开发调试（热重载）
+- 目录树 + 文件夹层级，可新建 / 重命名 / 移动 / 删除
+- 全文搜索（中文可用，含正文内容），支持收藏与「最近打开」
+- 文件夹可自定义颜色
+- 删除的笔记进笔记库内回收站（`.lanmark/trash`），可以找回
 
-# 或运行 release 原生二进制（本机 AppImage 有 Intel Arc 兼容性问题，用原生启动器）
-pnpm tauri build --no-bundle
-scripts/lanmark-desktop.sh
-```
+**同步（可选）**
 
-首次启动选择笔记库目录。想快速体验完整功能，可先生成一个演示库：
+- 手机端在 App 内运行同步服务，桌面端输入手机上的 8 位配对码即可配对
+- 同一局域网下自动同步：周期同步 + 编辑保存后同步 + 回到前台 / 恢复网络时同步（可在侧栏关闭自动，保留手动同步）
+- 两端都改过同一篇时，按保存时间自动裁决：**较新的版本留在原路径**，较旧的版本自动存为可见的「冲突副本」，不需要人工合并
+- 一端删除，另一端同步删除（进各自回收站）；删后又改过的内容按同样的时间规则裁决，不会静默丢失
 
-```bash
-scripts/make-demo-vault.sh    # → ~/lanmark-demo-vault（中文笔记/图片/frontmatter + 验收清单）
-```
-然后在首启页「打开现有笔记库」指向它，按「欢迎使用 Lanmark.md」里的 验收清单走一遍。
+**数据与兼容**
 
-Linux 桌面首选用原生启动器：`lanmark-desktop.sh` 会在缺桌面入口时自动补装
-（`scripts/install-desktop-entry.sh`，用户级 `~/.local`，把任务栏/Alt+Tab 图标
-修复为应用自有图标 —— 依赖 `tauri.conf.json` 的 `enable-gtk-app-id` 与
-`com.lanmark.app.desktop` 的 app_id 匹配）。也可手动单独执行安装脚本。
+- 笔记库（vault）就是你指定的一个普通文件夹，`.md` 文件 + `assets/` 附件，Obsidian 可直接打开
+- 数据只在本机与你自己的局域网内流转，无云端、无账号
 
-## 开发
+---
 
-```bash
-pnpm install
+## 支持平台与下载
 
-# 前端构建 + 类型检查
-pnpm build
+| 平台 | 产物 | 说明 |
+|---|---|---|
+| Windows（x64） | `Lanmark_<版本>_x64-set-up.exe` | NSIS 安装包 |
+| Linux（x64） | `lanmark-linux-x64.tar.gz` | 原生二进制，解压后直接运行 |
+| Android（arm64） | `lanmark-android-aarch64.apk` | 侧载安装；Android 7.0（API 24）及以上 |
 
-# 前端测试（往返保真 / 路径换算 / 纯函数）
-pnpm test
+安装包在 [Releases](https://github.com/observer130/lanmark/releases) 页面下载，当前版本 **v0.2.0**。
 
-# Rust 侧检查与测试
-cd src-tauri && cargo check && cargo test
+**Android 须知**
 
-# Android 交叉编译门禁（不跑完整 gradle，快速验证 Rust 侧编过）
-scripts/android-check.sh
-```
+- APK 为 debug 签名：与 GitHub Releases 上的版本同签名，可直接覆盖安装；若装过其他签名的版本，需先卸载（卸载会删除应用目录内的笔记）
+- 推荐把笔记库存放在 App 应用目录（首启页「使用应用目录」），零权限即可读写；**卸载 App 会一并删除该目录下的笔记**，建议配一台桌面端做镜像
+- Android 16 起系统禁止选择 `Documents` / `Download` 作为笔记库；自定义路径需要「所有文件访问」授权
 
-## 构建
+---
 
-```bash
-pnpm tauri build          # 桌面安装包（deb/AppImage/NSIS）
-pnpm tauri android build --apk --target aarch64   # Android APK（需 SDK/NDK）
-```
+## 首次使用
 
-推送到 GitHub 后，[build workflow](.github/workflows/build.yml) 会自动产出三端构建物（Artifacts）。
+1. 安装并打开 Lanmark，选择一个文件夹作为笔记库（新建或打开已有 `.md` 笔记的目录皆可）
+2. 想同步就在手机端打开笔记库（同步服务随笔记库启动），桌面端在侧栏「同步」里填入手机上显示的 8 位配对码
+3. 手机与电脑连同一个 Wi-Fi，之后改动会自动互相同步
 
-## 约定
-
-- 本仓库把 pnpm/cargo 缓存重定向到 `.cache/`（已 gitignore），避免污染 `$HOME`。
-- Rust 桥接命令位于 `src-tauri/src/`，前端封装位于 `src/lib/`，状态位于 `src/stores/`。
+---
 
 ## 许可
 
-见 [LICENSE](LICENSE)。
+[MIT](LICENSE) © 2026 Observer
