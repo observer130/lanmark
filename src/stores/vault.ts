@@ -171,11 +171,13 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   pickAppDir: async (mode) => {
     try {
-      // Android 16 真机验收结论：SAF 禁选 Documents/Download，应用私有外部目录
-      // 是唯一零权限且 std::fs 可靠可写的位置
-      // Android 16 真机验收：SAF 禁选 Documents/Download 本身（子目录待验），
-      // 应用私有外部目录是零权限兜底路径
-      const path = "/storage/emulated/0/Android/data/com.lanmark.app/files/lanmark-vault";
+      // 应用私有外部目录必须经 getExternalFilesDir 由框架创建并取回真实路径
+      // （v0.2.0 release 真机 P0：Android/data/<pkg> 系统懒创建，全新安装时
+      // 硬编码整链路径 + std::fs mkdirs 被 FUSE 拒绝，os error 13 无法建库）。
+      // null 时退回硬编码路径（老机型兜底，行为与旧版一致）。
+      const base = await vaultPicker.appDir();
+      const root = (base ?? "/storage/emulated/0/Android/data/com.lanmark.app/files").replace(/\/+$/, "");
+      const path = `${root}/lanmark-vault`;
       const ready = await vault.setPathWithCreate(path, mode);
       set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
       await get().refreshTree();
@@ -187,7 +189,17 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   pickCustomAndroidDir: async (path, mode) => {
     try {
-      const ready = await vault.setPathWithCreate(path, mode);
+      // 先按「打开」语义进；目录不存在（MANAGE 授权下可直写）自动转「创建」，
+      // 此前死锁在「目录不存在」——用户无法在任何新目录建库（v0.2.0 真机反馈）。
+      // mode 参数保留调用签名（当前 UI 固定传 "open"，回落创建一律走 create 校验）
+      void mode;
+      let ready: string;
+      try {
+        ready = await vault.setPath(path, "open");
+      } catch (openErr) {
+        if (!String(openErr).includes("目录不存在")) throw openErr;
+        ready = await vault.setPathWithCreate(path, "create");
+      }
       set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
       await get().refreshTree();
       await get().refreshMeta();

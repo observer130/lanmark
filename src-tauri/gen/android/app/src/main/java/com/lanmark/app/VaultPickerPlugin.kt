@@ -19,7 +19,9 @@ import app.tauri.plugin.Plugin
  *
  * 策略（docs/research/android-vault-dir.md）：Android 11+ 的 scoped storage 下，
  * SAF tree URI 直接映射回文件路径后 std::fs 并不可写——必须 MANAGE_EXTERNAL_STORAGE。
- * 因此：hasAllFilesAccess / requestAllFilesAccess 管授权；pickFolder 的 SAF 选择器
+ * 因此：hasAllFilesAccess / requestAllFilesAccess 管授权；appDir 返回框架创建的
+ * 应用私有外部目录（Android/data/<pkg> 系统懒创建，std::fs mkdir 包目录必被拒，
+ * 不能在前端硬编码整链路径后自行 mkdir）；pickFolder 的 SAF 选择器
  * 仅作目录选择 UI，把 primary 卷的 tree URI 确定性映射回真实路径字符串，
  * 交给既有的 vault_set_path（std::fs 路径语义）零改动复用。
  */
@@ -59,6 +61,21 @@ class VaultPickerPlugin(private val activity: Activity) : Plugin(activity) {
       }
     } catch (e: Exception) {
       invoke.reject("无法打开授权设置页: ${e.message}")
+    }
+  }
+
+  @Command
+  fun appDir(invoke: Invoke) {
+    try {
+      // 应用私有外部目录必须经框架获取：Android/data/<pkg> 由系统懒创建，
+      // std::fs 直接 mkdir 包目录会被 FUSE 拒绝（os error 13，全新安装必现，
+      // 2026-09-23 真机复现）。getExternalFilesDir 由框架保证创建与属主。
+      val dir = activity.getExternalFilesDir(null)
+      val ret = JSObject()
+      ret.put("path", dir?.absolutePath)
+      invoke.resolve(ret)
+    } catch (e: Exception) {
+      invoke.reject("获取应用目录失败: ${e.message}")
     }
   }
 

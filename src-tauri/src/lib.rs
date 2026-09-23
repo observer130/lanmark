@@ -128,6 +128,7 @@ pub fn run() {
             sync_client::sync_server_set_url,
             mobile::vault_picker_has_all_files_access,
             mobile::vault_picker_request_all_files_access,
+            mobile::vault_picker_app_dir,
             mobile::vault_picker_pick_folder,
         ])
         .build(tauri::generate_context!())

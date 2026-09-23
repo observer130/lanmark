@@ -104,7 +104,7 @@ export function VaultPicker() {
                     className="w-full rounded-lg border border-line bg-canvas px-2.5 py-1.5 text-xs text-ink outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
                   />
                   <p className="text-[11px] leading-4 text-ink-3">
-                    需先授权「所有文件访问」；Android 16 不允许选择 Documents/Download。
+                    需先授权「所有文件访问」；目录不存在会自动创建（Android 16 不允许 SAF 选 Documents/Download）。
                   </p>
                   <div className="flex gap-1.5">
                     <button

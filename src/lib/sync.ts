@@ -88,6 +88,9 @@ export const vaultPicker = {
   hasAllFilesAccess: () => invoke<boolean>("vault_picker_has_all_files_access"),
   requestAllFilesAccess: () =>
     invoke<void>("vault_picker_request_all_files_access"),
+  /** 应用私有外部目录（getExternalFilesDir，框架创建；Android/data/<pkg>
+   * 系统懒创建，std::fs mkdir 包目录必被 FUSE 拒——不能前端硬编码后自建） */
+  appDir: () => invoke<string | null>("vault_picker_app_dir"),
   pickFolder: () => invoke<string | null>("vault_picker_pick_folder"),
 };
 

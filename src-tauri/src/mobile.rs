@@ -9,6 +9,11 @@
 //!
 //! 结构：插件只负责把 Kotlin 桥（PluginHandle）管理起来；命令挂在 App 命令层
 //! （App 自有命令不走 ACL，插件命令则需要 capabilities——省一层配置）。
+//!
+//! 注意：应用私有外部目录（Android/data/<pkg>）由系统懒创建，std::fs 直接
+//! mkdir 包目录会被 FUSE 拒绝（os error 13，全新安装必现，2026-09-23 真机
+//! 复现）——必须走 appDir 命令经 getExternalFilesDir 由框架创建，前端不得
+//! 硬编码整链路径后自行建目录。
 
 #[cfg(target_os = "android")]
 use serde::de::DeserializeOwned;
@@ -96,6 +101,28 @@ pub async fn vault_picker_request_all_files_access(
         let st = owned_state(state);
         tauri::async_runtime::spawn_blocking(move || {
             call_mobile::<Value>(st, "requestAllFilesAccess").map(|_| ())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = state;
+        Err("仅 Android 支持".into())
+    }
+}
+
+/// 应用私有外部目录（getExternalFilesDir，框架保证创建；未获取到 → None）
+#[tauri::command]
+pub async fn vault_picker_app_dir(
+    state: tauri::State<'_, VaultPickerMobile>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let st = owned_state(state);
+        tauri::async_runtime::spawn_blocking(move || {
+            let v: Value = call_mobile(st, "appDir")?;
+            Ok(v.get("path").and_then(Value::as_str).map(String::from))
         })
         .await
         .map_err(|e| e.to_string())?

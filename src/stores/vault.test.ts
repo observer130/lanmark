@@ -14,6 +14,9 @@ const m = vi.hoisted(() => ({
   search: vi.fn(),
   rename: vi.fn(),
   move: vi.fn(),
+  setPath: vi.fn(),
+  setPathWithCreate: vi.fn(),
+  appDir: vi.fn(),
 }));
 
 vi.mock("../lib/vault", () => ({
@@ -26,8 +29,8 @@ vi.mock("../lib/vault", () => ({
     favorites: m.favorites,
     reindex: vi.fn(),
     pickAndSet: vi.fn(),
-    setPath: vi.fn(),
-    setPathWithCreate: vi.fn(),
+    setPath: m.setPath,
+    setPathWithCreate: m.setPathWithCreate,
     folderColors: vi.fn(async () => ({})),
     setFolderColor: vi.fn(async () => undefined),
     rename: m.rename,
@@ -43,7 +46,9 @@ vi.mock("../lib/vault", () => ({
         ? to + active.slice(from.length)
         : active,
 }));
-vi.mock("../lib/sync", () => ({ vaultPicker: { pickFolder: vi.fn() } }));
+vi.mock("../lib/sync", () => ({
+  vaultPicker: { pickFolder: vi.fn(), appDir: m.appDir },
+}));
 
 import { useVaultStore } from "./vault";
 
@@ -242,5 +247,52 @@ describe("M3f 远端同步改动刷新（remoteChanged）", () => {
     expect(s.activePath).toBe("a.md");
     expect(s.content).toBe("最后内容");
     expect(s.error).toBeNull();
+  });
+});
+
+describe("移动端建库（v0.2.0 release 真机 P0 回归）", () => {
+  const APP_FILES = "/storage/emulated/0/Android/data/com.lanmark.app/files";
+
+  it("pickAppDir：目录取自框架 appDir（getExternalFilesDir），不自行硬编码整链路径", async () => {
+    m.appDir.mockResolvedValue(APP_FILES);
+    m.setPathWithCreate.mockResolvedValueOnce(`${APP_FILES}/lanmark-vault`);
+
+    await useVaultStore.getState().pickAppDir("create");
+
+    expect(m.setPathWithCreate).toHaveBeenCalledWith(`${APP_FILES}/lanmark-vault`, "create");
+    expect(useVaultStore.getState().status).toBe("ready");
+    expect(useVaultStore.getState().error).toBeNull();
+  });
+
+  it("pickAppDir：框架返回 null → 退回旧硬编码路径（老机型兜底）", async () => {
+    m.appDir.mockResolvedValue(null);
+    m.setPathWithCreate.mockResolvedValueOnce("/x");
+
+    await useVaultStore.getState().pickAppDir("create");
+
+    expect(m.setPathWithCreate).toHaveBeenCalledWith(
+      "/storage/emulated/0/Android/data/com.lanmark.app/files/lanmark-vault",
+      "create",
+    );
+  });
+
+  it("pickCustomAndroidDir：目录不存在 → 自动转「创建」建库（不再死锁「目录不存在」）", async () => {
+    m.setPath.mockRejectedValueOnce(new Error("目录不存在: /sdcard/Notes"));
+    m.setPathWithCreate.mockResolvedValueOnce("/sdcard/Notes");
+
+    await useVaultStore.getState().pickCustomAndroidDir("/sdcard/Notes", "open");
+
+    expect(m.setPathWithCreate).toHaveBeenCalledWith("/sdcard/Notes", "create");
+    expect(useVaultStore.getState().status).toBe("ready");
+    expect(useVaultStore.getState().error).toBeNull();
+  });
+
+  it("pickCustomAndroidDir：打开失败但非「目录不存在」→ 原样报错，不误转创建", async () => {
+    m.setPath.mockRejectedValueOnce(new Error("权限不足"));
+
+    await useVaultStore.getState().pickCustomAndroidDir("/sdcard/Notes", "open");
+
+    expect(useVaultStore.getState().error).toContain("权限不足");
+    expect(m.setPathWithCreate).not.toHaveBeenCalled();
   });
 });
