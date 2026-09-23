@@ -38,7 +38,7 @@
 
 | 平台 | 产物 | 说明 |
 |---|---|---|
-| Windows（x64） | `Lanmark_<版本>_x64-set-up.exe` | NSIS 安装包 |
+| Windows（x64） | `Lanmark_<版本>_x64-setup.exe` | NSIS 安装包 |
 | Linux（x64） | `lanmark-linux-x64.tar.gz` | 原生二进制，解压后直接运行 |
 | Android（arm64） | `lanmark-android-aarch64.apk` | 侧载安装；Android 7.0（API 24）及以上 |
 
