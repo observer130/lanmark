@@ -1,6 +1,6 @@
 [package]
 name = "lanmark"
-version = "0.2.1"
+version = "0.3.0"
 description = "Lanmark — LAN-first markdown notes"
 authors = ["observer-37"]
 edition = "2021"
