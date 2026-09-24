@@ -15,13 +15,51 @@ export interface Discovered {
   url: string;
 }
 
+/** M4h-1：LAN 扫描命中的设备（比 mDNS 的 Discovered 多带身份与规模） */
+export interface ScannedDevice {
+  name: string;
+  url: string;
+  /** M4h-3 设备身份；旧服务器为空串（回退名称匹配） */
+  deviceId: string;
+  notes: number;
+}
+
+/** M4h-1 扫描结果 */
+export interface ScanResult {
+  devices: ScannedDevice[];
+  /** 因预算截断，可能不全 */
+  truncated: boolean;
+  /** 是否做了网段全扫（设置里关掉「局域网扫描」时为 false） */
+  scannedSubnet: boolean;
+}
+
+/** M4h-2：桌面一次配对尝试的结局（四态） */
+export interface PairAttempt {
+  status: "approved" | "rejected" | "timeout" | "error";
+  profile: ServerProfile | null;
+  reason: string | null;
+}
+
+/** M4h-2：手机端待授权请求 */
+export interface PendingPair {
+  nonce: string;
+  clientName: string;
+  clientIp: string;
+  ageSecs: number;
+}
+
 export interface ServerProfile {
+  /** M4h-3：等于 `deviceId`（IP 变了也不变 → 基线不丢） */
   id: string;
   name: string;
   url: string;
   token: string;
   /** 最近一次回合成功时间（unix ms；M3e 状态 UI） */
   lastSuccessAt: number | null;
+  /** M4h-3：设备身份（旧服务器为空串） */
+  deviceId?: string;
+  /** M4h-3：上次已知端口 */
+  port?: number | null;
 }
 
 /** 轻量探测结果（M3 自动同步循环；GET /info，3s 超时） */
@@ -39,6 +77,12 @@ export interface SyncPairingInfo {
   pairingCode: string;
   /** 最近一次客户端回合时间（unix ms；服务器重启后为 null） */
   lastRoundAt: number | null;
+  /** D10：本机局域网地址（解开「要诊断得先知道 IP，可我不知道 IP」的死循环） */
+  lanIp?: string | null;
+  /** M4h-3：设备身份 */
+  deviceId?: string;
+  /** M4h-2：待授权配对请求（非空时手机面板显示允许/拒绝卡片） */
+  pendingPairs?: PendingPair[];
 }
 
 /** 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本（M3c，docs/07 §3/§6） */
@@ -78,6 +122,19 @@ export const sync = {
   /** M3 P2：探测失败后 mDNS browse 到同名服务器 → 更新 url 重连 */
   serverSetUrl: (id: string, url: string) =>
     invoke<ServerProfile>("sync_server_set_url", { id, url }),
+
+  /* ── M4h：发现 / 一键授权 ── */
+  /** LAN 发现（mDNS → 邻居表 → 网段并发探测，命中即停）。`allowSubnet` 关掉
+   *  即退化为只查已知设备（设置里的「局域网扫描」开关） */
+  scanLan: (allowSubnet = true) =>
+    invoke<ScanResult>("sync_scan_lan", { allowSubnet }),
+  /** 一键授权：提交请求并等待手机端点「允许」（默认 90s） */
+  connectDevice: (url: string, timeoutSecs = 90) =>
+    invoke<PairAttempt>("sync_connect_device", { url, timeoutSecs }),
+  /** 手机端：允许一次待授权请求 */
+  pairApprove: (nonce: string) => invoke<void>("sync_pair_approve", { nonce }),
+  /** 手机端：拒绝一次待授权请求 */
+  pairReject: (nonce: string) => invoke<void>("sync_pair_reject", { nonce }),
   /** M3 自动同步循环：轻量在线探测 */
   probe: (id: string) => invoke<ProbeResult>("sync_probe", { id }),
   syncNow: (id: string) => invoke<SyncReport>("sync_now", { id }),

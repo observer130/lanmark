@@ -296,15 +296,6 @@ function EditorSection() {
   );
 }
 
-/** M4f 落地前的占位：明确告知「还没做」，不放假的禁用控件 */
-function Placeholder({ text }: { text: string }) {
-  return (
-    <div className="rounded-xl border border-dashed border-line bg-card/50 px-3 py-6 text-center text-xs text-ink-3">
-      {text}
-    </div>
-  );
-}
-
 /** 只读行 + 复制（复用 SyncSection 的 CopyButton 视觉） */
 function CopyRow({ value, title }: { value: string; title?: string }) {
   const [copied, setCopied] = useState(false);
@@ -516,6 +507,9 @@ function StorageSection() {
 function SyncSection2() {
   const syncAuto = useSyncStore((s) => s.syncAuto);
   const setSyncAuto = useSyncStore((s) => s.setSyncAuto);
+  const lanScanEnabled = useSyncStore((s) => s.lanScanEnabled);
+  const setLanScanEnabled = useSyncStore((s) => s.setLanScanEnabled);
+  const openDialog = useSettingsStore((s) => s.closeDialog);
   // `syncAuto` 为 null 表示尚未读到（取默认开；与侧栏同步条同一 store 同一状态）
   const on = syncAuto !== false;
   return (
@@ -525,7 +519,34 @@ function SyncSection2() {
           <Switch on={on} label="自动同步" onToggle={() => void setSyncAuto(!on)} />
         </Row>
       </Group>
-      <Placeholder text="设备配对入口将在 M4f 落地（届时复用侧栏同步面板，不另做一套 UI）" />
+
+      <Group title="设备发现">
+        <Row
+          label="局域网扫描"
+          hint="查找手机时并发探测本机局域网内的地址；关闭后只能用「手动连接」输地址"
+        >
+          <Switch
+            on={lanScanEnabled}
+            label="局域网扫描"
+            onToggle={() => setLanScanEnabled(!lanScanEnabled)}
+          />
+        </Row>
+      </Group>
+      <p className="px-1 text-[11px] leading-4 text-ink-3">
+        扫描只连本机局域网内的地址、只读取设备名与笔记数，不发送任何笔记内容。
+      </p>
+
+      {/* 配对 UI 只有一套：关掉设置面板并展开侧栏的同步面板（docs/08 §3.4 D3） */}
+      <Group title="设备配对">
+        <Row label="管理设备与配对" hint="在侧栏的同步面板里操作，不另做一套 UI">
+          <button
+            onClick={() => openDialog()}
+            className="rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink"
+          >
+            打开同步面板
+          </button>
+        </Row>
+      </Group>
     </>
   );
 }

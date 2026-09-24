@@ -3,6 +3,7 @@ import {
   Check,
   ChevronUp,
   Copy,
+  Laptop,
   Loader2,
   RefreshCw,
   Search,
@@ -49,18 +50,62 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-/** 手机端面板：服务器状态 + 配对码（给桌面端输入用）+ 冲突副本可发现性（docs/07 §6）。
+/** 手机端面板：服务器状态 + **待授权配对请求** + 本机地址 + 冲突副本可发现性。
+ *
+ *  M4h-2 起主路径变了：桌面点「连接」→ 这里出现「『nwj-PC』请求连接」+ [允许][拒绝]，
+ *  取代过去「手机读数、桌面抄 8 位码」（docs/08 §13.4）。配对码降为兜底。
  *  轮询在常驻条里做（面板收起时条上也要显示运行状态），这里只做展示。 */
 function ServerPanel() {
   const pairing = useSyncStore((s) => s.pairing);
   const conflictCount = useSyncStore((s) => s.conflictCount);
+  const pairApprove = useSyncStore((s) => s.pairApprove);
+  const pairReject = useSyncStore((s) => s.pairReject);
 
   if (!pairing) {
     return <div className="px-3 py-2 text-xs text-ink-3">读取配对信息…</div>;
   }
 
+  const pending = pairing.pendingPairs ?? [];
+
   return (
     <div className="space-y-2 px-3">
+      {/* M4h-2：待授权请求（仅非空时渲染，强调边框——这是需要用户动手的事） */}
+      {pending.map((p) => (
+        <div
+          key={p.nonce}
+          className="rounded-[10px] border-2 border-accent/40 bg-accent-soft px-3 py-2.5 shadow-card"
+        >
+          <div className="flex items-center gap-2">
+            <Laptop size={14} className="shrink-0 text-accent" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium text-ink">
+                「{p.clientName}」请求连接
+              </div>
+              <div className="truncate text-[11px] text-ink-3">
+                来自 {p.clientIp} · 等待 {p.ageSecs}s
+              </div>
+            </div>
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              onClick={() => void pairApprove(p.nonce)}
+              className="flex-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text"
+            >
+              允许
+            </button>
+            <button
+              onClick={() => void pairReject(p.nonce)}
+              className="flex-1 rounded-lg border border-line bg-card px-3 py-1.5 text-xs font-medium text-ink-2 hover:bg-canvas"
+            >
+              拒绝
+            </button>
+          </div>
+          <p className="mt-1.5 text-[11px] leading-4 text-ink-3">
+            确认这是你自己的设备再点允许；允许后它就能读写此笔记库。
+          </p>
+        </div>
+      ))}
+
       <div className="flex items-center gap-2 rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
         <Server size={14} className="shrink-0 text-accent" />
         <div className="min-w-0 flex-1">
@@ -80,16 +125,32 @@ function ServerPanel() {
         />
       </div>
 
-      {pairing.running && (
+      {/* D10：本机地址——解开「要诊断得先知道 IP，可我不知道 IP」的死循环 */}
+      {pairing.running && pairing.lanIp && (
         <div className="flex items-center gap-2 rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
           <div className="min-w-0 flex-1">
-            <div className="text-[11px] text-ink-3">配对码（在桌面端输入）</div>
-            <div className="font-mono text-lg tracking-[0.3em] text-ink tabular-nums">
-              {pairing.pairingCode}
-            </div>
+            <div className="text-[11px] text-ink-3">本机地址（桌面端可手动输入）</div>
+            <div className="truncate font-mono text-xs text-ink">{pairing.lanIp}</div>
           </div>
-          <CopyButton text={pairing.pairingCode} />
+          <CopyButton text={pairing.lanIp} />
         </div>
+      )}
+
+      {/* 8 位配对码降为兜底（docs/08 §13.3 ②：主路径已改「手机点允许」） */}
+      {pairing.running && (
+        <details className="rounded-[10px] border border-line bg-card px-3 py-2 shadow-card">
+          <summary className="cursor-pointer text-[11px] text-ink-3">
+            桌面端无法一键连接？用配对码（兜底）
+          </summary>
+          <div className="mt-2 flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-lg tracking-[0.3em] text-ink tabular-nums">
+                {pairing.pairingCode}
+              </div>
+            </div>
+            <CopyButton text={pairing.pairingCode} />
+          </div>
+        </details>
       )}
 
       {/* M3e 可发现性：最近回合时间 + 库中冲突副本（docs/07 §6） */}
@@ -111,18 +172,35 @@ function ServerPanel() {
 function ClientPanel() {
   const {
     servers,
-    discovered,
-    discovering,
     syncing,
     lastReport,
     probeStates,
-    discover,
     pair,
     removeServer,
     syncNow,
+    scanned,
+    scanning,
+    scanTruncated,
+    lanScanEnabled,
+    connecting,
+    connectOutcome,
+    setLanScanEnabled,
+    scanLan,
+    connectDevice,
   } = useSyncStore();
   const [url, setUrl] = useState("");
   const [code, setCode] = useState("");
+  // 是否已经搜过（决定空结果提示何时出现，避免一开面板就报「没找到」）
+  const [scanRan, setScanRan] = useState(false);
+  useEffect(() => {
+    if (!scanning && (scanned.length > 0 || connectOutcome != null)) setScanRan(true);
+  }, [scanning, scanned.length, connectOutcome]);
+  // 面板展开时自动扫一次（「点一下就看到候选手机」的体感，docs/08 §13.2 目标）
+  useEffect(() => {
+    void scanLan().finally(() => setScanRan(true));
+    // 只在挂载时扫一次：后续由「自动查找」按钮驱动
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const canPair = url.trim().startsWith("http") && code.trim().length === 8;
 
@@ -225,61 +303,131 @@ function ClientPanel() {
         </div>
       )}
 
-      {/* 添加服务器 */}
+      {/* M4h：自动查找同一局域网的手机 → 点「连接」→ 手机上点「允许」 */}
       <div className="rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
-        <div className="text-xs font-medium text-ink">添加同步服务器（手机）</div>
+        <div className="flex items-center gap-2">
+          <div className="flex-1 text-xs font-medium text-ink">连接手机</div>
+          <label className="flex items-center gap-1 text-[11px] text-ink-3">
+            <input
+              type="checkbox"
+              checked={lanScanEnabled}
+              onChange={(e) => setLanScanEnabled(e.target.checked)}
+              className="accent-[var(--c-acc)]"
+            />
+            局域网扫描
+          </label>
+        </div>
 
         <button
-          onClick={() => void discover()}
-          disabled={discovering}
+          onClick={() => void scanLan()}
+          disabled={scanning || connecting != null}
           className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs text-ink-2 hover:bg-canvas disabled:opacity-50"
         >
-          {discovering ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
-          {discovering ? "正在搜索…" : "自动发现（同一局域网）"}
+          {scanning ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
+          {scanning ? "正在查找…" : "自动查找（同一局域网）"}
         </button>
 
-        {discovered.length > 0 && (
-          <ul className="mt-1.5 space-y-0.5">
-            {discovered.map((d) => (
+        {/* 等待对方确认（≤90s；可取消视觉上回设备列表） */}
+        {connecting != null && (
+          <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent-soft px-2.5 py-2">
+            <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
+            <div className="min-w-0 flex-1 text-[11px] leading-4 text-ink-2">
+              等待对方确认…请在手机上点「允许」
+            </div>
+          </div>
+        )}
+
+        {/* 候选设备卡片（M4h-1：mDNS + LAN 探测合并结果） */}
+        {connecting == null && scanned.length > 0 && (
+          <ul className="mt-1.5 space-y-1">
+            {scanned.map((d) => (
               <li key={d.url}>
                 <button
-                  onClick={() => setUrl(d.url)}
-                  className="w-full rounded-md px-2 py-1 text-left text-xs text-ink hover:bg-canvas"
+                  onClick={() => void connectDevice(d.url)}
+                  disabled={syncing}
+                  className="flex w-full items-center gap-2 rounded-lg border border-line px-2.5 py-1.5 text-left hover:bg-canvas disabled:opacity-50"
                 >
-                  <span className="truncate font-medium">{d.name}</span>
-                  <span className="ml-1.5 text-ink-3">{d.url}</span>
+                  <Smartphone size={13} className="shrink-0 text-accent" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-medium text-ink">{d.name}</span>
+                    <span className="block truncate text-[11px] text-ink-3">
+                      {d.url.replace("http://", "")} · {d.notes} 篇笔记
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-2">
+                    连接
+                  </span>
                 </button>
               </li>
             ))}
           </ul>
         )}
 
-        <div className="mt-2 space-y-1.5">
-          <input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="http://192.168.x.x:4180"
-            className="w-full rounded-lg border border-line bg-canvas px-2.5 py-1.5 text-xs text-ink outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
-          />
-          <input
-            value={code}
-            onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 8))}
-            placeholder="8 位配对码"
-            className="w-full rounded-lg border border-line bg-canvas px-2.5 py-1.5 font-mono text-xs tracking-[0.2em] text-ink outline-none placeholder:font-sans placeholder:tracking-normal placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
-          />
-          <button
-            disabled={!canPair || syncing}
-            // url 必须 trim：canPair 按 url.trim() 校验，不 trim 传入会让
-            // 尾随空格通过校验但在 Rust 侧解析失败
-            onClick={() => void pair(url.trim(), code)}
-            className="w-full rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-40"
-          >
-            配对并保存
-          </button>
-        </div>
-        <p className="mt-1.5 text-[11px] leading-4 text-ink-3">
-          配对码显示在手机端「同步」面板；两台设备需在同一局域网。
-        </p>
+        {connecting == null && !scanning && scanned.length === 0 && scanRan && (
+          <p className="mt-1.5 text-[11px] leading-4 text-ink-3">
+            没找到已开启同步的手机。
+            {!lanScanEnabled && "「局域网扫描」已关闭，只查了已知设备。"}
+            {" "}确认手机端 Lanmark 已打开笔记库、且与电脑在同一 WiFi。
+          </p>
+        )}
+
+        {scanTruncated && scanned.length > 0 && (
+          <p className="mt-1 text-[11px] text-ink-3">搜索超时，结果可能不全</p>
+        )}
+
+        {connectOutcome && connectOutcome.status !== "approved" && (
+          <p className="mt-1.5 text-[11px] leading-4 text-amber-600">
+            {connectOutcome.status === "rejected"
+              ? "对方拒绝了这次连接"
+              : connectOutcome.status === "timeout"
+                ? "等待确认超时，请重试"
+                : connectOutcome.reason}
+          </p>
+        )}
+
+        {/* 手动连接：只留 URL 输入；输完同样走「手机点允许」（M4h-2 主路径） */}
+        <details className="mt-2" open={scanned.length === 0 && scanRan}>
+          <summary className="cursor-pointer text-[11px] text-ink-3">
+            手动连接（输入地址）
+          </summary>
+          <div className="mt-1.5 space-y-1.5">
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="http://192.168.x.x:4180"
+              className="w-full rounded-lg border border-line bg-canvas px-2.5 py-1.5 text-xs text-ink outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+            />
+            <button
+              disabled={!url.trim().startsWith("http") || connecting != null || syncing}
+              onClick={() => void connectDevice(url.trim())}
+              className="w-full rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-40"
+            >
+              连接（等待手机确认）
+            </button>
+
+            {/* 8 位配对码：一键授权失败或对方是旧版本时的兜底（docs/08 §13.3 ②） */}
+            <div className="border-t border-line pt-1.5">
+              <div className="text-[11px] text-ink-3">旧版本 / 一键授权不可用：配对码</div>
+              <div className="mt-1 flex gap-1.5">
+                <input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 8))}
+                  placeholder="8 位配对码"
+                  className="min-w-0 flex-1 rounded-lg border border-line bg-canvas px-2.5 py-1.5 font-mono text-xs tracking-[0.2em] text-ink outline-none placeholder:font-sans placeholder:tracking-normal placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+                />
+                <button
+                  disabled={!canPair || syncing}
+                  // url 必须 trim：canPair 按 url.trim() 校验，不 trim 传入会让
+                  // 尾随空格通过校验但在 Rust 侧解析失败
+                  onClick={() => void pair(url.trim(), code)}
+                  className="shrink-0 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas disabled:opacity-40"
+                >
+                  配对
+                </button>
+              </div>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
   );

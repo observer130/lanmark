@@ -5,7 +5,9 @@ import {
   vaultPicker,
   isAndroid,
   type Discovered,
+  type PairAttempt,
   type ProbeResult,
+  type ScannedDevice,
   type ServerProfile,
   type SyncPairingInfo,
   type SyncReport,
@@ -167,6 +169,28 @@ interface SyncStore {
   /** M3e：vault 内冲突副本数（手机端可发现性，docs/07 §6） */
   conflictCount: number | null;
 
+  /* ── M4h：LAN 扫描发现与一键授权 ── */
+  /** 扫描到的候选设备（含 mDNS 与 LAN 探测的合并结果） */
+  scanned: ScannedDevice[];
+  scanning: boolean;
+  /** 最近一次扫描是否被预算截断（UI 提示「可能不全」） */
+  scanTruncated: boolean;
+  /** 「局域网扫描」开关：关掉后退化为只查已知设备（docs/08 §13.6 R9） */
+  lanScanEnabled: boolean;
+  /** 正在等待对方确认的设备 url（null = 没有在等） */
+  connecting: string | null;
+  /** 最近一次连接尝试的结局（拒绝/超时的提示文案） */
+  connectOutcome: { status: string; reason: string | null } | null;
+
+  setLanScanEnabled: (v: boolean) => void;
+  /** M4h-1：扫同一局域网的手机（命中即停） */
+  scanLan: () => Promise<void>;
+  /** M4h-2：对某台设备发起连接（桌面点 [连接] → 手机点允许） */
+  connectDevice: (url: string) => Promise<boolean>;
+  /** M4h-2：手机端允许/拒绝一次请求 */
+  pairApprove: (nonce: string) => Promise<void>;
+  pairReject: (nonce: string) => Promise<void>;
+
   refreshPairing: () => Promise<void>;
   refreshServers: () => Promise<void>;
   discover: () => Promise<void>;
@@ -201,6 +225,63 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   syncAuto: null,
   probeStates: {},
   conflictCount: null,
+  scanned: [],
+  scanning: false,
+  scanTruncated: false,
+  // 「局域网扫描」默认开（发现是主路径）；用户可在设置里关掉
+  lanScanEnabled: true,
+  connecting: null,
+  connectOutcome: null,
+
+  setLanScanEnabled: (v) => set({ lanScanEnabled: v }),
+
+  scanLan: async () => {
+    set({ scanning: true, connectOutcome: null });
+    try {
+      const r = await sync.scanLan(get().lanScanEnabled);
+      set({ scanned: r.devices, scanTruncated: r.truncated });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ scanning: false });
+    }
+  },
+
+  connectDevice: async (url) => {
+    set({ connecting: url, connectOutcome: null });
+    try {
+      const attempt: PairAttempt = await sync.connectDevice(url, 90);
+      set({
+        connecting: null,
+        connectOutcome: { status: attempt.status, reason: attempt.reason },
+      });
+      if (attempt.status !== "approved") return false;
+      await get().refreshServers();
+      set({ lastReport: null });
+      return true;
+    } catch (e) {
+      set({ connecting: null, error: String(e) });
+      return false;
+    }
+  },
+
+  pairApprove: async (nonce) => {
+    try {
+      await sync.pairApprove(nonce);
+      await get().refreshPairing();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  pairReject: async (nonce) => {
+    try {
+      await sync.pairReject(nonce);
+      await get().refreshPairing();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
 
   refreshPairing: async () => {
     try {
