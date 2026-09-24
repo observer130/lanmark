@@ -587,59 +587,23 @@ function AboutSection() {
   }, []);
 
   /**
-   * E3：一键复制诊断信息——版本 + 平台 + 路径 + 规模 + **同步状态** + 当前设置。
+   * E3：一键复制诊断信息（纯函数 buildDiagnostics，见文件末尾）。
    *
    * 目的（docs/08 §3.5 E3）：替代完整错误上报。用户遇到问题把这段贴出来，
    * 就能判断是「库没打开 / 同步没连上 / 版本太旧」哪一类，不必来回追问。
    */
-  const diagnostics = () => {
-    const syncLines: string[] = [];
-    if (pairing) {
-      syncLines.push(
-        pairing.running
-          ? `同步中心: 运行中 · 端口 ${pairing.port}`
-          : "同步中心: 未运行",
-      );
-      if (pairing.lanIp) syncLines.push(`本机地址: ${pairing.lanIp}`);
-      if (pairing.deviceId) syncLines.push(`设备身份: ${pairing.deviceId}`);
-      if ((pairing.pendingPairs?.length ?? 0) > 0) {
-        syncLines.push(`待确认配对: ${pairing.pendingPairs!.length} 条`);
-      }
-    }
-    if (servers.length > 0) {
-      for (const s of servers) {
-        const st = probeStates[s.id]?.online;
-        const health =
-          st === true ? "在线" : st === false ? "离线" : "未探测";
-        syncLines.push(
-          `已配对: ${s.name} (${s.url}) · ${health}` +
-            (s.lastSuccessAt ? ` · 上次同步 ${new Date(s.lastSuccessAt).toLocaleString()}` : ""),
-        );
-      }
-    } else if (!pairing?.running) {
-      syncLines.push("已配对设备: 无");
-    }
-    if (conflictCount != null && conflictCount > 0) {
-      syncLines.push(`冲突副本: ${conflictCount} 个`);
-    }
-    if (syncAuto != null) {
-      syncLines.push(`自动同步: ${syncAuto ? "开" : "关"}`);
-    }
-
-    return [
-      `Lanmark ${info?.version ?? "?"} (${info?.platform ?? "?"})`,
-      `笔记库: ${vaultPath ?? "未配置"}`,
-      stats
-        ? `规模: ${stats.notes} 篇 / ${stats.folders} 目录 / ${stats.assets} 附件 / ${fmtBytes(stats.bytes)}`
-        : "规模: 未知",
-      `回收站: ${stats ? `${stats.trashEntries} 项 · ${fmtBytes(stats.trashBytes)}` : "未知"}`,
-      ...syncLines,
-      `外观: 界面=${settings.appearance.uiFont} 正文=${settings.appearance.textFont} 字号=${settings.appearance.textSize}/${settings.appearance.codeSize} 行距=${settings.appearance.lineHeight}`,
-      `编辑器: 默认模式=${settings.editor.defaultMode} 自动保存=${settings.editor.autosaveMs}ms`,
-      `配置目录: ${info?.configDir ?? "?"}`,
-      `日志目录: ${info?.logDir ?? "?"}`,
-    ].join("\n");
-  };
+  const diagnostics = () =>
+    buildDiagnostics({
+      info,
+      vaultPath,
+      stats,
+      pairing,
+      servers,
+      probeStates,
+      syncAuto,
+      conflictCount,
+      settings,
+    });
 
   return (
     <>
@@ -838,4 +802,70 @@ export function SettingsDialog({ narrow }: { narrow: boolean }) {
       </div>
     </div>
   );
+}
+
+/* ── E3 诊断信息（纯函数，便于单测；文本格式是契约——用户会把它贴出来求助） ── */
+
+export interface DiagnosticsInput {
+  info: AppInfo | null;
+  vaultPath: string | null;
+  stats: VaultStats | null;
+  pairing: import("../lib/sync").SyncPairingInfo | null;
+  servers: import("../lib/sync").ServerProfile[];
+  probeStates: Record<string, { online: boolean | null } | undefined>;
+  syncAuto: boolean | null;
+  conflictCount: number | null;
+  settings: import("../lib/settings").Settings;
+}
+
+/**
+ * 组装可一键复制的诊断文本。
+ *
+ * 分段理由：用户贴到 issue 里时，前几行就该能定位大类问题（版本/库/同步），
+ * 细节（外观/编辑器偏好/目录）放后面。同步段尤其重要——「同步没连上」是
+ * 最高频的问题，而它的成因（服务器没跑 / 设备离线 / 积压待确认）在这段里可辨。
+ */
+export function buildDiagnostics(i: DiagnosticsInput): string {
+  const syncLines: string[] = [];
+  if (i.pairing) {
+    syncLines.push(
+      i.pairing.running ? `同步中心: 运行中 · 端口 ${i.pairing.port}` : "同步中心: 未运行",
+    );
+    if (i.pairing.lanIp) syncLines.push(`本机地址: ${i.pairing.lanIp}`);
+    if (i.pairing.deviceId) syncLines.push(`设备身份: ${i.pairing.deviceId}`);
+    const pending = i.pairing.pendingPairs?.length ?? 0;
+    if (pending > 0) syncLines.push(`待确认配对: ${pending} 条`);
+  }
+  for (const s of i.servers) {
+    const st = i.probeStates[s.id]?.online;
+    const health = st === true ? "在线" : st === false ? "离线" : "未探测";
+    syncLines.push(
+      `已配对: ${s.name} (${s.url}) · ${health}` +
+        (s.lastSuccessAt ? ` · 上次同步 ${new Date(s.lastSuccessAt).toLocaleString()}` : ""),
+    );
+  }
+  if (i.servers.length === 0 && !i.pairing?.running) {
+    syncLines.push("已配对设备: 无");
+  }
+  if (i.conflictCount != null && i.conflictCount > 0) {
+    syncLines.push(`冲突副本: ${i.conflictCount} 个`);
+  }
+  if (i.syncAuto != null) {
+    syncLines.push(`自动同步: ${i.syncAuto ? "开" : "关"}`);
+  }
+
+  const a = i.settings.appearance;
+  return [
+    `Lanmark ${i.info?.version ?? "?"} (${i.info?.platform ?? "?"})`,
+    `笔记库: ${i.vaultPath ?? "未配置"}`,
+    i.stats
+      ? `规模: ${i.stats.notes} 篇 / ${i.stats.folders} 目录 / ${i.stats.assets} 附件 / ${fmtBytes(i.stats.bytes)}`
+      : "规模: 未知",
+    `回收站: ${i.stats ? `${i.stats.trashEntries} 项 · ${fmtBytes(i.stats.trashBytes)}` : "未知"}`,
+    ...syncLines,
+    `外观: 界面=${a.uiFont} 正文=${a.textFont} 字号=${a.textSize}/${a.codeSize} 行距=${a.lineHeight}`,
+    `编辑器: 默认模式=${i.settings.editor.defaultMode} 自动保存=${i.settings.editor.autosaveMs}ms`,
+    `配置目录: ${i.info?.configDir ?? "?"}`,
+    `日志目录: ${i.info?.logDir ?? "?"}`,
+  ].join("\n");
 }
