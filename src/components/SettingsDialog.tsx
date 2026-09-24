@@ -475,7 +475,9 @@ function StorageSection() {
               if (!stats) return;
               if (
                 !window.confirm(
-                  `清空回收站？\n\n将删除 ${stats.trashEntries} 项（${fmtBytes(stats.trashBytes)}），**无法恢复**。\n\n（笔记的删除已同步给其他设备，不受影响。）`,
+                  // window.confirm 是纯文本对话框：这里不能写 markdown 强调号，
+                  // 否则用户看到字面的 ** 星号（真机走查发现）
+                  `清空回收站？\n\n将删除 ${stats.trashEntries} 项（${fmtBytes(stats.trashBytes)}），删除后无法恢复。\n\n（笔记的删除已同步给其他设备，不受影响。）`,
                 )
               ) {
                 return;
