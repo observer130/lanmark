@@ -72,6 +72,7 @@ pub async fn vault_set_path(
         let mut cfg = vault::load_config(&app);
         cfg.vault_path = Some(path.clone());
         vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+        prune_trash_after_open(&app, &state);
         Ok(path)
     })
     .await
@@ -122,12 +123,20 @@ pub fn vault_ensure_dir(path: String) -> CmdResult<String> {
 
 /// 直接按路径打开 vault（设置页 / 测试用）
 #[tauri::command]
-pub async fn vault_open_path(state: State<'_, Arc<AppState>>, path: String) -> CmdResult<String> {
+pub async fn vault_open_path(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> CmdResult<String> {
     let state = state.inner().clone();
     // reindex 重活挪出主线程（同 vault_set_path）
-    tauri::async_runtime::spawn_blocking(move || vault_open_path_op(&state, path))
-        .await
-        .map_err(|e| format!("开库任务失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = vault_open_path_op(&state, path)?;
+        prune_trash_after_open(&app, &state);
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("开库任务失败: {e}"))?
 }
 
 pub fn vault_open_path_op(state: &Arc<AppState>, path: String) -> CmdResult<String> {
@@ -168,6 +177,21 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
         });
     }
     Ok(())
+}
+
+/// M4d/M4e：开库后按设置惰性清理过期回收站条目。
+///
+/// 独立于 `open_vault_at`：那个函数有 ~40 个调用点（含大量测试），
+/// 而清理需要读配置，只有拿得到 `AppHandle` 的入口（启动 setup / vault_set_path /
+/// vault_open_path）才该触发。保留天数取设置；`0` = 从不。失败不影响开库。
+pub fn prune_trash_after_open(app: &tauri::AppHandle, state: &Arc<AppState>) {
+    let days = vault::load_config(app).storage.trash_retention_days;
+    if days == 0 {
+        return;
+    }
+    if let Err(e) = trash_prune_op(state, days) {
+        log::warn!("回收站自动清理失败（忽略）: {e}");
+    }
 }
 
 // ---------- 纯逻辑（xxx_op） ----------
@@ -448,6 +472,87 @@ pub fn asset_save(state: State<Arc<AppState>>, data_base64: String, ext: String)
     asset_save_op(state.inner(), &data_base64, &ext)
 }
 
+// ---------- M4d/M4e：存储统计、回收站、应用信息 ----------
+
+pub fn vault_stats_op(state: &Arc<AppState>) -> CmdResult<fs_ops::VaultStats> {
+    with_vault(state, |vault| fs_ops::vault_stats(vault).map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub fn vault_stats(state: State<Arc<AppState>>) -> CmdResult<fs_ops::VaultStats> {
+    vault_stats_op(state.inner())
+}
+
+/// 清空回收站，返回删除条目数。
+///
+/// 注意与 M3 tombstone 的区别（docs/08 §3.3 注）：这里是**本地找回**用的垃圾桶，
+/// 清它不影响同步的删除传播——tombstone 账本另存 `.lanmark/tombstones.json`。
+pub fn trash_clear_op(state: &Arc<AppState>) -> CmdResult<usize> {
+    with_vault(state, |vault| fs_ops::trash_clear(vault).map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub fn trash_clear(state: State<Arc<AppState>>) -> CmdResult<usize> {
+    trash_clear_op(state.inner())
+}
+
+/// 按保留天数清理回收站（`days == 0` = 从不），返回删除条目数。
+/// 调用点：开库 reindex 之后（惰性，不阻塞首屏）+ 设置页「立即清理」。
+pub fn trash_prune_op(state: &Arc<AppState>, days: u32) -> CmdResult<usize> {
+    with_vault(state, |vault| {
+        fs_ops::trash_prune(vault, days, fs_ops::now_ms()).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+pub fn trash_prune(state: State<Arc<AppState>>, days: u32) -> CmdResult<usize> {
+    trash_prune_op(state.inner(), days)
+}
+
+/// 关于页信息（docs/08 §3.5 E1）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub version: String,
+    pub platform: String,
+    pub config_dir: Option<String>,
+    pub log_dir: Option<String>,
+}
+
+/// `configDir` / `logDir` 走 tauri path API；日志目录取 `tauri_plugin_log` 的 LogDir
+/// （与 lib.rs 里 `.plugin(tauri_plugin_log)` 的 TargetKind::LogDir 必须一致）。
+pub fn app_info_op(app: &tauri::AppHandle) -> AppInfo {
+    use tauri::Manager;
+    let path = app.path();
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .ok()
+        .map(|d| d.to_string_lossy().to_string())
+        .or_else(|| path.app_config_dir().ok().map(|d| d.join("logs").to_string_lossy().to_string()));
+    AppInfo {
+        version: app.package_info().version.to_string(),
+        platform: std::env::consts::OS.to_string(),
+        config_dir: path.app_config_dir().ok().map(|d| d.to_string_lossy().to_string()),
+        log_dir,
+    }
+}
+
+#[tauri::command]
+pub fn app_info(app: tauri::AppHandle) -> CmdResult<AppInfo> {
+    Ok(app_info_op(&app))
+}
+
+/// 在系统文件管理器中显示路径（桌面限定；Android 不注册该按钮）。
+/// reveal 失败（路径不存在等）不让前端崩——返回错误由设置页 toast 呈现。
+#[tauri::command]
+pub fn open_in_file_manager(app: tauri::AppHandle, path: String) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| format!("无法在文件管理器中打开: {e}"))
+}
+
 // ---------- 命令层集成测试 ----------
 
 #[cfg(test)]
@@ -651,5 +756,175 @@ mod e2e_tests {
         eprintln!("perf: 500 笔记 reindex={index_ms}ms, 两次搜索={search_ms}ms");
         assert!(index_ms < 10_000, "reindex 过慢: {index_ms}ms");
         assert!(search_ms < 1_000, "搜索过慢: {search_ms}ms");
+    }
+
+    // ---------- M4d 存储统计 ----------
+
+    #[test]
+    fn vault_stats_counts_notes_folders_assets_and_trash() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+
+        folder_create_op(s, "", "工作").unwrap();
+        folder_create_op(s, "工作", "子目录").unwrap();
+        note_create_op(s, "", "根笔记").unwrap();
+        note_create_op(s, "工作", "会议记录").unwrap();
+        note_create_op(s, "工作/子目录", "中文名笔记").unwrap();
+
+        // 附件：直接落盘（save_asset 走 base64，这里只验统计口径）
+        fs_ops::ensure_layout(dir.path()).unwrap();
+        std::fs::write(dir.path().join("assets/a.png"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.path().join("assets/b.jpg"), vec![0u8; 50]).unwrap();
+
+        let st = vault_stats_op(s).unwrap();
+        assert_eq!(st.notes, 3, "3 篇 md");
+        assert_eq!(st.folders, 2, "工作 + 工作/子目录；assets/ 不计为文件夹");
+        assert_eq!(st.assets, 2);
+        assert!(st.bytes > 150, "总占用含笔记正文与附件: {}", st.bytes);
+        assert_eq!(st.trash_entries, 0);
+        assert_eq!(st.trash_bytes, 0);
+
+        // 删除一篇（先写点内容，空文件回收站占用是 0）→ 进回收站，统计随之变化
+        note_write_op(s, "工作/会议记录.md", "# 会议记录\n\n正文内容若干。").unwrap();
+        entry_delete_op(s, "工作/会议记录.md").unwrap();
+        let st = vault_stats_op(s).unwrap();
+        assert_eq!(st.notes, 2);
+        assert_eq!(st.trash_entries, 1, "回收站条目");
+        assert!(st.trash_bytes > 0, "回收站占用应大于 0: {}", st.trash_bytes);
+    }
+
+    /// `.lanmark/` 与隐藏文件不进条目计数（同步临时文件/索引不是用户的笔记）
+    #[test]
+    fn vault_stats_skips_hidden_and_meta() {
+        let (dir, state) = opened_vault();
+        std::fs::write(dir.path().join("正常.md"), "x").unwrap();
+        std::fs::create_dir_all(dir.path().join(".obsidian")).unwrap();
+        std::fs::write(dir.path().join(".obsidian/app.json"), "{}").unwrap();
+        std::fs::write(dir.path().join(".hidden.md"), "x").unwrap();
+        // 同步的孤儿 tmp 文件（崩溃残留）不该被算成附件
+        std::fs::write(dir.path().join("note.md.123.4.lanmark-tmp"), "x").unwrap();
+
+        let st = vault_stats_op(&state).unwrap();
+        assert_eq!(st.notes, 1);
+        assert_eq!(st.folders, 0);
+        assert_eq!(st.assets, 1, "只有 .lanmark-tmp 被算作非 md 文件");
+    }
+
+    #[test]
+    fn vault_stats_without_vault_errors() {
+        let state = Arc::new(AppState::default());
+        assert!(vault_stats_op(&state).is_err(), "无 vault 时应报错");
+        assert!(trash_clear_op(&state).is_err());
+        assert!(trash_prune_op(&state, 30).is_err());
+    }
+
+    // ---------- M4e 回收站清理 ----------
+
+    #[test]
+    fn trash_clear_removes_all_entries() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        note_create_op(s, "", "a").unwrap();
+        note_create_op(s, "", "b").unwrap();
+        entry_delete_op(s, "a.md").unwrap();
+        entry_delete_op(s, "b.md").unwrap();
+        assert_eq!(vault_stats_op(s).unwrap().trash_entries, 2);
+
+        let removed = trash_clear_op(s).unwrap();
+        assert_eq!(removed, 2);
+        let st = vault_stats_op(s).unwrap();
+        assert_eq!(st.trash_entries, 0);
+        assert_eq!(st.trash_bytes, 0);
+        // 目录仍在（不再重复创建）
+        assert!(dir.path().join(fs_ops::TRASH_DIR).is_dir());
+    }
+
+    #[test]
+    fn trash_prune_respects_retention_window() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        note_create_op(s, "", "新").unwrap();
+        note_create_op(s, "", "旧").unwrap();
+        entry_delete_op(s, "新.md").unwrap();
+        entry_delete_op(s, "旧.md").unwrap();
+
+        // 把「旧」的回收站条目改成 40 天前（改文件名前缀——时间就编码在里面）
+        let trash = dir.path().join(fs_ops::TRASH_DIR);
+        let old_ms = fs_ops::now_ms() - 40 * 24 * 60 * 60 * 1000;
+        let entry = std::fs::read_dir(&trash)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with("-旧.md"))
+            .unwrap();
+        let renamed = trash.join(format!("{old_ms}-旧.md"));
+        std::fs::rename(entry.path(), &renamed).unwrap();
+
+        // 保留 30 天：只清掉 40 天前那条
+        let removed = trash_prune_op(s, 30).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!renamed.exists(), "超期条目被清");
+        assert_eq!(vault_stats_op(s).unwrap().trash_entries, 1, "未超期的保留");
+
+        // 保留 90 天：剩下这条（刚删的）也不清
+        assert_eq!(trash_prune_op(s, 90).unwrap(), 0);
+        assert_eq!(vault_stats_op(s).unwrap().trash_entries, 1);
+    }
+
+    /// `0` = 从不清理：即使条目非常旧也不动
+    #[test]
+    fn trash_prune_zero_days_never_removes() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        note_create_op(s, "", "很久以前").unwrap();
+        entry_delete_op(s, "很久以前.md").unwrap();
+        let trash = dir.path().join(fs_ops::TRASH_DIR);
+        let ancient = trash.join(format!("{}-很久以前.md", 1_000_000));
+        let entry = std::fs::read_dir(&trash).unwrap().flatten().next().unwrap();
+        std::fs::rename(entry.path(), &ancient).unwrap();
+
+        assert_eq!(trash_prune_op(s, 0).unwrap(), 0, "0 = 从不");
+        assert!(ancient.exists());
+    }
+
+    /// 名字解析不出时间的条目永不自动清理（宁可占空间也不误删用户还没找回的东西）
+    #[test]
+    fn trash_prune_keeps_unparsable_names() {
+        let (dir, state) = opened_vault();
+        let trash = dir.path().join(fs_ops::TRASH_DIR);
+        fs_ops::ensure_layout(dir.path()).unwrap();
+        let odd = trash.join("手动放进来的.md");
+        std::fs::write(&odd, "x").unwrap();
+        let odd2 = trash.join("not-a-time-x.md");
+        std::fs::write(&odd2, "x").unwrap();
+
+        assert_eq!(trash_prune_op(&state, 1).unwrap(), 0);
+        assert!(odd.exists() && odd2.exists());
+    }
+
+    #[test]
+    fn trash_entry_ms_parses_prefix_only() {
+        assert_eq!(fs_ops::trash_entry_ms("1700000000000-note.md"), Some(1_700_000_000_000));
+        assert_eq!(fs_ops::trash_entry_ms("1700000000000-中文 名.md"), Some(1_700_000_000_000));
+        assert_eq!(fs_ops::trash_entry_ms("0-x.md"), None, "0 不是合法时刻");
+        assert_eq!(fs_ops::trash_entry_ms("-x.md"), None);
+        assert_eq!(fs_ops::trash_entry_ms("abc-x.md"), None);
+        assert_eq!(fs_ops::trash_entry_ms("无横线.md"), None);
+    }
+
+    /// 清回收站不影响 tombstone（同步的删除传播账本）——两者语义独立
+    #[test]
+    fn trash_clear_does_not_touch_tombstones() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        note_create_op(s, "", "要删的").unwrap();
+        entry_delete_op(s, "要删的.md").unwrap();
+
+        // 造一份 tombstone 账本（真实写入由同步侧负责，这里只验清理不动它）
+        let tomb = dir.path().join(".lanmark/tombstones.json");
+        std::fs::write(&tomb, r#"{"version":1,"entries":[]}"#).unwrap();
+
+        trash_clear_op(s).unwrap();
+        assert!(tomb.exists(), "清回收站不得动 tombstone");
+        assert_eq!(std::fs::read_to_string(&tomb).unwrap(), r#"{"version":1,"entries":[]}"#);
     }
 }

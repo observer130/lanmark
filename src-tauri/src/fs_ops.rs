@@ -579,6 +579,178 @@ pub fn delete_entry(vault: &Path, rel_path: &str, conn: &Connection) -> std::io:
     Ok(format!("{TRASH_DIR}/{trash_name}"))
 }
 
+// ---------- M4d/M4e：vault 统计与回收站清理 ----------
+
+/// vault 规模统计（`vault_stats` 命令的返回体，docs/08 §3.3 C2）。
+#[derive(Debug, Serialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultStats {
+    pub notes: usize,
+    pub folders: usize,
+    pub assets: usize,
+    /// vault 内笔记 + 附件 + `.lanmark/` 元数据的总占用字节
+    pub bytes: u64,
+    pub trash_entries: usize,
+    pub trash_bytes: u64,
+}
+
+/// 递归统计目录占用（字节）。读不到的条目按 0 计，不因单个坏文件让整个统计失败。
+fn dir_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(rd) = fs::read_dir(dir) else { return 0 };
+    for e in rd.flatten() {
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => total += dir_bytes(&p),
+            Ok(t) if t.is_file() => total += e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => {} // 符号链接：不跟进（避免环）
+        }
+    }
+    total
+}
+
+/// 一次遍历产出统计。跳过 `.lanmark/`（元数据另计）与所有隐藏目录/文件
+/// （与 `list_tree` 的跳过规则一致，硬约定 4：vault 文件才是事实源，
+/// 同步产生的临时文件、`.git` 之类不该被算成用户的笔记）。
+///
+/// `assets/` 是附件目录（粘贴图片落盘处），进 assets 计数而不进 folders。
+pub fn vault_stats(vault: &Path) -> std::io::Result<VaultStats> {
+    let mut st = VaultStats::default();
+    let mut stack = vec![vault.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if name.starts_with('.') {
+                    continue; // .lanmark / .git / .obsidian … 不计入
+                }
+                if dir == vault && name == ASSETS_DIR {
+                    // 附件目录：只数文件，不再往里递归出「文件夹」
+                    st.assets += count_files(&p);
+                    st.bytes += dir_bytes(&p);
+                    continue;
+                }
+                st.folders += 1;
+                st.bytes += dir_bytes(&p);
+                stack.push(p);
+            } else if ft.is_file() {
+                if name.starts_with('.') {
+                    continue;
+                }
+                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+                if name.to_lowercase().ends_with(".md") {
+                    st.notes += 1;
+                } else {
+                    st.assets += 1;
+                }
+                st.bytes += len;
+            }
+        }
+    }
+    // `.lanmark/`：索引 / 基线 / tombstone / 回收站 —— 计入总占用但不计条目
+    if let Ok(meta) = safe_join(vault, META_DIR) {
+        st.bytes += dir_bytes(&meta);
+    }
+    let (entries, bytes) = trash_usage(vault);
+    st.trash_entries = entries;
+    st.trash_bytes = bytes;
+    Ok(st)
+}
+
+fn count_files(dir: &Path) -> usize {
+    let mut n = 0;
+    let Ok(rd) = fs::read_dir(dir) else { return 0 };
+    for e in rd.flatten() {
+        match e.file_type() {
+            Ok(t) if t.is_dir() => n += count_files(&e.path()),
+            Ok(t) if t.is_file() => n += 1,
+            _ => {}
+        }
+    }
+    n
+}
+
+/// 回收站条目数 + 占用字节。
+pub fn trash_usage(vault: &Path) -> (usize, u64) {
+    let Ok(trash) = safe_join(vault, TRASH_DIR) else { return (0, 0) };
+    let Ok(rd) = fs::read_dir(&trash) else { return (0, 0) };
+    let mut n = 0;
+    let mut bytes = 0u64;
+    for e in rd.flatten() {
+        n += 1;
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => bytes += dir_bytes(&p),
+            Ok(t) if t.is_file() => bytes += e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => {}
+        }
+    }
+    (n, bytes)
+}
+
+/// 从 `.lanmark/trash/<ms>-<name>` 的文件名前缀解析删除时刻（unix ms）。
+/// 解析不出（老格式 / 手改过的名字）返回 `None` —— 这类条目**永不自动清理**，
+/// 宁可占点空间也不能误删用户还没找回的东西。
+pub fn trash_entry_ms(name: &str) -> Option<i64> {
+    let prefix = name.split('-').next()?;
+    if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    prefix.parse::<i64>().ok().filter(|v| *v > 0)
+}
+
+/// 按保留天数清理回收站，返回删除条目数。
+///
+/// `days == 0` = 从不清理（docs/08 §3.3 C6）。
+/// **与 M3 tombstone TTL 无关**：trash 是本地找回（不进同步），tombstone 是删除
+/// 传播账本（`.lanmark/tombstones.json`，固定 30 天）——清 trash 不影响同步传播删除。
+pub fn trash_prune(vault: &Path, days: u32, now: i64) -> std::io::Result<usize> {
+    if days == 0 {
+        return Ok(0);
+    }
+    let cutoff = now - (days as i64) * 24 * 60 * 60 * 1000;
+    let trash = safe_join(vault, TRASH_DIR)?;
+    let Ok(rd) = fs::read_dir(&trash) else { return Ok(0) };
+    let mut removed = 0;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(ms) = trash_entry_ms(&name) else { continue };
+        if ms >= cutoff {
+            continue;
+        }
+        let p = e.path();
+        let res = if p.is_dir() { fs::remove_dir_all(&p) } else { fs::remove_file(&p) };
+        if res.is_ok() {
+            removed += 1;
+        } else {
+            log::warn!("回收站条目清理失败（跳过）: {}", p.display());
+        }
+    }
+    Ok(removed)
+}
+
+/// 清空回收站，返回删除条目数。
+pub fn trash_clear(vault: &Path) -> std::io::Result<usize> {
+    let trash = safe_join(vault, TRASH_DIR)?;
+    if !trash.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for e in fs::read_dir(&trash)?.flatten() {
+        let p = e.path();
+        let res = if p.is_dir() { fs::remove_dir_all(&p) } else { fs::remove_file(&p) };
+        if res.is_ok() {
+            removed += 1;
+        } else {
+            log::warn!("回收站条目删除失败（跳过）: {}", p.display());
+        }
+    }
+    Ok(removed)
+}
+
 // ---------- 读写 ----------
 
 /// 从 frontmatter 提取可选 title（仅支持 `title: xxx` 形式）

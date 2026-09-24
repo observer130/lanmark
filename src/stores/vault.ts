@@ -1,8 +1,8 @@
 import { create } from "zustand";
 import { vault, remapPath, type VaultNode, type SearchHit, type PathTitle } from "../lib/vault";
 import { vaultPicker } from "../lib/sync";
+import { useSettingsStore } from "./settings";
 
-const SAVE_DEBOUNCE_MS = 700;
 const RECENTS_SHOWN = 8;
 const FAVORITES_SHOWN = 8;
 
@@ -57,6 +57,8 @@ interface VaultStore {
   createFolderIn: (name: string, dir: string, color: string | null) => Promise<boolean>;
   /** 设置/清除目录颜色（null = 恢复默认）。返回是否成功 */
   setFolderColor: (path: string, color: string | null) => Promise<boolean>;
+  /** M4d：切换笔记库（严格顺序见 docs/08 §6.1）。返回是否成功 */
+  switchVault: (path: string, mode: "open" | "create") => Promise<boolean>;
   toggleDirCollapsed: (path: string) => void;
   /** 展开路径的全部祖先目录（打开笔记/新建文件落在收起目录里时用） */
   expandAncestors: (path: string) => void;
@@ -67,6 +69,22 @@ interface VaultStore {
   doSearch: (q: string) => Promise<void>;
   clearError: () => void;
 }
+
+/**
+ * 读取当前编辑器偏好（M4c）。抽成函数而不是模块级常量：设置可在运行中改，
+ * 常量会在改完设置后继续用旧值。设置 store 未加载时取它与 Rust 一致的默认值。
+ */
+function prefs() {
+  return useSettingsStore.getState().settings.editor;
+}
+
+/** 新建笔记的默认父目录（B4）：`root` 固定根目录，`last` 用上次新建所在目录 */
+function newNoteParentDir(): string {
+  return prefs().newNoteLocation === "last" ? lastCreateDir : "";
+}
+
+/** `last` 模式下记住的上次新建位置（**仅前端会话**，不落库：跨设备无意义） */
+let lastCreateDir = "";
 
 /* ── 收起目录的 localStorage 持久化（按 vault 隔离） ── */
 function collapsedKey(vaultPath: string | null): string {
@@ -108,7 +126,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   content: "",
   dirty: false,
   savedAt: null,
-  editorMode: "wysiwyg",
+  // M4c：初值取「默认打开模式」设置（设置 store 未加载时 = wysiwyg，与 M3 一致）
+  editorMode: useSettingsStore.getState().settings.editor.defaultMode,
   renamingPath: null,
   searchQuery: "",
   searchResults: [],
@@ -291,7 +310,16 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     try {
       const { content } = await vault.readNote(path);
       if (seq !== openSeq) return; // 慢响应：丢弃，避免 activePath 与 content 错位
-      set({ activePath: path, content, dirty: false, savedAt: null, renamingPath: null, searchQuery: "" });
+      // M4c B1：每次打开笔记都回到「默认打开模式」（而非沿用上一篇的模式）
+      set({
+        activePath: path,
+        content,
+        dirty: false,
+        savedAt: null,
+        renamingPath: null,
+        searchQuery: "",
+        editorMode: prefs().defaultMode,
+      });
       await get().refreshMeta();
     } catch (e) {
       if (!silent) set({ error: String(e) });
@@ -325,7 +353,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     saveTimer = setTimeout(() => {
       saveTimer = null;
       void get().saveNow();
-    }, SAVE_DEBOUNCE_MS);
+    }, prefs().autosaveMs);
   },
 
   saveNow: async () => {
@@ -359,12 +387,19 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   setRenaming: (path) => set({ renamingPath: path }),
 
-  openCreate: (kind, parentDir) => set({ pendingCreate: { kind, parentDir } }),
+  openCreate: (kind, parentDir) => {
+    if (kind === "note" && parentDir) lastCreateDir = parentDir;
+    set({ pendingCreate: { kind, parentDir } });
+  },
   closeCreate: () => set({ pendingCreate: null }),
 
   createNoteIn: async (name, dir) => {
     try {
-      const node = await vault.createNote(dir, name);
+      // B4：调用方未指定位置（空串 = 根）时按设置决定 —— `root` 根目录，
+      // `last` 用上次所在目录。侧栏「+ 笔记」走的就是这条路径。
+      const target = dir || newNoteParentDir();
+      const node = await vault.createNote(target, name);
+      if (target) lastCreateDir = target;
       await get().refreshTree();
       await get().openNote(node.path);
       get().expandAncestors(node.path);
@@ -383,6 +418,56 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       get().expandAncestors(node.path);
       return true;
     } catch (e) {
+      set({ error: String(e) });
+      return false;
+    }
+  },
+
+  /**
+   * M4d 切换笔记库（docs/08 §6.1，最高风险流程）。
+   *
+   * 严格顺序，任何一步失败都要保住原状：
+   *   1. dirty → saveNow()；失败 → **中止**，不切库（未保存编辑不丢铁律）
+   *   2. 停自动同步循环（先停，防止回合打到半切换状态）
+   *   3. vault_set_path（与 VaultPicker 完全相同的调用路径）
+   *   4. 成功：状态重置 + 重取树/meta + 按 B1 设默认模式 + 该库的折叠状态重载
+   *   5. 失败：保留原 vault 与状态 + 错误提示（绝不出现「已切库但树是旧的」）
+   *
+   * 手机端：Rust 侧 open_vault_at 的 android 分支会幂等启动同步服务器
+   * （端口可能 +1），配对码不变 ⇒ 桌面无需重新配对。
+   */
+  switchVault: async (path, mode) => {
+    const s = get();
+    if (s.dirty && s.activePath) {
+      const ok = await s.saveNow();
+      if (!ok || get().dirty) return false; // 落盘失败：不切库
+    }
+    // 先停循环再切（此刻自动同步若正好在回合中，会打到半切换的 vault 上）
+    const { useSyncStore } = await import("./sync");
+    useSyncStore.getState().stopAutoLoop();
+    try {
+      const ready = await vault.setPathWithCreate(path, mode);
+      // 折叠状态按库隔离：让 refreshTree 重新加载新库的那一份
+      collapsedLoadedFor = undefined;
+      set({
+        status: "ready",
+        vaultPath: ready,
+        activePath: null,
+        content: "",
+        dirty: false,
+        savedAt: null,
+        tree: [],
+        searchQuery: "",
+        searchResults: [],
+        renamingPath: null,
+        editorMode: prefs().defaultMode,
+        error: null,
+      });
+      await get().refreshTree();
+      await get().refreshMeta();
+      return true;
+    } catch (e) {
+      // 失败：原 vault 与状态原样保留（Rust 侧开库失败不会改 state）
       set({ error: String(e) });
       return false;
     }

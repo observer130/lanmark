@@ -48,6 +48,24 @@ export interface PathTitle {
   title: string;
 }
 
+/** M4d：vault 规模统计（一次遍历，docs/08 §3.3 C2） */
+export interface VaultStats {
+  notes: number;
+  folders: number;
+  assets: number;
+  bytes: number;
+  trashEntries: number;
+  trashBytes: number;
+}
+
+/** M4d：关于页信息（docs/08 §3.5 E1） */
+export interface AppInfo {
+  version: string;
+  platform: string;
+  configDir: string | null;
+  logDir: string | null;
+}
+
 export const vault = {
   status: () => invoke<VaultStatus>("vault_status"),
   /** M3：自动同步开关（持久化到 app_config_dir/config.json） */
@@ -98,6 +116,18 @@ export const vault = {
     invoke<boolean>("favorite_toggle", { path }),
   saveAsset: (dataBase64: string, ext: string) =>
     invoke<string>("asset_save", { dataBase64, ext }),
+
+  /* ── M4d/M4e：存储管理 ── */
+  /** 笔记/文件夹/附件计数 + 占用 + 回收站用量；无 vault 时报错 */
+  stats: () => invoke<VaultStats>("vault_stats"),
+  /** 清空回收站，返回删除条目数（**不影响同步的删除传播**，见设置页文案） */
+  trashClear: () => invoke<number>("trash_clear"),
+  /** 按保留天数清理回收站（0 = 从不），返回删除条目数 */
+  trashPrune: (days: number) => invoke<number>("trash_prune", { days }),
+  /** 关于页信息（版本 / 平台 / 配置目录 / 日志目录） */
+  appInfo: () => invoke<AppInfo>("app_info"),
+  /** 在系统文件管理器中显示路径（桌面限定） */
+  reveal: (path: string) => invoke<void>("open_in_file_manager", { path }),
 };
 
 /** vault 内父目录（空串 = 根） */

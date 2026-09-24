@@ -83,9 +83,13 @@ pub fn run() {
                     if path.is_dir() {
                         // open_vault_at 含全量 reindex：直接跑在 async worker 上
                         // 会阻塞该 worker，拖慢同 runtime 的 IPC 命令
+                        let prune_handle = handle.clone();
                         tauri::async_runtime::spawn_blocking(move || {
                             if let Err(e) = commands::open_vault_at(&state, &path) {
                                 eprintln!("自动打开 vault 失败: {e}");
+                            } else {
+                                // M4e：开库后惰性清理过期回收站条目
+                                commands::prune_trash_after_open(&prune_handle, &state);
                             }
                         })
                         .await
@@ -121,6 +125,11 @@ pub fn run() {
             commands::favorites_list,
             commands::favorite_toggle,
             commands::asset_save,
+            commands::vault_stats,
+            commands::trash_clear,
+            commands::trash_prune,
+            commands::app_info,
+            commands::open_in_file_manager,
             sync_server::sync_pairing_info,
             sync_server::sync_server_start,
             sync_server::sync_conflict_count,

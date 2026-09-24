@@ -49,6 +49,11 @@ vi.mock("../lib/vault", () => ({
 vi.mock("../lib/sync", () => ({
   vaultPicker: { pickFolder: vi.fn(), appDir: m.appDir },
 }));
+// switchVault 会停自动同步循环（先停再切，防止回合打到半切换状态）→ 桩掉 sync store
+vi.mock("./sync", () => ({
+  useSyncStore: { getState: () => ({ stopAutoLoop: stopAutoLoopMock }) },
+}));
+const stopAutoLoopMock = vi.fn();
 
 import { useVaultStore } from "./vault";
 
@@ -294,5 +299,80 @@ describe("移动端建库（v0.2.0 release 真机 P0 回归）", () => {
 
     expect(useVaultStore.getState().error).toContain("权限不足");
     expect(m.setPathWithCreate).not.toHaveBeenCalled();
+  });
+});
+
+/* ── M4d：切换笔记库的安全流程（docs/08 §6.1，最高风险） ── */
+
+describe("switchVault：切换笔记库", () => {
+  it("有未保存编辑 → 先落盘再切库", async () => {
+    useVaultStore.setState({ activePath: "a.md", content: "未保存", dirty: true });
+    m.setPathWithCreate.mockResolvedValueOnce("/v2");
+
+    const ok = await useVaultStore.getState().switchVault("/v2", "open");
+
+    expect(writeNote).toHaveBeenCalledWith("a.md", "未保存");
+    expect(ok).toBe(true);
+    const s = useVaultStore.getState();
+    expect(s.vaultPath).toBe("/v2");
+    expect(s.activePath).toBeNull();
+    expect(s.content).toBe("");
+    expect(s.dirty).toBe(false);
+  });
+
+  it("落盘失败 → 不切库，原 vault 与未保存内容完整保留", async () => {
+    useVaultStore.setState({ activePath: "a.md", content: "未保存的重要内容", dirty: true });
+    writeNote.mockRejectedValueOnce(new Error("磁盘满"));
+
+    const ok = await useVaultStore.getState().switchVault("/v2", "open");
+
+    expect(ok).toBe(false);
+    expect(m.setPathWithCreate).not.toHaveBeenCalled(); // 根本没走到换库
+    const s = useVaultStore.getState();
+    expect(s.vaultPath).toBe("/v");
+    expect(s.activePath).toBe("a.md");
+    expect(s.content).toBe("未保存的重要内容");
+    expect(s.dirty).toBe(true);
+    expect(s.error).toBeTruthy();
+  });
+
+  it("开库失败 → 保留原 vault 与状态，不出现「已切库但树是旧的」", async () => {
+    useVaultStore.setState({ tree: [{ path: "a.md", kind: "note", name: "a", title: null }] });
+    m.setPathWithCreate.mockRejectedValueOnce(new Error("目录不存在: /nope"));
+
+    const ok = await useVaultStore.getState().switchVault("/nope", "open");
+
+    expect(ok).toBe(false);
+    const s = useVaultStore.getState();
+    expect(s.vaultPath).toBe("/v");
+    expect(s.status).toBe("ready");
+    expect(s.tree).toHaveLength(1); // 旧树没被清空
+    expect(s.error).toContain("目录不存在");
+  });
+
+  it("先停自动同步循环，再开新库（避免回合打到半切换状态）", async () => {
+    m.setPathWithCreate.mockResolvedValueOnce("/v2");
+    stopAutoLoopMock.mockClear();
+
+    await useVaultStore.getState().switchVault("/v2", "open");
+
+    expect(stopAutoLoopMock).toHaveBeenCalled();
+    // 停循环必须发生在开库之前
+    const stopOrder = stopAutoLoopMock.mock.invocationCallOrder[0];
+    const openOrder = m.setPathWithCreate.mock.invocationCallOrder[0];
+    expect(stopOrder).toBeLessThan(openOrder);
+  });
+
+  it("成功切库后重取树与 meta", async () => {
+    m.setPathWithCreate.mockResolvedValueOnce("/v2");
+    tree.mockResolvedValueOnce([]);
+    recents.mockResolvedValueOnce([]);
+    favorites.mockResolvedValueOnce([]);
+
+    await useVaultStore.getState().switchVault("/v2", "open");
+
+    expect(tree).toHaveBeenCalled();
+    expect(recents).toHaveBeenCalled();
+    expect(favorites).toHaveBeenCalled();
   });
 });

@@ -18,6 +18,7 @@ import {
   vaultUrlsToRelative,
 } from "../lib/vault-url";
 import { parentDir } from "../lib/vault";
+import { useSettingsStore } from "../stores/settings";
 
 /** 从 Crepe 取 ProseMirror EditorView（类型走推断，避免直接依赖 prosemirror 包） */
 async function getEditorView(crepe: Crepe) {
@@ -241,6 +242,9 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     toggleFavorite,
     favorites,
   } = useVaultStore();
+  // M4c B3：源码模式行号开关。用订阅而非 getState()：改设置要立刻反映到
+  // 已打开的编辑器上（CodeMirror 的 basicSetup 变化会触发 reconfigure）
+  const sourceLineNumbers = useSettingsStore((s) => s.settings.editor.sourceLineNumbers);
 
   if (!activePath) {
     return (
@@ -394,7 +398,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
                 setContent(value);
                 scheduleSave();
               }}
-              basicSetup={{ lineNumbers: true, foldGutter: true }}
+              basicSetup={{ lineNumbers: sourceLineNumbers, foldGutter: true }}
             />
           )}
         </div>

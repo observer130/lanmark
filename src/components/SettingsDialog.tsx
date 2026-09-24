@@ -1,16 +1,24 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
+  Check,
+  Copy,
+  FolderOpen,
+  HardDrive,
   Info,
   Monitor,
   Palette,
   Pencil,
+  RefreshCw,
   RotateCcw,
   Settings2,
+  Trash2,
   X,
 } from "lucide-react";
 import { useSettingsStore, type SectionKey } from "../stores/settings";
 import { useVaultStore } from "../stores/vault";
+import { vault, type AppInfo, type VaultStats } from "../lib/vault";
+import { isAndroid } from "../lib/sync";
 import { useSyncStore } from "../stores/sync";
 import {
   AUTOSAVE_OPTIONS,
@@ -288,7 +296,7 @@ function EditorSection() {
   );
 }
 
-/** M4d/M4e 落地前的占位：明确告知「还没做」，不放假的禁用控件 */
+/** M4f 落地前的占位：明确告知「还没做」，不放假的禁用控件 */
 function Placeholder({ text }: { text: string }) {
   return (
     <div className="rounded-xl border border-dashed border-line bg-card/50 px-3 py-6 text-center text-xs text-ink-3">
@@ -297,28 +305,208 @@ function Placeholder({ text }: { text: string }) {
   );
 }
 
+/** 只读行 + 复制（复用 SyncSection 的 CopyButton 视觉） */
+function CopyRow({ value, title }: { value: string; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="max-w-[22rem] truncate text-xs text-ink-2" title={title ?? value}>
+        {value}
+      </span>
+      <button
+        title="复制"
+        aria-label="复制"
+        onClick={() => {
+          void navigator.clipboard?.writeText(value).then(
+            () => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            },
+            () => {},
+          );
+        }}
+        className="shrink-0 rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
+      >
+        {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+      </button>
+    </div>
+  );
+}
+
+/** 字节 → 人类可读（设置页统计用；<1KB 显示 B） */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 function StorageSection() {
   const retention = useSettingsStore((s) => s.settings.storage.trashRetentionDays);
   const patch = useSettingsStore((s) => s.patch);
+  const openDialog = useSettingsStore((s) => s.openDialog);
   const vaultPath = useVaultStore((s) => s.vaultPath);
+  const status = useVaultStore((s) => s.status);
+  const switchVault = useVaultStore((s) => s.switchVault);
+  const reindex = useVaultStore((s) => s.reindex);
+  const setError = useVaultStore.setState;
+  const [stats, setStats] = useState<VaultStats | null>(null);
+  const [busy, setBusy] = useState(false);
+  const android = isAndroid();
+
+  const refresh = () => {
+    if (status !== "ready") {
+      setStats(null);
+      return;
+    }
+    void vault
+      .stats()
+      .then(setStats)
+      .catch(() => setStats(null));
+  };
+  useEffect(refresh, [status, vaultPath]);
+
+  const doSwitch = async () => {
+    // 桌面走系统选择器；Android 走 SAF（与首启页同一批命令）
+    let path: string | null = null;
+    if (android) {
+      const { vaultPicker } = await import("../lib/sync");
+      path = await vaultPicker.pickFolder();
+    } else {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      path = ((await open({ directory: true, multiple: false })) as string | null) ?? null;
+    }
+    if (!path) return;
+    if (!window.confirm(`切换到笔记库：\n${path}\n\n当前笔记会先保存。确定？`)) return;
+    setBusy(true);
+    const ok = await switchVault(path, "open");
+    setBusy(false);
+    if (ok) {
+      refresh();
+      // 手机端是同步中心：换库会重启 axum 服务器（端口可能 +1，配对码不变）
+      if (android) {
+        window.alert(
+          "笔记库已切换。\n\n同步中心已在新笔记库上重启，配对码不变，桌面端无需重新配对。",
+        );
+      }
+    }
+  };
 
   return (
     <>
       <Group title="当前笔记库">
         <Row label="位置" hint={vaultPath ?? "尚未配置"}>
-          <span className="max-w-[20rem] truncate text-xs text-ink-2">{vaultPath ?? "—"}</span>
+          {vaultPath ? <CopyRow value={vaultPath} /> : <span className="text-xs text-ink-3">—</span>}
+        </Row>
+        {android && vaultPath?.includes("/Android/data/") && (
+          <Row label="注意">
+            <span className="max-w-[22rem] text-xs text-warn">
+              这是应用私有目录，卸载 App 会一并删除笔记库
+            </span>
+          </Row>
+        )}
+        <Row label="内容" hint={stats ? undefined : "统计需要先打开笔记库"}>
+          {stats ? (
+            <span className="text-xs text-ink-2">
+              {stats.notes} 篇笔记 · {stats.folders} 个文件夹 · {stats.assets} 个附件 ·{" "}
+              {fmtBytes(stats.bytes)}
+            </span>
+          ) : (
+            <span className="text-xs text-ink-3">—</span>
+          )}
+        </Row>
+        <Row label="操作">
+          <span className="flex flex-wrap gap-1.5">
+            <button
+              disabled={busy}
+              onClick={() => void doSwitch()}
+              className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink disabled:opacity-50"
+            >
+              <FolderOpen size={13} />
+              更改笔记库…
+            </button>
+            {!android && vaultPath && (
+              <button
+                onClick={() => void vault.reveal(vaultPath).catch((e) => setError({ error: String(e) }))}
+                className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink"
+              >
+                <HardDrive size={13} />
+                在文件管理器中打开
+              </button>
+            )}
+            <button
+              disabled={status !== "ready"}
+              onClick={() => {
+                void reindex().then(refresh);
+              }}
+              className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink disabled:opacity-50"
+            >
+              <RefreshCw size={13} />
+              重新扫描
+            </button>
+          </span>
         </Row>
       </Group>
+
       <Group title="回收站">
-        <Row label="自动清理" hint="删除的笔记先移入回收站；此项与同步的删除传播无关">
+        <Row
+          label="自动清理"
+          hint="删除的笔记先移到回收站；这里清的是本地回收站，与同步的删除传播无关"
+        >
           <Segmented
             value={retention}
             options={TRASH_RETENTION_OPTIONS.map((o) => ({ key: o.key, label: o.label }))}
             onChange={(k) => void patch({ storage: { trashRetentionDays: k } })}
           />
         </Row>
+        <Row label="当前占用">
+          {stats ? (
+            <span className="text-xs text-ink-2">
+              {stats.trashEntries} 项 · {fmtBytes(stats.trashBytes)}
+            </span>
+          ) : (
+            <span className="text-xs text-ink-3">—</span>
+          )}
+        </Row>
+        <Row label="立即清空" hint="清空后回收站里的笔记无法找回">
+          <button
+            disabled={!stats || stats.trashEntries === 0}
+            onClick={() => {
+              if (!stats) return;
+              if (
+                !window.confirm(
+                  `清空回收站？\n\n将删除 ${stats.trashEntries} 项（${fmtBytes(stats.trashBytes)}），**无法恢复**。\n\n（笔记的删除已同步给其他设备，不受影响。）`,
+                )
+              ) {
+                return;
+              }
+              void vault
+                .trashClear()
+                .then(refresh)
+                .catch((e) => setError({ error: String(e) }));
+            }}
+            className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink disabled:opacity-50"
+          >
+            <Trash2 size={13} />
+            清空回收站
+          </button>
+        </Row>
       </Group>
-      <Placeholder text="笔记库统计与「更改笔记库」入口将在 M4d/M4e 落地" />
+
+      {!android && (
+        <p className="px-1 text-[11px] leading-4 text-ink-3">
+          笔记都是纯 Markdown 文件，直接复制笔记库目录即可备份（无需先关闭同步）。
+        </p>
+      )}
+      {/* 首启页齿轮入口打开本面板时也能换库 */}
+      {status !== "ready" && (
+        <button
+          onClick={() => openDialog("storage")}
+          className="mt-2 text-[11px] text-accent-text hover:underline"
+        >
+          尚未打开笔记库
+        </button>
+      )}
     </>
   );
 }
@@ -342,9 +530,100 @@ function SyncSection2() {
 
 function AboutSection() {
   const reset = useSettingsStore((s) => s.reset);
+  const settings = useSettingsStore((s) => s.settings);
+  const vaultPath = useVaultStore((s) => s.vaultPath);
+  const [info, setInfo] = useState<AppInfo | null>(null);
+  const [stats, setStats] = useState<VaultStats | null>(null);
+  const android = isAndroid();
+
+  useEffect(() => {
+    void vault
+      .appInfo()
+      .then(setInfo)
+      .catch(() => setInfo(null));
+    void vault
+      .stats()
+      .then(setStats)
+      .catch(() => setStats(null));
+  }, []);
+
+  /** E3：一键复制诊断信息（版本 + 平台 + 路径 + 规模 + 外观设置） */
+  const diagnostics = () =>
+    [
+      `Lanmark ${info?.version ?? "?"} (${info?.platform ?? "?"})`,
+      `笔记库: ${vaultPath ?? "未配置"}`,
+      stats
+        ? `规模: ${stats.notes} 篇 / ${stats.folders} 目录 / ${stats.assets} 附件 / ${fmtBytes(stats.bytes)}`
+        : "规模: 未知",
+      `回收站: ${stats ? `${stats.trashEntries} 项 · ${fmtBytes(stats.trashBytes)}` : "未知"}`,
+      `外观: 界面=${settings.appearance.uiFont} 正文=${settings.appearance.textFont} 字号=${settings.appearance.textSize}/${settings.appearance.codeSize} 行距=${settings.appearance.lineHeight}`,
+      `编辑器: 默认模式=${settings.editor.defaultMode} 自动保存=${settings.editor.autosaveMs}ms`,
+      `配置目录: ${info?.configDir ?? "?"}`,
+      `日志目录: ${info?.logDir ?? "?"}`,
+    ].join("\n");
+
   return (
     <>
-      <Placeholder text="版本、配置目录与诊断信息将在 M4f 落地" />
+      <Group title="版本">
+        <Row label="版本" hint={info?.platform}>
+          <span className="text-xs text-ink-2">{info?.version ?? "…"}</span>
+        </Row>
+        <Row label="配置目录">
+          {info?.configDir ? (
+            <span className="flex items-center gap-1.5">
+              <CopyRow value={info.configDir} />
+              {!android && (
+                <button
+                  title="打开配置目录"
+                  onClick={() =>
+                    void vault
+                      .reveal(info.configDir as string)
+                      .catch((e) => useVaultStore.setState({ error: String(e) }))
+                  }
+                  className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
+                >
+                  <FolderOpen size={13} />
+                </button>
+              )}
+            </span>
+          ) : (
+            <span className="text-xs text-ink-3">—</span>
+          )}
+        </Row>
+        <Row label="日志目录">
+          {info?.logDir ? (
+            <span className="flex items-center gap-1.5">
+              <CopyRow value={info.logDir} />
+              {!android && (
+                <button
+                  title="打开日志目录"
+                  onClick={() =>
+                    void vault
+                      .reveal(info.logDir as string)
+                      .catch((e) => useVaultStore.setState({ error: String(e) }))
+                  }
+                  className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
+                >
+                  <FolderOpen size={13} />
+                </button>
+              )}
+            </span>
+          ) : (
+            <span className="text-xs text-ink-3">—</span>
+          )}
+        </Row>
+        <Row label="复制诊断信息" hint="版本、路径、规模与当前设置">
+          <button
+            onClick={() => {
+              void navigator.clipboard?.writeText(diagnostics());
+            }}
+            className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink"
+          >
+            <Copy size={13} />
+            复制
+          </button>
+        </Row>
+      </Group>
       <Group title="重置">
         <Row label="恢复默认设置" hint="保留笔记库位置与已配对设备">
           <button
