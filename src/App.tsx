@@ -3,11 +3,13 @@ import { listen } from "@tauri-apps/api/event";
 import { Menu, TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
 import { useSyncStore } from "./stores/sync";
+import { useSettingsStore } from "./stores/settings";
 import { isAndroid } from "./lib/sync";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./components/WindowControls";
 import { VaultPicker } from "./components/VaultPicker";
 import { Sidebar } from "./components/Sidebar";
 import { EditorPane } from "./components/EditorPane";
+import { SettingsDialog } from "./components/SettingsDialog";
 
 /** 窄屏（手机竖屏）判定：侧栏改为覆盖式抽屉，编辑器占满全宽 */
 function useIsNarrow() {
@@ -56,6 +58,9 @@ function App() {
   useEffect(() => {
     void useVaultStore.getState().init();
     void useSyncStore.getState().loadSyncAuto();
+    // M4a：设置在启动时与 vault.init() 并行加载；拿到结果立即写 CSS 变量
+    // （不能等 vault 打开——首启页也要按用户字号渲染）
+    void useSettingsStore.getState().load();
     // 窗口关闭前尽力落盘（best effort）
     const flush = () => void useVaultStore.getState().saveNow();
     window.addEventListener("beforeunload", flush);
@@ -125,6 +130,7 @@ function App() {
     return (
       <>
         <VaultPicker />
+        <SettingsDialog narrow={narrow} />
         <Toast />
       </>
     );
@@ -171,6 +177,7 @@ function App() {
           </>
         )}
       </div>
+      <SettingsDialog narrow={narrow} />
       <Toast />
     </>
   );

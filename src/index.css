@@ -35,6 +35,19 @@
   --sh-card: 0 1px 2px rgb(15 18 30 / 0.06), 0 4px 14px rgb(15 18 30 / 0.05);
   --sh-pop: 0 1px 2px rgb(15 18 30 / 0.1), 0 2px 6px rgb(15 18 30 / 0.08);
   --sh-slider: 0 1px 2px rgb(15 18 30 / 0.2), 0 2px 8px oklch(0.53 0.19 264 / 0.35);
+
+  /* ── M4a 外观变量 ──
+     `applyCssVars()`（src/lib/settings.ts）是唯一写入点，改字体/字号只动这些变量，
+     不重建编辑器实例（硬约定 3：重建会触发伪 markdownUpdated 重写文件）。
+     这里给的值 = M3 的硬编码视觉，保证「默认设置下界面不变」。 */
+  --lanmark-font-ui: var(--font-sans);
+  --lanmark-font-text: var(--font-sans);
+  --lanmark-font-mono: var(--font-mono);
+  --lanmark-text-size: 16px;
+  --lanmark-code-size: 14px;
+  --lanmark-line-height: 1.75;
+  --lanmark-content-max: none;
+  --lanmark-ui-scale: 100%;
 }
 
 /* 把语义 token 映射成 Tailwind utility（bg-canvas / text-ink-2 / border-line …） */
@@ -55,10 +68,11 @@
   --shadow-card: var(--sh-card);
   --shadow-pop: var(--sh-pop);
   --shadow-slider: var(--sh-slider);
-  --font-sans: "Noto Sans", "Segoe UI", system-ui, "Noto Sans CJK SC",
-    "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace,
-    "Noto Sans Mono CJK SC", monospace;
+  /* M4b：utility 引用变量，运行时可被 :root 的 --lanmark-font-* 覆盖 →
+     改「界面字体」连带 Tailwind 的 font-sans utility 一起变（Tailwind 默认主题
+     里没有 --font-sans，所以这里必须显式声明）。 */
+  --font-sans: var(--lanmark-font-ui);
+  --font-mono: var(--lanmark-font-mono);
 }
 
 html,
@@ -71,7 +85,7 @@ body {
   margin: 0;
   background: var(--c-canvas);
   color: var(--c-ink);
-  font-family: var(--font-sans);
+  font-family: var(--lanmark-font-ui);
   -webkit-font-smoothing: antialiased;
   text-autospace: normal;
 }
@@ -112,8 +126,18 @@ body {
 .editor-host .milkdown {
   height: auto;
   min-height: 100%;
-  max-width: none;
+  /* 正文宽度设置：`auto` = none（跟随窗口），`limited` = 820px（宽屏防一行太长） */
+  max-width: var(--lanmark-content-max);
   margin: 0 auto;
+}
+
+/* 正文排版：字号 / 行高 / 字体全部走变量。
+   选择器用 `.editor-host .milkdown .ProseMirror`：比 `.milkdown` 上的
+   --crepe-* 变量规则优先级更高，能盖住 crepe 自带排版（硬约定 7）。 */
+.editor-host .milkdown .ProseMirror {
+  font-size: var(--lanmark-text-size);
+  line-height: var(--lanmark-line-height);
+  font-family: var(--lanmark-font-text);
 }
 
 /* 手机窄屏（<768px，与 App.tsx useIsNarrow 阈值一致）：
@@ -148,10 +172,10 @@ body {
   --crepe-color-error: oklch(0.5 0.19 25);
   --crepe-color-hover: oklch(0.94 0.004 260);
   --crepe-color-selected: var(--c-acc-14);
-  --crepe-base-font-size: 16px;
-  --crepe-font-title: var(--font-sans);
-  --crepe-font-default: var(--font-sans);
-  --crepe-font-code: var(--font-mono);
+  --crepe-base-font-size: var(--lanmark-text-size);
+  --crepe-font-title: var(--lanmark-font-text);
+  --crepe-font-default: var(--lanmark-font-text);
+  --crepe-font-code: var(--lanmark-font-mono);
 }
 
 /* 内联代码 chip：与晨窗设计稿一致（浅靛蓝底 + 深靛蓝字 + 发丝边框），
@@ -240,7 +264,7 @@ body {
    由 Crepe 规则控制（surface 灰底）；源码模式的白底走 .source-editor 作用域。 */
 .cm-editor {
   height: 100%;
-  font-size: 13.5px;
+  font-size: var(--lanmark-code-size);
   color: var(--c-ink);
 }
 
@@ -249,7 +273,7 @@ body {
 }
 
 .cm-editor .cm-scroller {
-  font-family: var(--font-mono);
+  font-family: var(--lanmark-font-mono);
 }
 
 .cm-editor .cm-gutters {

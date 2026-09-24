@@ -26,6 +26,18 @@ async function getEditorView(crepe: Crepe) {
 type LMView = Awaited<ReturnType<typeof getEditorView>>;
 type LMDoc = LMView["state"]["doc"];
 
+/**
+ * 编辑器实例的 key：**只由「路径 + 模式」决定**。
+ *
+ * 这是一个回归护栏（docs/08 §4.4 / §9 R2）：外观设置（字体 / 字号 / 行距 / 行宽）
+ * 一律走 CSS 变量，**绝不能进这个 key**。一旦进了 key，改字号会销毁重建 Crepe 实例，
+ * 而 Crepe 建实例会发一次伪 `markdownUpdated` —— 打开着的笔记就被重写一遍
+ * （硬约定 3「打开笔记不得重写文件」）。`settings.test.ts` 里有用例钉住这个契约。
+ */
+export function editorKey(path: string, mode: string): string {
+  return `${path}|${mode}`;
+}
+
 /** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留。
  *  readOnly=true 时为「阅读模式」：关掉斜杠菜单/块手柄/链接浮层等交互特性，
  *  并将 ProseMirror 设为不可编辑（粘贴/拖入监听也一并跳过）。 */
@@ -352,7 +364,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         >
           {editorMode === "read" ? (
             <MilkdownHost
-              key={`${activePath}|read`}
+              key={editorKey(activePath, "read")}
               content={content}
               notePath={activePath}
               onChange={(md) => {
@@ -363,7 +375,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
             />
           ) : editorMode === "wysiwyg" ? (
             <MilkdownHost
-              key={`${activePath}|wysiwyg`}
+              key={editorKey(activePath, "wysiwyg")}
               content={content}
               notePath={activePath}
               onChange={(md) => {
@@ -373,7 +385,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
             />
           ) : (
             <CodeMirror
-              key={`${activePath}|source`}
+              key={editorKey(activePath, "source")}
               value={content}
               height="100%"
               style={{ height: "100%" }}

@@ -5,6 +5,8 @@ mod fs_ops;
 mod mobile;
 mod protocol;
 mod sanitize;
+mod settings;
+mod settings_cmd;
 mod sync;
 mod sync_client;
 mod sync_server;
@@ -95,6 +97,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ping,
+            settings_cmd::settings_get,
+            settings_cmd::settings_patch,
+            settings_cmd::settings_reset,
             commands::vault_status,
             commands::vault_set_path,
             commands::vault_set_sync_auto,

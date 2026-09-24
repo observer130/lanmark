@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+use crate::settings::{Appearance, EditorPrefs, Settings, StoragePrefs};
+
 /// 运行时共享状态：当前 vault 路径 + 它的索引连接。
 /// 以 Arc 形式 manage 进 Tauri（Mutex 不可 Clone，无法直接 clone 状态结构体）。
 #[derive(Default)]
@@ -28,18 +30,43 @@ fn default_sync_auto() -> bool {
     true
 }
 
+/// 设备级配置。**全部小节都 `serde(default)`**：M3 及更早的 config.json 直接可读，
+/// 缺字段取默认（docs/08 §4.2）。同步周期不在这里——D1 定了固定 60s，不进配置。
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub vault_path: Option<String>,
     /// M3：桌面端自动同步开关（默认开；旧配置无此字段 → serde default，docs/07 §7）
     #[serde(default = "default_sync_auto")]
     pub sync_auto: bool,
+    /// M4a：外观（字体/字号/行距/行宽/界面缩放）
+    pub appearance: Appearance,
+    /// M4a：编辑器偏好
+    pub editor: EditorPrefs,
+    /// M4a：存储策略（回收站保留天数）
+    pub storage: StoragePrefs,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { vault_path: None, sync_auto: true }
+        Self {
+            vault_path: None,
+            sync_auto: true,
+            appearance: Appearance::default(),
+            editor: EditorPrefs::default(),
+            storage: StoragePrefs::default(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// 取出设置三小节（供 `settings_get`）
+    pub fn settings(&self) -> Settings {
+        Settings {
+            appearance: self.appearance.clone(),
+            editor: self.editor.clone(),
+            storage: self.storage.clone(),
+        }
     }
 }
 
@@ -75,7 +102,7 @@ mod tests {
 
     #[test]
     fn config_roundtrip() {
-        let cfg = AppConfig { vault_path: Some("/tmp/vault".into()), sync_auto: false };
+        let cfg = AppConfig { vault_path: Some("/tmp/vault".into()), sync_auto: false, ..AppConfig::default() };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.vault_path.as_deref(), Some("/tmp/vault"));
@@ -87,5 +114,30 @@ mod tests {
         let back: AppConfig = serde_json::from_str(legacy).unwrap();
         assert_eq!(back.vault_path.as_deref(), Some("/tmp/vault"));
         assert!(back.sync_auto, "旧配置兼容：syncAuto 默认 true");
+    }
+
+    /// M4a 关键回归：M0–M3 时期的 config.json（只有 vaultPath + syncAuto）
+    /// 必须能直接读，且三小节取默认、vault_path 不丢。
+    #[test]
+    fn m3_config_migrates_to_m4_settings() {
+        let legacy = r#"{"vaultPath":"/home/u/notes","syncAuto":false}"#;
+        let cfg: AppConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.vault_path.as_deref(), Some("/home/u/notes"));
+        assert!(!cfg.sync_auto);
+        let s = cfg.settings();
+        assert_eq!(s, crate::settings::Settings::default(), "新小节取默认");
+        // 回写并重读：旧字段不丢、新小节落盘（升级后首次改设置即完整化配置）
+        let round: AppConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(round.vault_path.as_deref(), Some("/home/u/notes"));
+        assert!(!round.sync_auto);
+        assert_eq!(round.settings(), crate::settings::Settings::default());
+    }
+
+    /// 只有 vaultPath 的更老配置（M1/M2 无同步开关）
+    #[test]
+    fn oldest_config_still_opens_vault() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"vaultPath":"/tmp/v"}"#).unwrap();
+        assert_eq!(cfg.vault_path.as_deref(), Some("/tmp/v"));
+        assert!(cfg.sync_auto);
     }
 }

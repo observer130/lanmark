@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderPlus, History, Plus, RefreshCw, Search, Star } from "lucide-react";
+import { FolderPlus, History, Plus, RefreshCw, Search, Settings, Star } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { TreeView } from "./TreeView";
 import { SyncSection } from "./SyncSection";
+import { useSettingsStore } from "../stores/settings";
 import { CreateDialog } from "./CreateDialog";
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
 import type { PathTitle } from "../lib/vault";
@@ -185,6 +186,18 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           </>
         )}
       </div>
+
+      {/* M4a 设置入口：常驻一行，位于同步条**上方**（同步保持最底，与 M3 现状一致） */}
+      <button
+        onClick={() => {
+          useSettingsStore.getState().openDialog();
+          onNavigate?.();
+        }}
+        className="flex items-center gap-2 border-t border-line px-3 py-2.5 text-left text-sm text-ink-2 hover:bg-canvas hover:text-ink"
+      >
+        <Settings size={14} className="shrink-0 text-ink-3" />
+        设置
+      </button>
 
       {/* M2 同步（方案 B 收纳，design/direction-approved.md）：
           常驻只剩一行（状态+开关+同步），管理/配对在点击行后的上拉面板里 */}

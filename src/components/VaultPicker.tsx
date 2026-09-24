@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, FolderPlus, Home, Keyboard } from "lucide-react";
+import { FolderOpen, FolderPlus, Home, Keyboard, Settings } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { useSyncStore } from "../stores/sync";
+import { useSettingsStore } from "../stores/settings";
 import { isAndroid } from "../lib/sync";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./WindowControls";
 
@@ -58,11 +59,20 @@ export function VaultPicker() {
       <ResizeEdges />
       <div
         data-no-drag
-        className="w-full max-w-md rounded-2xl border border-line bg-card p-8 text-center shadow-card"
+        className="relative w-full max-w-md rounded-2xl border border-line bg-card p-8 text-center shadow-card"
       >
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent text-2xl font-bold text-white shadow-slider">
           L
         </div>
+        {/* M4a：未配置 vault 时设置页也可用（设置存在设备配置目录，与 vault 无关） */}
+        <button
+          aria-label="设置"
+          title="设置"
+          onClick={() => useSettingsStore.getState().openDialog()}
+          className="absolute right-3 top-3 rounded-lg p-2 text-ink-3 hover:bg-canvas hover:text-ink"
+        >
+          <Settings size={16} />
+        </button>
         <h1 className="text-xl font-semibold">Lanmark</h1>
         <p className="mt-2 text-sm text-ink-2">
           选择一个目录作为你的笔记库（vault）。
