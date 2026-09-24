@@ -1,5 +1,5 @@
 //! M2 桌面端同步客户端：mDNS 发现、配对、同步回合驱动。
-//! 手机是服务器，桌面是客户端（docs/05）；回合幂等可重放：
+//! 手机是服务器（App 内嵌 axum），桌面是客户端；回合幂等可重放：
 //! manifest 四分类（仅服务器→拉 / 仅本地→推 / hash 同→跳 / hash 异→冲突双份）。
 
 use std::collections::HashMap;
@@ -314,7 +314,7 @@ fn read_push_file(vault: &Path, path: &str, kind: &str, base_hash: &str) -> Opti
 /// 客户端基线：上次回合结束时服务器各文件的 hash（.lanmark/sync-<id>.json）。
 /// 纯 hash 对比无法区分「只有一方改过」与「双方都改」：有了基线即可——
 /// 本地 hash == 基线 → 只有服务器改 → 快进拉取；服务器 hash == 基线 → 只有本地改 → 推送；
-/// 两者都不是 → 双方都改 → 真冲突保留双份（docs/05 §3）。
+/// 两者都不是 → 双方都改 → 真冲突保留双份。
 fn sync_state_path(vault: &Path, id: &str) -> PathBuf {
     // .lanmark/ 不参与同步（walk 跳过 dot 目录）
     vault.join(fs_ops::META_DIR).join(format!("sync-{id}.json"))
@@ -1172,7 +1172,7 @@ mod tests {
 
     #[test]
     fn sync_round_conflict_keeps_both_versions() {
-        // 两端离线各改同一篇 → 同步后双份都在、无丢失（docs/05 验收 3）
+        // 两端离线各改同一篇 → 同步后双份都在、无丢失（M2 验收项 3）
         let phone_dir = tempfile::TempDir::new().unwrap();
         let phone = Arc::new(AppState::default());
         open_vault_at(&phone, phone_dir.path()).unwrap();

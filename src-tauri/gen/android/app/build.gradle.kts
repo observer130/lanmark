@@ -15,7 +15,8 @@ val tauriProperties = Properties().apply {
 
 android {
     compileSdk = 36
-    // 钉在已安装的 build-tools 34.0.0（AGP 8.11 默认要 35.0.0，本网络 Java 无法从 Google 自动下载，见 docs/03）
+    // 钉在 SDK 里已装的 build-tools 34.0.0：AGP 8.11 默认要 35.0.0，本网络下拖不下来。
+    // 换版本前必须先手工装好对应 build-tools，否则写在纸上也没用
     buildToolsVersion = "34.0.0"
     namespace = "com.lanmark.app"
     defaultConfig {
