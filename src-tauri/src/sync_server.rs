@@ -6,11 +6,12 @@
 //! handler 内联阻塞 IO 在当前量级（1e3-1e4 文件）是毫秒级，可接受。
 
 use std::collections::HashMap;
-use std::net::{TcpListener, UdpSocket};
+use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -32,7 +33,7 @@ pub const DEFAULT_PORT: u16 = 4180;
 /// 范围太窄会 AddrInUse（M3 测试矩阵扩到 80+ 后 4180..4200 已不够，再放宽）
 const MAX_PORT_TRIES: u16 = 60;
 
-/// vault 内同步元数据（.lanmark/sync.json）：设备名 + 配对码 + 已发 token
+/// vault 内同步元数据（.lanmark/sync.json）：设备名 + 配对码 + 已发 token + 设备身份
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncConfig {
@@ -40,6 +41,12 @@ pub struct SyncConfig {
     pub pairing_code: String,
     #[serde(default)]
     pub tokens: Vec<String>,
+    /// M4h-3：设备身份。桌面端 `ServerProfile.id` 绑它而非 `hash(url+token)`
+    /// ——原来 IP 一变就得重新配对，token 变新 → id 变新 → 基线文件 `sync-<id>.json`
+    /// 换名 → 下回合全库无基线 → 大量「双方都改」→ 冲突副本激增
+    /// （docs/08 §13.1 P4）。语义同 `pairing_code`：**随 vault**，不是设备全局。
+    #[serde(default)]
+    pub device_id: String,
 }
 
 fn sync_config_path(vault: &std::path::Path) -> PathBuf {
@@ -47,18 +54,33 @@ fn sync_config_path(vault: &std::path::Path) -> PathBuf {
 }
 
 pub fn load_sync_config(vault: &std::path::Path) -> SyncConfig {
-    std::fs::read_to_string(sync_config_path(vault))
+    let existing = std::fs::read_to_string(sync_config_path(vault))
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| {
+        .and_then(|s| serde_json::from_str::<SyncConfig>(&s).ok());
+    match existing {
+        Some(mut cfg) => {
+            // M4h-3 迁移：M2/M3 的 sync.json 没有 deviceId → 就地补上并落盘。
+            // **必须落盘**：不落盘的话每次读都生成新 id，桌面端身份永远对不上。
+            if cfg.device_id.is_empty() {
+                cfg.device_id = gen_device_id();
+                let _ = save_sync_config(vault, &cfg);
+            }
+            cfg
+        }
+        None => {
+            // 首次：生成码与身份并**立即落盘**。落盘是必须的——服务器 handler 每次
+            // 请求都从磁盘重读配置（切库后凭据要实时跟随），不落盘就会「返回给调用方
+            // 的码」和「handler 重新生成的码」不是同一个（曾因此在 M4h 回归里翻车）。
             let cfg = SyncConfig {
                 device_name: "Lanmark 手机".into(),
                 pairing_code: gen_pairing_code(),
                 tokens: Vec::new(),
+                device_id: gen_device_id(),
             };
             let _ = save_sync_config(vault, &cfg);
             cfg
-        })
+        }
+    }
 }
 
 pub fn save_sync_config(vault: &std::path::Path, cfg: &SyncConfig) -> std::io::Result<()> {
@@ -93,6 +115,23 @@ fn gen_pairing_code() -> String {
         .concat()
 }
 
+/// M4h-3 设备身份：随机 16 位十六进制。**与 pairing_code 不同，它不参与鉴权**，
+/// 只是「这台设备是谁」的稳定标识；泄露无害（对方仍需 token 才能读写）。
+fn gen_device_id() -> String {
+    use sha2::{Digest, Sha256};
+    let material = format!(
+        "device{}pid{}ptr{:p}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id(),
+        &std::env::temp_dir(),
+    );
+    let hash = Sha256::digest(material.as_bytes());
+    hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
 fn gen_token(code: &str) -> String {
     use sha2::{Digest, Sha256};
     let material = format!(
@@ -122,7 +161,32 @@ pub struct ServerCtx {
     /// 生产由 spawn 从 AppState.sync_notify 取（Tauri setup 注册的 emit 闭包），
     /// 测试注入计数器或保持 None（无操作）
     ui_notify: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// M4h-2：待授权的配对请求（「手机点允许」取代抄 8 位码，docs/08 §13.3 ②）
+    pending: Mutex<Vec<PendingPair>>,
 }
+
+/// M4h-2 一次待授权的配对请求。
+///
+/// 生命周期：桌面 POST /pair-request 入队 → 手机 UI 轮询看到并「允许/拒绝」
+/// → 桌面 GET /pair-status 取走 token。**nonce 单次消费**（取走即出队），
+/// 5 分钟过期，同时最多 `PAIR_PENDING_MAX` 条（§13.6 R11：杜绝排队轰炸）。
+#[derive(Debug, Clone)]
+pub struct PendingPair {
+    /// 客户端生成的一次性随机串（状态查询的凭据）
+    pub nonce: String,
+    /// 客户端名（桌面主机名；UI 展示「『nwj-PC』请求连接」）
+    pub client_name: String,
+    /// 请求来源 IP（UI 展示，便于用户辨识是否自己那台）
+    pub client_ip: String,
+    /// 入队时刻
+    pub at: std::time::Instant,
+    /// 用户决定：None = 等待中，Some(Ok(token)) = 已允许，Some(Err(msg)) = 已拒绝
+    pub decision: Option<Result<String, String>>,
+}
+
+/// 待授权请求上限与过期时间（docs/08 §13.6 R11）
+pub const PAIR_PENDING_MAX: usize = 3;
+pub const PAIR_PENDING_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Default)]
 pub(crate) struct PairGuard {
@@ -141,6 +205,7 @@ impl ServerCtx {
             cfg: Mutex::new(cfg),
             pair_guard: Mutex::new(PairGuard::default()),
             ui_notify: None,
+            pending: Mutex::new(Vec::new()),
         }
     }
 
@@ -148,6 +213,11 @@ impl ServerCtx {
     pub fn with_ui_notify(mut self, f: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
         self.ui_notify = f;
         self
+    }
+
+    /// M4h-3：当前设备身份（实时读，切库后跟随新库，同 pairing_code 语义）
+    fn device_id(&self) -> String {
+        self.current_config().map(|(_, c)| c.device_id).unwrap_or_default()
     }
 
     /// 服务器侧同步改动了 vault（push 落盘 / delete 生效）→ 通知前端刷新
@@ -250,9 +320,13 @@ async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     let (name, notes, assets) = tokio::task::spawn_blocking(move || light_stats(&app))
         .await
         .unwrap_or((String::new(), 0, 0));
+    // M4h-3：deviceId 让桌面端按「设备」而不是「URL」记住服务器（IP 变了自动找回）。
+    // 旧服务器无该字段 → 客户端看到空串，回退按名称匹配（docs/08 §13.3 ③）。
+    let device_id = ctx.device_id();
     Json(json!({
         "app": "lanmark",
         "name": name,
+        "deviceId": device_id,
         "notes": notes,
         "assets": assets,
         "requiresPairing": true,
@@ -313,6 +387,173 @@ async fn pair(
     drop(serial);
     res?;
     Ok(Json(json!({ "token": token, "name": cfg.device_name })))
+}
+
+// ---------- M4h-2：一键授权（取代抄 8 位配对码） ----------
+//
+// 桌面 POST /pair-request {clientName, nonce} → 手机上出现「允许/拒绝」
+// 桌面 GET  /pair-status?nonce=…            → 轮询等到 approved 时取走 token
+//
+// 安全感不降反升：8 位数字码只有 10^8 组合，LAN 内可穷尽（现靠退避兜）；
+// 而「**人在手机旁点允许**」是物理确认（docs/08 §13.3 ②）。
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairRequestBody {
+    client_name: String,
+    nonce: String,
+}
+
+/// 清理过期请求（每次访问 pending 时顺带做，无需后台任务）
+fn prune_pending(list: &mut Vec<PendingPair>) {
+    let now = std::time::Instant::now();
+    list.retain(|p| now.duration_since(p.at) < PAIR_PENDING_TTL);
+}
+
+/// POST /api/v1/pair-request —— 桌面发起配对请求，等待手机上的人点「允许」
+async fn pair_request(
+    State(ctx): State<Arc<ServerCtx>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<PairRequestBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let nonce = body.nonce.trim().to_string();
+    if nonce.is_empty() || nonce.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "nonce 非法".into()));
+    }
+    let name = body.client_name.trim().to_string();
+    if name.is_empty() || name.len() > 64 {
+        return Err((StatusCode::BAD_REQUEST, "客户端名非法".into()));
+    }
+    let mut list = ctx
+        .pending
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "请求队列锁中毒".into()))?;
+    prune_pending(&mut list);
+    // 同一 nonce 重复 POST（桌面重试）视作幂等，不占额度
+    if list.iter().any(|p| p.nonce == nonce) {
+        return Ok(Json(json!({ "status": "pending" })));
+    }
+    if list.len() >= PAIR_PENDING_MAX {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("待确认的配对请求过多（上限 {PAIR_PENDING_MAX}），请稍后再试"),
+        ));
+    }
+    list.push(PendingPair {
+        nonce,
+        client_name: name,
+        client_ip: addr.ip().to_string(),
+        at: std::time::Instant::now(),
+        decision: None,
+    });
+    // 立刻通知手机 UI 刷新（它在 5s 轮询，这里只是让它更快看到）
+    drop(list);
+    ctx.notify_ui();
+    Ok(Json(json!({ "status": "pending" })))
+}
+
+#[derive(Deserialize)]
+struct PairStatusQuery {
+    nonce: String,
+}
+
+/// GET /api/v1/pair-status?nonce=… —— 桌面轮询结果。
+///
+/// **nonce 单次消费**：取走决定即出队，二次查询一律 invalid（§13.5 测试项）。
+async fn pair_status(
+    State(ctx): State<Arc<ServerCtx>>,
+    axum::extract::Query(q): axum::extract::Query<PairStatusQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut list = ctx
+        .pending
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "请求队列锁中毒".into()))?;
+    prune_pending(&mut list);
+    let Some(idx) = list.iter().position(|p| p.nonce == q.nonce) else {
+        // 过期 / 已消费 / 从未存在 → 统一 invalid（不泄露是否曾经存在）
+        return Ok(Json(json!({ "status": "invalid" })));
+    };
+    // 已决定 → 取走并出队（单次消费）
+    if let Some(decision) = list[idx].decision.clone() {
+        list.remove(idx);
+        drop(list);
+        return match decision {
+            // `name` 是**服务器**（手机）的名字：桌面端要拿它填 profile.name
+            // 并显示在设备列表里——返回 clientName 等于把对方自己的名字回给他。
+            Ok(token) => Ok(Json(json!({
+                "status": "approved",
+                "token": token,
+                "name": ctx.current_config().map(|(_, c)| c.device_name).unwrap_or_default(),
+            }))),
+            Err(msg) => Ok(Json(json!({ "status": "rejected", "reason": msg }))),
+        };
+    }
+    Ok(Json(json!({ "status": "pending" })))
+}
+
+/// 待授权请求的 UI 视图（手机端面板用，不含 token）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPairView {
+    pub nonce: String,
+    pub client_name: String,
+    pub client_ip: String,
+    /// 入队至今秒数（UI 展示等待时长）
+    pub age_secs: u64,
+}
+
+/// 列出待授权请求（手机 UI 轮询用；顺带清理过期项）
+pub fn list_pending(ctx: &ServerCtx) -> Vec<PendingPairView> {
+    let Ok(mut list) = ctx.pending.lock() else { return vec![] };
+    prune_pending(&mut list);
+    list.iter()
+        .filter(|p| p.decision.is_none())
+        .map(|p| PendingPairView {
+            nonce: p.nonce.clone(),
+            client_name: p.client_name.clone(),
+            client_ip: p.client_ip.clone(),
+            age_secs: p.at.elapsed().as_secs(),
+        })
+        .collect()
+}
+
+/// 手机端「允许」：为该请求签发 token（与 /pair 同一落盘路径，token 持久化）
+pub fn approve_pending(ctx: &ServerCtx, nonce: &str) -> Result<(), String> {
+    let serial = ctx.cfg.lock().map_err(|_| "配置锁中毒".to_string())?;
+    let (vault, mut cfg) = {
+        let vault = ctx.vault()?;
+        let cfg = load_sync_config(&vault);
+        (vault, cfg)
+    };
+    let token = gen_token(&cfg.pairing_code);
+    let mut list = ctx.pending.lock().map_err(|_| "请求队列锁中毒".to_string())?;
+    prune_pending(&mut list);
+    let Some(p) = list.iter_mut().find(|p| p.nonce == nonce) else {
+        return Err("请求不存在或已过期".into());
+    };
+    if p.decision.is_some() {
+        return Err("该请求已处理".into());
+    }
+    p.decision = Some(Ok(token.clone()));
+    cfg.tokens.push(token);
+    let res = save_sync_config(&vault, &cfg).map_err(|e| format!("保存配置失败: {e}"));
+    drop(list);
+    drop(serial);
+    res
+}
+
+/// 手机端「拒绝」
+pub fn reject_pending(ctx: &ServerCtx, nonce: &str) -> Result<(), String> {
+    let mut list = ctx.pending.lock().map_err(|_| "请求队列锁中毒".to_string())?;
+    prune_pending(&mut list);
+    let Some(p) = list.iter_mut().find(|p| p.nonce == nonce) else {
+        return Err("请求不存在或已过期".into());
+    };
+    if p.decision.is_some() {
+        return Err("该请求已处理".into());
+    }
+    p.decision = Some(Err("用户拒绝".into()));
+    Ok(())
 }
 
 /// GET /api/v1/manifest —— 全量清单（notes + assets）
@@ -702,6 +943,8 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
     Router::new()
         .route("/api/v1/info", get(info))
         .route("/api/v1/pair", post(pair))
+        .route("/api/v1/pair-request", post(pair_request))
+        .route("/api/v1/pair-status", get(pair_status))
         .route("/api/v1/manifest", get(manifest))
         .route("/api/v1/pull", post(pull))
         .route("/api/v1/push", post(push))
@@ -757,6 +1000,8 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     // M3f：UI 刷新通知（Tauri setup 注册的 emit 闭包；测试直接建 ctx 时为 None = 无操作）
     let ui_notify = app.sync_notify.lock().map_err(|_| "sync_notify 锁中毒".to_string())?.clone();
     let ctx = Arc::new(ServerCtx::new(app, cfg).with_ui_notify(ui_notify));
+    // M4h-2：把 ctx 登记给命令层（UI 的「允许/拒绝」要操作它的 pending 队列）
+    register_active_ctx(&ctx);
 
     // mDNS 广播（best effort；Android 需 multicast lock，失败不阻断服务器）
     let mdns_name = {
@@ -796,6 +1041,29 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     Ok(port)
 }
 
+/// 活着的 `ServerCtx`（进程内单例）。
+///
+/// 为什么需要它：一键授权的 pending 队列与「允许/拒绝」按钮活在服务器线程里，
+/// 而 Tauri 命令只拿得到 `AppState`。存一份 `Weak` 引用即可——
+/// 服务器线程退出时引用自然失效，命令侧回「同步服务器未运行」，不会悬挂。
+static ACTIVE_CTX: std::sync::OnceLock<Mutex<std::sync::Weak<ServerCtx>>> =
+    std::sync::OnceLock::new();
+
+fn ctx_slot() -> &'static Mutex<std::sync::Weak<ServerCtx>> {
+    ACTIVE_CTX.get_or_init(|| Mutex::new(std::sync::Weak::new()))
+}
+
+pub fn register_active_ctx(ctx: &Arc<ServerCtx>) {
+    if let Ok(mut slot) = ctx_slot().lock() {
+        *slot = Arc::downgrade(ctx);
+    }
+}
+
+/// 当前活着的服务器上下文（None = 未启动或已退出）
+pub fn active_ctx() -> Option<Arc<ServerCtx>> {
+    ctx_slot().lock().ok().and_then(|s| s.upgrade())
+}
+
 /// 服务器线程退出后把 sync_port 置回 None（自愈：下次 sync_server_start 可重新绑定）
 fn reset_sync_port(app: &Arc<AppState>) {
     if let Ok(mut p) = app.sync_port.lock() {
@@ -811,7 +1079,12 @@ pub(crate) async fn serve_on(
     // tokio 要求 fd 先行 nonblocking（否则 panic，tokio#7172）
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
-    axum::serve(listener, router(ctx)).await
+    // with_connect_info：/pair-request 需要来源 IP（UI 展示给用户辨识，docs/08 §13.6 R11）
+    axum::serve(
+        listener,
+        router(ctx).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }
 
 /// mDNS 注册 _lanmark._tcp（服务名 = 设备名）。失败仅记日志。
@@ -866,6 +1139,16 @@ pub struct SyncPairingInfo {
     /// 最近一次客户端回合时间（unix ms；服务器重启后为 None）
     #[serde(default)]
     pub last_round_at: Option<i64>,
+    /// D10：本机局域网地址，形如 `http://192.168.1.23:4180`。
+    /// 解开「诊断要先知道 IP、可我不知道 IP」的死循环——手机面板直接显示它。
+    #[serde(default)]
+    pub lan_ip: Option<String>,
+    /// M4h-3：设备身份（展示用；桌面端按它记住这台手机）
+    #[serde(default)]
+    pub device_id: String,
+    /// M4h-2：待授权配对请求（仅非空时前端渲染卡片）
+    #[serde(default)]
+    pub pending_pairs: Vec<PendingPairView>,
 }
 
 /// 同步服务器状态 + 配对信息（手机端 UI 展示）
@@ -884,13 +1167,36 @@ pub fn sync_pairing_info(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<Sy
         let t = state.last_sync_round_at.load(std::sync::atomic::Ordering::Relaxed);
         (t > 0).then_some(t)
     };
+    // D10：本机地址（UDP connect 探默认出口网卡，不真正发包）
+    let lan_ip = port.and_then(|p| local_lan_ip().map(|ip| format!("http://{ip}:{p}")));
+    // M4h-2：待授权请求来自活着的 ServerCtx（服务器线程持有）
+    let pending_pairs = crate::sync_server::active_ctx()
+        .map(|ctx| list_pending(&ctx))
+        .unwrap_or_default();
     Ok(SyncPairingInfo {
         running: port.is_some(),
         port,
         device_name: cfg.device_name,
         pairing_code: cfg.pairing_code,
         last_round_at,
+        lan_ip,
+        device_id: cfg.device_id,
+        pending_pairs,
     })
+}
+
+/// M4h-2：手机端「允许」一次配对请求（UI 点按钮 → 这里）
+#[tauri::command]
+pub fn sync_pair_approve(nonce: String) -> CmdResult<()> {
+    let ctx = active_ctx().ok_or("同步服务器未运行")?;
+    approve_pending(&ctx, &nonce)
+}
+
+/// M4h-2：手机端「拒绝」一次配对请求
+#[tauri::command]
+pub fn sync_pair_reject(nonce: String) -> CmdResult<()> {
+    let ctx = active_ctx().ok_or("同步服务器未运行")?;
+    reject_pending(&ctx, &nonce)
 }
 
 /// vault 内冲突副本计数（docs/07 §6 手机端可发现性）：
@@ -942,20 +1248,31 @@ pub(crate) mod test_util {
     use std::path::Path;
 
     pub(crate) fn start_phone_server(phone_vault: &Path, app: Arc<AppState>) -> (String, String) {
+        let (base, code, _ctx) = start_phone_server_with_ctx(phone_vault, app);
+        (base, code)
+    }
+
+    /// 同 `start_phone_server`，但把 `ServerCtx` 交出来——M4h-2 的一键授权
+    /// 测试要直接从「手机侧」调 approve/reject（UI 点按钮就是在做这件事）。
+    pub(crate) fn start_phone_server_with_ctx(
+        phone_vault: &Path,
+        app: Arc<AppState>,
+    ) -> (String, String, Arc<ServerCtx>) {
         let (port, listener) = bind_listener().unwrap();
         let cfg = load_sync_config(phone_vault);
         let code = cfg.pairing_code.clone();
         let ctx = Arc::new(ServerCtx::new(app, cfg));
+        let ctx2 = Arc::clone(&ctx);
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let _ = serve_on(listener, ctx).await;
+                let _ = serve_on(listener, ctx2).await;
             });
         });
-        (format!("http://127.0.0.1:{port}"), code)
+        (format!("http://127.0.0.1:{port}"), code, ctx)
     }
 }
 
@@ -1522,5 +1839,298 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("服务器 2s 内未就绪");
+    }
+
+    // ---------- M4h-2：一键授权（取代抄 8 位配对码） ----------
+
+    /// nonce 全流程：入队 → 手机允许 → 桌面拿到 token；与 /pair 同落盘路径
+    #[test]
+    fn pair_request_approve_yields_usable_token() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, _code, ctx) = test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+
+        // 桌面发起
+        let c = reqwest::blocking::Client::new();
+        let r = c
+            .post(format!("{base}/api/v1/pair-request"))
+            .json(&serde_json::json!({ "clientName": "nwj-PC", "nonce": "n-1" }))
+            .send()
+            .unwrap();
+        assert_eq!(r.status(), 200);
+
+        // 手机 UI 看到待授权请求
+        let pending = list_pending(&ctx);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].client_name, "nwj-PC");
+        assert_eq!(pending[0].nonce, "n-1");
+
+        // 状态：还在等
+        let st: serde_json::Value = c
+            .get(format!("{base}/api/v1/pair-status?nonce=n-1"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(st["status"], "pending");
+
+        // 用户点「允许」→ token 落进 sync.json
+        approve_pending(&ctx, "n-1").unwrap();
+        let cfg = load_sync_config(dir.path());
+        assert_eq!(cfg.tokens.len(), 1);
+
+        // 桌面取走 token（单次消费）
+        let st: serde_json::Value = c
+            .get(format!("{base}/api/v1/pair-status?nonce=n-1"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(st["status"], "approved");
+        // name 是**服务器**（手机）的名字——桌面端拿它填 profile.name，
+        // 不是自己提交的 clientName
+        assert_eq!(st["name"], "Lanmark 手机");
+        let token = st["token"].as_str().unwrap().to_string();
+        assert_eq!(token, cfg.tokens[0], "签发的就是落盘的那个");
+
+        // token 真能用（manifest 带鉴权）
+        let ok = c
+            .get(format!("{base}/api/v1/manifest"))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .unwrap();
+        assert!(ok.status().is_success());
+    }
+
+    /// nonce 二次消费必须失败（§13.5 测试项）
+    #[test]
+    fn pair_status_nonce_is_single_use() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, _code, ctx) = test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+
+        let c = reqwest::blocking::Client::new();
+        c.post(format!("{base}/api/v1/pair-request"))
+            .json(&serde_json::json!({ "clientName": "pc", "nonce": "once" }))
+            .send()
+            .unwrap();
+        approve_pending(&ctx, "once").unwrap();
+
+        let first: serde_json::Value = c
+            .get(format!("{base}/api/v1/pair-status?nonce=once"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(first["status"], "approved");
+
+        // 二次：已出队 → invalid（不泄露「曾经存在」）
+        let second: serde_json::Value = c
+            .get(format!("{base}/api/v1/pair-status?nonce=once"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(second["status"], "invalid");
+        assert!(second.get("token").is_none(), "不得重复发 token");
+    }
+
+    /// 拒绝：桌面收到 rejected，且不签发 token
+    #[test]
+    fn pair_request_reject_issues_no_token() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, _code, ctx) = test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+
+        let c = reqwest::blocking::Client::new();
+        c.post(format!("{base}/api/v1/pair-request"))
+            .json(&serde_json::json!({ "clientName": "stranger", "nonce": "n-rej" }))
+            .send()
+            .unwrap();
+        reject_pending(&ctx, "n-rej").unwrap();
+
+        let st: serde_json::Value = c
+            .get(format!("{base}/api/v1/pair-status?nonce=n-rej"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(st["status"], "rejected");
+        assert!(load_sync_config(dir.path()).tokens.is_empty(), "拒绝不得发 token");
+        // 拒绝后列表里不再显示
+        assert!(list_pending(&ctx).is_empty());
+    }
+
+    /// pending 上限 3：第 4 个请求被 429（§13.6 R11 杜绝排队轰炸）
+    #[test]
+    fn pair_request_pending_cap() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, _code, _ctx) = test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+
+        let c = reqwest::blocking::Client::new();
+        let post = |nonce: &str| {
+            c.post(format!("{base}/api/v1/pair-request"))
+                .json(&serde_json::json!({ "clientName": "pc", "nonce": nonce }))
+                .send()
+                .unwrap()
+                .status()
+        };
+        assert_eq!(post("a"), 200);
+        assert_eq!(post("b"), 200);
+        assert_eq!(post("c"), 200);
+        assert_eq!(post("d"), 429, "超过上限应拒绝");
+
+        // 同一 nonce 重发是幂等的（桌面重试不该占额度）
+        assert_eq!(post("a"), 200);
+        // 拒绝一个腾出额度后，新的可以进来
+        let ctx = _ctx;
+        reject_pending(&ctx, "a").unwrap();
+        // 注意：已决定但未被取走的仍占位，这里取走它
+        let _: serde_json::Value = c
+            .get(format!("{base}/api/v1/pair-status?nonce=a"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(post("e"), 200);
+    }
+
+    /// 过期请求不能批准（TTL 5min；测试直接改入队时刻模拟过期）
+    #[test]
+    fn expired_pair_request_cannot_be_approved() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (_base, _code, ctx) = test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+
+        {
+            let mut list = ctx.pending.lock().unwrap();
+            list.push(PendingPair {
+                nonce: "old".into(),
+                client_name: "pc".into(),
+                client_ip: "127.0.0.1".into(),
+                at: std::time::Instant::now() - PAIR_PENDING_TTL - Duration::from_secs(1),
+                decision: None,
+            });
+        }
+        // 过期项在 prune 时被丢掉 → 批准找不到
+        assert!(list_pending(&ctx).is_empty(), "过期项不显示");
+        assert!(approve_pending(&ctx, "old").is_err(), "过期项不可批准");
+        assert!(load_sync_config(dir.path()).tokens.is_empty());
+    }
+
+    /// 非法入参被拒（nonce 空/超长、clientName 空/超长）
+    #[test]
+    fn pair_request_validates_input() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, _code, _ctx) = test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+        let c = reqwest::blocking::Client::new();
+        let post = |name: &str, nonce: &str| {
+            c.post(format!("{base}/api/v1/pair-request"))
+                .json(&serde_json::json!({ "clientName": name, "nonce": nonce }))
+                .send()
+                .unwrap()
+                .status()
+        };
+        assert_eq!(post("pc", ""), 400);
+        assert_eq!(post("pc", &"n".repeat(200)), 400);
+        assert_eq!(post("", "n-x"), 400);
+        assert_eq!(post(&"p".repeat(100), "n-y"), 400);
+        assert_eq!(post("pc", "n-ok"), 200);
+    }
+
+    // ---------- M4h-3：设备身份 ----------
+
+    /// device_id 首次生成即持久化，再次加载不变（否则桌面端身份永远对不上）
+    #[test]
+    fn device_id_is_persistent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::fs_ops::ensure_layout(dir.path()).unwrap();
+        let a = load_sync_config(dir.path());
+        assert!(!a.device_id.is_empty());
+        assert_eq!(a.device_id.len(), 16, "16 位十六进制");
+        let b = load_sync_config(dir.path());
+        assert_eq!(a.device_id, b.device_id, "二次加载必须相同");
+        assert_eq!(a.pairing_code, b.pairing_code, "配对码同样落盘（回归）");
+    }
+
+    /// M2/M3 的 sync.json（无 deviceId）→ 加载时补上并落盘
+    #[test]
+    fn legacy_sync_json_gains_device_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::fs_ops::ensure_layout(dir.path()).unwrap();
+        let path = dir.path().join(crate::fs_ops::META_DIR).join("sync.json");
+        std::fs::write(
+            &path,
+            r#"{"deviceName":"老手机","pairingCode":"12345678","tokens":["tok"]}"#,
+        )
+        .unwrap();
+
+        let cfg = load_sync_config(dir.path());
+        assert_eq!(cfg.pairing_code, "12345678", "旧字段保留");
+        assert_eq!(cfg.tokens, vec!["tok".to_string()]);
+        assert!(!cfg.device_id.is_empty(), "补上身份");
+        // 落盘了：重新读文件也有
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("deviceId"), "迁移结果必须写回磁盘: {raw}");
+        assert_eq!(load_sync_config(dir.path()).device_id, cfg.device_id);
+    }
+
+    /// /info 返回 deviceId（桌面端据此按设备而非 URL 记服务器）
+    #[test]
+    fn info_exposes_device_id() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, _code, _ctx) = test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+        let expected = load_sync_config(dir.path()).device_id;
+
+        let info = crate::sync_client::fetch_info(&base).unwrap();
+        assert_eq!(info.app, "lanmark");
+        assert_eq!(info.device_id, expected);
+        assert_eq!(info.name, "Lanmark 手机");
+    }
+
+    /// 非 lanmark 服务不得被当成笔记库（LAN 扫描会连到任意开着 4180 的主机）
+    #[test]
+    fn fetch_info_rejects_foreign_service() {
+        // 一个只回普通 JSON 的服务器
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut s, &mut buf);
+                let body = r#"{"hello":"world"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{}",
+                    body.len(),
+                    body
+                );
+                let _ = std::io::Write::write_all(&mut s, resp.as_bytes());
+            }
+        });
+        let r = crate::sync_client::fetch_info(&format!("http://127.0.0.1:{port}"));
+        assert!(r.is_err(), "非 lanmark 服务必须被拒: {r:?}");
     }
 }

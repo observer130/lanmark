@@ -2,6 +2,7 @@ mod bridge;
 mod commands;
 mod db;
 mod fs_ops;
+mod lan_scan;
 mod mobile;
 mod protocol;
 mod sanitize;
@@ -133,8 +134,12 @@ pub fn run() {
             sync_server::sync_pairing_info,
             sync_server::sync_server_start,
             sync_server::sync_conflict_count,
+            sync_server::sync_pair_approve,
+            sync_server::sync_pair_reject,
             sync_client::sync_discover,
+            sync_client::sync_scan_lan,
             sync_client::sync_pair,
+            sync_client::sync_connect_device,
             sync_client::sync_servers,
             sync_client::sync_server_remove,
             sync_client::sync_now,

@@ -23,9 +23,14 @@ const PUSH_BATCH: usize = 8;
 type PullBatch = (Vec<crate::sync::PullFile>, Vec<(String, String)>);
 
 /// 已配对服务器（桌面侧 app_config_dir/sync-servers.json）
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerProfile {
+    /// M4h-3：**必须等于 `device_id`**（服务器 `/info` 返回的身份）。
+    /// M2/M3 时期是 `hash(url+token)[..8]` —— 那样 IP 一变就得重配对，token 变新
+    /// → id 变新 → 基线文件 `sync-<id>.json` 换名 → 下回合全库无基线 →
+    /// 大量「双方都改」→ 冲突副本激增（docs/08 §13.1 P4）。
+    /// 改绑设备身份后 IP 变化只需改 `url`，基线不丢。
     pub id: String,
     pub name: String,
     pub url: String,
@@ -34,6 +39,13 @@ pub struct ServerProfile {
     /// 最近一次回合成功时间（unix ms；M3e 状态 UI 展示，重启不丢）
     #[serde(default)]
     pub last_success_at: Option<i64>,
+    /// M4h-3：设备身份（来自 `/info` 的 `deviceId`）。
+    /// 旧服务器无该字段 → 空串，回退按名称匹配（`match_by_identity`）。
+    #[serde(default)]
+    pub device_id: String,
+    /// M4h-3：上次已知端口（IP 变了按 device_id 找回时优先试它，少扫 10 个端口）
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 /// mDNS 发现结果
@@ -70,6 +82,51 @@ pub fn load_servers(app: &tauri::AppHandle) -> Vec<ServerProfile> {
         .unwrap_or_default()
 }
 
+/// M4h-3 一次性迁移：把 M2/M3 的旧 profile 换绑到设备身份。
+///
+/// 旧 profile 的 `id = hash(url+token)[..8]`，基线文件叫 `sync-<旧id>.json`。
+/// 迁移步骤：
+///   1. 探测每个旧 profile 的 `/info` 拿 `deviceId`
+///   2. 新 id = `d<deviceId>`；**把基线文件改名**（`sync-<旧id>.json` →
+///      `sync-<新id>.json`）而不是重建——重建等于丢掉「上轮已知状态」，
+///      下个回合会把全部差异判成「双方都改」，正是 P4 要修的现象
+///      （docs/08 §13.6 R12：测试钉住「迁移前后 skipped 计数一致」）
+///   3. 探测不到的（离线）保持原样，下次同步时再迁
+///
+/// 幂等：已有 `device_id` 的 profile 直接跳过。
+/// 返回迁移成功的数量。
+pub fn migrate_profiles_to_device_id(vault: &Path, servers: &mut [ServerProfile]) -> usize {
+    let mut migrated = 0;
+    for p in servers.iter_mut() {
+        if !p.device_id.is_empty() {
+            continue;
+        }
+        let Ok(info) = fetch_info(&p.url) else { continue };
+        if info.device_id.is_empty() {
+            continue; // 旧服务器：没有身份可用，保持按 url/token 的 id
+        }
+        let old_id = p.id.clone();
+        let new_id = profile_id(&info.device_id, &p.url, &p.token);
+        if new_id != old_id {
+            // 基线文件改名（不是重建）：改名保状态，重建丢状态
+            let from = sync_state_path(vault, &old_id);
+            let to = sync_state_path(vault, &new_id);
+            if from.exists() && !to.exists() {
+                if let Err(e) = std::fs::rename(&from, &to) {
+                    log::warn!("基线文件改名失败 {old_id} → {new_id}: {e}（保持旧 id）");
+                    continue; // 改名失败就不换 id，否则会丢基线
+                }
+            }
+            p.id = new_id;
+        }
+        p.device_id = info.device_id;
+        p.name = info.name;
+        p.port = port_of_url(&p.url);
+        migrated += 1;
+    }
+    migrated
+}
+
 pub fn save_servers(app: &tauri::AppHandle, servers: &[ServerProfile]) -> Result<(), String> {
     let path = servers_path(app)?;
     if let Some(dir) = path.parent() {
@@ -81,6 +138,46 @@ pub fn save_servers(app: &tauri::AppHandle, servers: &[ServerProfile]) -> Result
         serde_json::to_string_pretty(servers).map_err(|e| e.to_string())?.as_bytes(),
     )
     .map_err(|e| e.to_string())
+}
+
+/// 从 `http://host:port` 取端口（不引 url crate：格式由 `normalize_url` 保证）
+fn port_of_url(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("http://")?;
+    let (_, port) = rest.rsplit_once(':')?;
+    port.split('/').next()?.parse().ok()
+}
+
+/// M4h-3：按设备身份匹配 profile。
+///
+/// 优先 `device_id`（稳定身份，IP/端口变了也算同一台）；对方是旧版本服务器
+/// （`/info` 无 `deviceId`）时回退按**名称**匹配——名称匹配可能误配，
+/// 所以只在 deviceId 缺失时用（docs/08 §13.3 ③、§13.5 测试项）。
+pub fn match_by_identity<'a>(
+    servers: &'a [ServerProfile],
+    device_id: &str,
+    name: &str,
+) -> Option<&'a ServerProfile> {
+    if !device_id.is_empty() {
+        if let Some(p) = servers.iter().find(|s| s.device_id == device_id) {
+            return Some(p);
+        }
+    }
+    if name.is_empty() {
+        return None;
+    }
+    servers
+        .iter()
+        .find(|s| s.device_id.is_empty() && s.name == name)
+}
+
+/// M4h-3：profile 的稳定 id。有 deviceId 就用它（`d<id>` 前缀便于人眼区分），
+/// 否则（旧服务器）沿用老的 `hash(url+token)` 方案。
+pub fn profile_id(device_id: &str, url: &str, token: &str) -> String {
+    if !device_id.is_empty() {
+        return format!("d{device_id}");
+    }
+    let hash = fs_ops::content_hash(format!("{url}{token}").as_bytes());
+    format!("s{}", &hash[..8])
 }
 
 pub fn normalize_url(raw: &str) -> Result<String, String> {
@@ -913,6 +1010,265 @@ pub async fn sync_discover() -> CmdResult<Vec<Discovered>> {
         .map_err(|e| format!("发现任务失败: {e}"))
 }
 
+// ---------- M4h-1：LAN 扫描发现 ----------
+
+/// 扫描结果（含 deviceId，供 M4h-3 按设备身份匹配）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanResult {
+    pub devices: Vec<crate::lan_scan::ScannedDevice>,
+    /// 因预算截断（可能不全）——UI 说明用
+    pub truncated: bool,
+    /// 是否做了网段全扫（设置里的开关；关掉时为 false，UI 说明「仅查了已知设备」）
+    pub scanned_subnet: bool,
+}
+
+/// LAN 发现（M4h-1）：mDNS 一级 best effort → L1 邻居表 → L2 本机网段并发探测。
+///
+/// **命中即停**：mDNS 或已知地址命中就不再扫描（docs/08 §13.3）——家庭网
+/// 一次 browse 就够，公司网才退到扫描。整个命令走 `spawn_blocking`，
+/// UI 显示「搜索中」不卡界面（§13.6 R13）。
+#[tauri::command]
+pub async fn sync_scan_lan(
+    app: tauri::AppHandle,
+    allow_subnet: Option<bool>,
+) -> CmdResult<ScanResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let allow_subnet = allow_subnet.unwrap_or(true);
+        // L0-a：mDNS（2s browse；失败/为空都继续往下走）
+        let mdns = discover(Duration::from_secs(2));
+        // L0-b：已配对 profile 的历史 URL（含历史端口）——IP 变了也能靠它试旧地址
+        let servers = load_servers(&app);
+        let mut known: Vec<String> = mdns.iter().map(|d| d.url.clone()).collect();
+        for s in &servers {
+            if !known.contains(&s.url) {
+                known.push(s.url.clone());
+            }
+        }
+
+        // 同网段里已配对服务器的历史端口优先（该设备上次用的端口）
+        let known_port = servers.first().and_then(|s| port_of_url(&s.url));
+
+        let neighbors = crate::lan_scan::neighbor_addresses();
+        let subnets =
+            crate::lan_scan::subnet_candidates(&crate::lan_scan::local_ipv4_addrs());
+
+        let plan = crate::lan_scan::ScanPlan {
+            known,
+            neighbors,
+            subnets,
+            known_port,
+            allow_subnet,
+        };
+        let probe = crate::lan_scan::HttpInfoProbe;
+        let out = crate::lan_scan::run_scan(&plan, &probe);
+        Ok(ScanResult {
+            devices: out.devices,
+            truncated: out.truncated,
+            scanned_subnet: allow_subnet,
+        })
+    })
+    .await
+    .map_err(|e| format!("扫描任务失败: {e}"))?
+}
+
+// ---------- M4h-2：桌面侧「一键授权」客户端 ----------
+
+/// 配对请求的轮询结局（前端四态：等待 / 批准 / 拒绝 / 超时）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairAttempt {
+    /// "approved" | "rejected" | "timeout" | "error"
+    pub status: String,
+    /// approved 时的 profile（已落盘）
+    pub profile: Option<ServerProfile>,
+    /// rejected / error 时的原因
+    pub reason: Option<String>,
+}
+
+/// 客户端名：桌面主机名（手机端 UI 显示「『nwj-PC』请求连接」）。
+/// 拿不到主机名就退回平台名——UI 里显示成「你的电脑」也比空白强。
+fn client_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "Lanmark 电脑".into()))
+}
+
+/// 生成一次性 nonce（32 位十六进制）
+fn gen_nonce() -> String {
+    use sha2::{Digest, Sha256};
+    let material = format!(
+        "{}{}{:p}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id(),
+        &std::env::temp_dir(),
+    );
+    let hash = Sha256::digest(material.as_bytes());
+    hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+/// 提交配对请求并轮询等待手机端点「允许」（docs/08 §13.3 ②）。
+///
+/// 桌面等待上限 90s（§13.3：超时/拒绝 → 面板回到设备列表并提示）。
+/// 返回 `PairAttempt`，**不抛错**——超时与拒绝都是正常结局，交给 UI 呈现。
+/// 阻塞；调用方负责放到 blocking 线程。
+pub fn request_pair_blocking(
+    url: &str,
+    timeout: Duration,
+) -> PairAttempt {
+    let url = match normalize_url(url) {
+        Ok(u) => u,
+        Err(e) => return PairAttempt { status: "error".into(), profile: None, reason: Some(e) },
+    };
+    let nonce = gen_nonce();
+    let c = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return PairAttempt { status: "error".into(), profile: None, reason: Some(e.to_string()) }
+        }
+    };
+    let posted = c
+        .post(format!("{url}/api/v1/pair-request"))
+        .json(&serde_json::json!({ "clientName": client_name(), "nonce": nonce }))
+        .send();
+    match posted {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            return PairAttempt {
+                status: "error".into(),
+                profile: None,
+                reason: Some("对方手机上待确认的请求过多，请稍后再试".into()),
+            }
+        }
+        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
+            // 旧版本服务器没有这个端点 → 提示用户走「手动连接」（8 位配对码兜底）
+            return PairAttempt {
+                status: "error".into(),
+                profile: None,
+                reason: Some("对方是无一键授权的旧版本，请用「手动连接」输入配对码".into()),
+            }
+        }
+        Ok(r) => {
+            return PairAttempt {
+                status: "error".into(),
+                profile: None,
+                reason: Some(format!("请求失败（HTTP {}）", r.status())),
+            }
+        }
+        Err(e) => {
+            return PairAttempt {
+                status: "error".into(),
+                profile: None,
+                reason: Some(format!("连接失败: {e}")),
+            }
+        }
+    }
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return PairAttempt {
+                status: "timeout".into(),
+                profile: None,
+                reason: Some("等待对方确认超时".into()),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        let resp = c
+            .get(format!("{url}/api/v1/pair-status"))
+            .query(&[("nonce", nonce.as_str())])
+            .send();
+        let Ok(resp) = resp else { continue }; // 网络抖动：继续轮询到超时
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(v) = resp.json::<serde_json::Value>() else { continue };
+        match v.get("status").and_then(|s| s.as_str()) {
+            Some("pending") => continue,
+            Some("approved") => {
+                let Some(token) = v.get("token").and_then(|t| t.as_str()) else {
+                    continue;
+                };
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("Lanmark 手机")
+                    .to_string();
+                // 取设备身份（决定 profile.id）——拿不到就退回 hash id
+                let device_id = fetch_info(&url).map(|i| i.device_id).unwrap_or_default();
+                return PairAttempt {
+                    status: "approved".into(),
+                    profile: Some(ServerProfile {
+                        id: profile_id(&device_id, &url, token),
+                        name,
+                        url: url.clone(),
+                        token: token.to_string(),
+                        last_success_at: None,
+                        device_id,
+                        port: port_of_url(&url),
+                    }),
+                    reason: None,
+                };
+            }
+            Some("rejected") => {
+                return PairAttempt {
+                    status: "rejected".into(),
+                    profile: None,
+                    reason: v
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| Some("对方拒绝了这次连接".into())),
+                }
+            }
+            // invalid：过期或被消费
+            _ => {
+                return PairAttempt {
+                    status: "timeout".into(),
+                    profile: None,
+                    reason: Some("请求已过期，请重试".into()),
+                }
+            }
+        }
+    }
+}
+
+/// 一键授权连接设备（桌面 UI：[连接] 按钮）。成功即落盘 profile。
+///
+/// `timeoutSecs` 由前端给（默认 90）；上限 300s 防前端传个巨大的值把线程占住。
+#[tauri::command]
+pub async fn sync_connect_device(
+    app: tauri::AppHandle,
+    url: String,
+    timeout_secs: Option<u64>,
+) -> CmdResult<PairAttempt> {
+    let secs = timeout_secs.unwrap_or(90).clamp(5, 300);
+    tauri::async_runtime::spawn_blocking(move || {
+        let attempt = request_pair_blocking(&url, Duration::from_secs(secs));
+        if let Some(profile) = &attempt.profile {
+            let mut servers = load_servers(&app);
+            servers.retain(|s| {
+                s.url != profile.url
+                    && (profile.device_id.is_empty() || s.device_id != profile.device_id)
+            });
+            servers.push(profile.clone());
+            save_servers(&app, &servers)?;
+        }
+        Ok(attempt)
+    })
+    .await
+    .map_err(|e| format!("配对任务失败: {e}"))?
+}
+
 /// 配对并保存服务器（pair 成功才落盘）
 #[tauri::command]
 pub async fn sync_pair(
@@ -922,12 +1278,24 @@ pub async fn sync_pair(
 ) -> CmdResult<ServerProfile> {
     tauri::async_runtime::spawn_blocking(move || {
         let (token, name) = pair(&url, &code)?;
+        let url = normalize_url(&url)?;
+        // M4h-3：配对后立刻取 deviceId，让 profile 从第一次起就绑设备身份
+        let device_id = fetch_info(&url).map(|i| i.device_id).unwrap_or_default();
         let mut servers = load_servers(&app);
-        let hash = fs_ops::content_hash(format!("{url}{token}").as_bytes());
-        let id = format!("s{}", &hash[..8]);
-        let profile =
-            ServerProfile { id: id.clone(), name, url: normalize_url(&url)?, token, last_success_at: None };
-        servers.retain(|s| s.url != profile.url);
+        let profile = ServerProfile {
+            id: profile_id(&device_id, &url, &token),
+            name,
+            url: url.clone(),
+            token,
+            last_success_at: None,
+            device_id,
+            port: port_of_url(&url),
+        };
+        // 同一台设备（按身份）或同一个 url 都视为已在列表里 → 替换而不是新增
+        servers.retain(|s| {
+            s.url != profile.url
+                && (profile.device_id.is_empty() || s.device_id != profile.device_id)
+        });
         servers.push(profile.clone());
         save_servers(&app, &servers)?;
         Ok(profile)
@@ -990,33 +1358,50 @@ pub async fn sync_now(
     Ok(report)
 }
 
+/// `/api/v1/info` 的响应体（M4h-1 起多带 `deviceId`）
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InfoResponse {
+    pub app: String,
+    pub name: String,
+    /// M4h-3：设备身份。**旧服务器无该字段 → 空串**，调用方回退名称匹配
+    /// （docs/08 §13.3 ③）
+    pub device_id: String,
+    pub notes: u64,
+    pub assets: u64,
+}
+
+/// GET `/api/v1/info`（无鉴权、3s 超时）——探测与扫描共用的唯一入口。
+///
+/// 校验 `app == "lanmark"`：M4h-1 的 LAN 扫描会连到任意开着 4180 端口的主机，
+/// 没有这个校验就会把别人的服务当成笔记库列给用户（docs/08 §13.3 ①）。
+pub fn fetch_info(url: &str) -> Result<InfoResponse, String> {
+    let c = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("构建客户端失败: {e}"))?;
+    let r = c
+        .get(format!("{}/api/v1/info", url.trim_end_matches('/')))
+        .send()
+        .map_err(|e| format!("连接失败: {e}"))?;
+    if !r.status().is_success() {
+        return Err(format!("服务返回 {}", r.status()));
+    }
+    let info: InfoResponse = r.json().map_err(|e| format!("响应解析失败: {e}"))?;
+    if info.app != "lanmark" {
+        return Err("不是 Lanmark 服务器".into());
+    }
+    Ok(info)
+}
+
 /// M3 自动同步循环的轻量探测（阻塞，可单测）：GET /info（无鉴权、3s 超时）。
 /// 不读清单、不算 hash——单线程服务器上被刷请求会停摆，循环每 60s 一探测必须廉价。
 /// 网络错误/超时/非 2xx 一律 online=false（探测永不抛错：循环按退避继续）。
 pub(crate) fn probe_server(url: &str, name: &str) -> ProbeResult {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Info {
-        name: String,
-        notes: u64,
-        assets: u64,
-    }
-    let ok = (|| -> Option<(String, u64, u64)> {
-        let c = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .connect_timeout(Duration::from_secs(3))
-            .build()
-            .ok()?;
-        let r = c.get(format!("{url}/api/v1/info")).send().ok()?;
-        if !r.status().is_success() {
-            return None;
-        }
-        let i: Info = r.json().ok()?;
-        Some((i.name, i.notes, i.assets))
-    })();
-    match ok {
-        Some((name, notes, assets)) => ProbeResult { online: true, name, notes, assets },
-        None => ProbeResult { online: false, name: name.to_string(), notes: 0, assets: 0 },
+    match fetch_info(url) {
+        Ok(i) => ProbeResult { online: true, name: i.name, notes: i.notes, assets: i.assets },
+        Err(_) => ProbeResult { online: false, name: name.to_string(), notes: 0, assets: 0 },
     }
 }
 
@@ -1138,7 +1523,7 @@ mod tests {
         // 配对 → round 1：手机 → 桌面（2 文件），桌面 → 手机（1 笔记）
         let (token, name) = pair(&base, &code).unwrap();
         assert!(!name.is_empty());
-        let profile = ServerProfile { id: "s1".into(), name: name.clone(), url: base.clone(), token, last_success_at: None };
+        let profile = ServerProfile { id: "s1".into(), name: name.clone(), url: base.clone(), token, last_success_at: None, ..Default::default() };
         let r1 = sync_round(&desk, &profile).unwrap();
         assert_eq!(r1.pulled.len(), 2, "拉回笔记+附件: {:?}", r1);
         assert_eq!(r1.pushed.len(), 1, "推走桌面笔记: {:?}", r1);
@@ -1182,7 +1567,7 @@ mod tests {
 
         let (desk_dir, desk) = client_vault();
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         // 先同步让桌面拿到原始内容
         let r0 = sync_round(&desk, &profile).unwrap();
@@ -1234,7 +1619,7 @@ mod tests {
 
         let (desk_dir, desk) = client_vault();
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
 
         let r0 = sync_round(&desk, &profile).unwrap();
         assert_eq!(r0.pulled.len(), 1);
@@ -1295,8 +1680,8 @@ mod tests {
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
         // 两个客户端各用独立 id（基线按 id 隔离，模拟两台桌面）
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1355,8 +1740,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1418,8 +1803,8 @@ mod tests {
         note_write_op(&phone, &p.path, "基础版").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1500,8 +1885,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1572,8 +1957,8 @@ mod tests {
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
-        let base_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let base_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let base_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let base_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
         let _ = sync_round(&deskA, &base_a).unwrap();
         let _ = sync_round(&deskB, &base_b).unwrap();
         let stale_base = c
@@ -1627,8 +2012,8 @@ mod tests {
         note_write_op(&phone, &p.path, "内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1690,8 +2075,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1739,8 +2124,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1789,8 +2174,8 @@ mod tests {
         note_write_op(&phone, &p.path, "原始").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (_dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1826,8 +2211,8 @@ mod tests {
         note_write_op(&phone, &p.path, "内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1860,8 +2245,8 @@ mod tests {
         note_write_op(&phone, &p.path, "旧内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1925,8 +2310,8 @@ mod tests {
         let asset = asset_save_op(&phone, &b64_encode(b"dir-asset"), "png").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -1984,7 +2369,7 @@ mod tests {
         note_write_op(&phone, &p.path, "内容甲").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let _ = sync_round(&deskA, &profile_a).unwrap();
@@ -2022,8 +2407,8 @@ mod tests {
         note_write_op(&phone, &p.path, "内容甲").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -2058,8 +2443,8 @@ mod tests {
         note_write_op(&phone, &p.path, "保留的内容").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
-        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile_a = ServerProfile { id: "sa".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
+        let profile_b = ServerProfile { id: "sb".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -2138,7 +2523,7 @@ mod tests {
 
         let (desk_dir, desk) = client_vault();
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token, last_success_at: None, ..Default::default() };
 
         let r = sync_round(&desk, &profile).unwrap();
         assert_eq!(r.pulled, vec![asset.clone()]);
@@ -2152,7 +2537,7 @@ mod tests {
     #[test]
     fn sync_round_fails_gracefully_without_vault_or_server() {
         let (_dir, desk) = client_vault();
-        let profile = ServerProfile { id: "s".into(), name: "x".into(), url: "http://127.0.0.1:1".into(), token: "t".into(), last_success_at: None };
+        let profile = ServerProfile { id: "s".into(), name: "x".into(), url: "http://127.0.0.1:1".into(), token: "t".into(), last_success_at: None, ..Default::default() };
         let err = sync_round(&desk, &profile).unwrap_err();
         assert!(!err.is_empty());
 
@@ -2163,7 +2548,7 @@ mod tests {
         let (token, _) = pair(&base, &code).unwrap();
         // 无 vault 的 state
         let empty = Arc::new(AppState::default());
-        let profile2 = ServerProfile { id: "s".into(), name: "x".into(), url: base, token, last_success_at: None };
+        let profile2 = ServerProfile { id: "s".into(), name: "x".into(), url: base, token, last_success_at: None, ..Default::default() };
         assert!(sync_round(&empty, &profile2).is_err());
     }
 
@@ -2190,7 +2575,7 @@ mod tests {
         std::fs::write(desk_dir.path().join(foreign), [0xC4, 0xE3, 0xBA, 0xC3]).unwrap();
 
         let (token, _) = pair(&base, &code).unwrap();
-        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None };
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone(), last_success_at: None, ..Default::default() };
 
         let r = sync_round(&desk, &profile).unwrap();
         assert!(r.errors.is_empty(), "应无错误: {:?}", r.errors);
@@ -2279,5 +2664,295 @@ mod tests {
         assert!(normalize_url("ftp://x").is_err());
         assert!(normalize_url("1.2.3.4").is_err());
         assert!(normalize_url("").is_err());
+    }
+
+    // ---------- M4h-3：profile 换绑设备身份 + 基线迁移 ----------
+
+    #[test]
+    fn profile_id_binds_device_identity() {
+        // 有身份：id 由身份决定，url/token 变了也不变 → IP 变化不丢基线
+        let a = profile_id("abc123", "http://192.168.1.5:4180", "tok1");
+        let b = profile_id("abc123", "http://192.168.1.99:4180", "tok2");
+        assert_eq!(a, b, "同一设备的 id 必须与 url/token 无关");
+        assert_eq!(a, "dabc123");
+        // 无身份（旧服务器）：沿用 hash(url+token)
+        let c = profile_id("", "http://192.168.1.5:4180", "tok1");
+        assert!(c.starts_with('s'));
+        assert_ne!(c, profile_id("", "http://192.168.1.9:4180", "tok1"));
+    }
+
+    #[test]
+    fn match_by_identity_prefers_device_id_over_name() {
+        let servers = vec![
+            ServerProfile { id: "d1".into(), name: "手机".into(), device_id: "dev-1".into(), ..Default::default() },
+            ServerProfile { id: "d2".into(), name: "手机".into(), device_id: "dev-2".into(), ..Default::default() },
+        ];
+        // 同名两台设备：必须按身份命中正确那台
+        assert_eq!(match_by_identity(&servers, "dev-2", "手机").unwrap().id, "d2");
+        // 身份未知（旧服务器）：回退名称匹配，但只匹配同样没身份的
+        assert!(match_by_identity(&servers, "", "手机").is_none(), "有身份的不能被名称匹配到");
+        let legacy = vec![ServerProfile { id: "s1".into(), name: "老手机".into(), device_id: "".into(), ..Default::default() }];
+        assert_eq!(match_by_identity(&legacy, "", "老手机").unwrap().id, "s1");
+        assert_eq!(match_by_identity(&legacy, "dev-new", "老手机").unwrap().id, "s1");
+        assert!(match_by_identity(&legacy, "dev-new", "别的名字").is_none());
+    }
+
+    /// 迁移核心：旧 id 的基线文件必须**改名**到新 id，状态不丢。
+    /// 丢基线的后果是下回合全库判「双方都改」→ 冲突副本激增（docs/08 §13.1 P4）。
+    #[test]
+    fn migrate_renames_baseline_file_and_keeps_state() {
+        use crate::commands::open_vault_at;
+        // 起一台「手机」服务器（它有自己的 deviceId）
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let p = note_create_op(&phone, "", "笔记").unwrap();
+        note_write_op(&phone, &p.path, "内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, name) = pair(&base, &code).unwrap();
+        let device_id = crate::sync_server::load_sync_config(phone_dir.path()).device_id;
+
+        // 桌面：造一个「旧格式」profile（id = hash(url+token)），并写一份基线
+        let (desk_dir, desk) = client_vault();
+        let old_id = format!("s{}", &fs_ops::content_hash(format!("{base}{token}").as_bytes())[..8]);
+        let mut servers = vec![ServerProfile {
+            id: old_id.clone(),
+            name,
+            url: base.clone(),
+            token: token.clone(),
+            last_success_at: None,
+            device_id: String::new(), // 旧格式：没有身份
+            port: None,
+        }];
+        // 该设备上轮已知的服务器状态（模拟已同步过一轮）
+        let mut baseline: HashMap<String, String> = HashMap::new();
+        baseline.insert(p.path.clone(), "deadbeef".into());
+        save_sync_state(desk_dir.path(), &old_id, &baseline).unwrap();
+        assert!(sync_state_path(desk_dir.path(), &old_id).exists());
+
+        // 迁移
+        let n = migrate_profiles_to_device_id(desk_dir.path(), &mut servers);
+        assert_eq!(n, 1, "离线设备不该被迁移…这里在线，应迁移 1 个");
+        assert_eq!(servers[0].device_id, device_id, "换绑到设备身份");
+        assert_eq!(servers[0].id, format!("d{device_id}"));
+        assert_ne!(servers[0].id, old_id);
+
+        // **基线必须跟着改名而不是重建**：内容一字不差
+        let new_path = sync_state_path(desk_dir.path(), &servers[0].id);
+        assert!(new_path.exists(), "新 id 的基线文件应存在");
+        assert!(!sync_state_path(desk_dir.path(), &old_id).exists(), "旧文件应已改名");
+        assert_eq!(load_sync_state(desk_dir.path(), &servers[0].id), baseline, "基线状态不丢");
+
+        // 幂等：再迁一次不重复动作
+        let mut again = servers.clone();
+        assert_eq!(migrate_profiles_to_device_id(desk_dir.path(), &mut again), 0);
+        assert_eq!(again[0], servers[0]);
+    }
+
+    /// 离线设备（探测不到）保持原样，下次同步再迁——不能因此丢凭据
+    #[test]
+    fn migrate_skips_unreachable_devices() {
+        let (desk_dir, _desk) = client_vault();
+        // 127.0.0.1:1 必然连不上
+        let mut servers = vec![ServerProfile {
+            id: "sold1234".into(),
+            name: "离线手机".into(),
+            url: "http://127.0.0.1:1".into(),
+            token: "tok".into(),
+            device_id: String::new(),
+            ..Default::default()
+        }];
+        assert_eq!(migrate_profiles_to_device_id(desk_dir.path(), &mut servers), 0);
+        assert_eq!(servers[0].id, "sold1234", "id 保持原样");
+        assert!(servers[0].device_id.is_empty());
+        assert_eq!(servers[0].token, "tok", "凭据不丢");
+    }
+
+    /// 迁移后回合一整轮：不再产生「双方都改」的假冲突（P4 回归）
+    #[test]
+    fn migration_prevents_false_conflict_storm() {
+        use crate::commands::open_vault_at;
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let note = note_create_op(&phone, "", "共享笔记").unwrap();
+        note_write_op(&phone, &note.path, "同一份内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, name) = pair(&base, &code).unwrap();
+        let device_id = crate::sync_server::load_sync_config(phone_dir.path()).device_id;
+
+        let (desk_dir, desk) = client_vault();
+        let old_id = format!("s{}", &fs_ops::content_hash(format!("{base}{token}").as_bytes())[..8]);
+        let mut servers = vec![ServerProfile {
+            id: old_id.clone(),
+            name,
+            url: base.clone(),
+            token: token.clone(),
+            device_id: String::new(),
+            ..Default::default()
+        }];
+        save_sync_state(desk_dir.path(), &old_id, &HashMap::new()).unwrap();
+
+        // 第一轮：桌面从零开始 → 拉取
+        let r1 = sync_round(&desk, &servers[0]).unwrap();
+        assert!(r1.errors.is_empty(), "{:?}", r1.errors);
+        assert_eq!(r1.pulled.len(), 1);
+
+        // 迁移（模拟升级到 M4h-3 后的首次启动）
+        assert_eq!(migrate_profiles_to_device_id(desk_dir.path(), &mut servers), 1);
+        assert_eq!(servers[0].device_id, device_id);
+
+        // 迁移后立刻再回合：双方内容一致 → 不应产生冲突副本
+        let r2 = sync_round(&desk, &servers[0]).unwrap();
+        assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+        assert!(r2.merges.is_empty(), "迁移后不得出现假冲突: {:?}", r2.merges);
+        assert!(r2.pushed.is_empty(), "无改动不该推送: {:?}", r2.pushed);
+        assert!(r2.pulled.is_empty(), "无改动不该拉取: {:?}", r2.pulled);
+    }
+
+    /// 旧服务器（/info 无 deviceId）→ 保持 hash id，回退名称匹配
+    #[test]
+    fn legacy_server_without_device_id_keeps_hash_profile() {
+        let (desk_dir, _desk) = client_vault();
+        let mut servers = vec![ServerProfile {
+            id: "skeep".into(),
+            name: "旧手机".into(),
+            url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            ..Default::default()
+        }];
+        // 探测失败 → 一个都不迁，且不报错
+        assert_eq!(migrate_profiles_to_device_id(desk_dir.path(), &mut servers), 0);
+        assert_eq!(servers[0].id, "skeep");
+    }
+
+    #[test]
+    fn port_of_url_parses_typical_forms() {
+        assert_eq!(port_of_url("http://192.168.1.5:4180"), Some(4180));
+        assert_eq!(port_of_url("http://192.168.1.5:4189/"), Some(4189));
+        assert_eq!(port_of_url("http://phone.local:4180"), Some(4180));
+        assert_eq!(port_of_url("http://192.168.1.5"), None);
+        assert_eq!(port_of_url("nonsense"), None);
+    }
+
+    // ---------- M4h-2：桌面侧一键授权客户端 ----------
+
+    /// 端到端：桌面发起请求 → 手机侧批准 → 桌面拿到 profile（id 绑设备身份）
+    #[test]
+    fn connect_device_end_to_end() {
+        use crate::commands::open_vault_at;
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let (base, _code, ctx) = crate::sync_server::test_util::start_phone_server_with_ctx(
+            phone_dir.path(),
+            Arc::clone(&phone),
+        );
+
+        // 手机侧「人」在 200ms 后点允许（模拟用户在手机上操作）
+        let approver = {
+            let ctx = Arc::clone(&ctx);
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let pending = crate::sync_server::list_pending(&ctx);
+                    if let Some(p) = pending.first() {
+                        crate::sync_server::approve_pending(&ctx, &p.nonce).unwrap();
+                        return true;
+                    }
+                }
+                false
+            })
+        };
+
+        let attempt = request_pair_blocking(&base, Duration::from_secs(20));
+        assert!(approver.join().unwrap(), "手机侧应看到请求");
+        assert_eq!(attempt.status, "approved", "{:?}", attempt.reason);
+        let profile = attempt.profile.expect("批准后应给出 profile");
+        let device_id = crate::sync_server::load_sync_config(phone_dir.path()).device_id;
+        assert_eq!(profile.device_id, device_id, "profile 绑设备身份");
+        assert_eq!(profile.id, format!("d{device_id}"));
+        assert_eq!(profile.name, "Lanmark 手机");
+        assert!(!profile.token.is_empty());
+        assert_eq!(profile.port, port_of_url(&base));
+
+        // profile 可直接用于同步回合
+        let (desk_dir, desk) = client_vault();
+        let _ = desk_dir;
+        let r = sync_round(&desk, &profile).unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+    }
+
+    /// 拒绝 → status=rejected 且没有 profile（不落盘任何东西）
+    #[test]
+    fn connect_device_rejected() {
+        use crate::commands::open_vault_at;
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let (base, _code, ctx) = crate::sync_server::test_util::start_phone_server_with_ctx(
+            phone_dir.path(),
+            Arc::clone(&phone),
+        );
+        let rejecter = {
+            let ctx = Arc::clone(&ctx);
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    std::thread::sleep(Duration::from_millis(100));
+                    if let Some(p) = crate::sync_server::list_pending(&ctx).first() {
+                        crate::sync_server::reject_pending(&ctx, &p.nonce).unwrap();
+                        return;
+                    }
+                }
+            })
+        };
+        let attempt = request_pair_blocking(&base, Duration::from_secs(20));
+        rejecter.join().unwrap();
+        assert_eq!(attempt.status, "rejected");
+        assert!(attempt.profile.is_none(), "拒绝不得留下 profile");
+        assert!(crate::sync_server::load_sync_config(phone_dir.path()).tokens.is_empty());
+    }
+
+    /// 无人应答 → 超时（不卡死；UI 拿到 timeout 后回设备列表）
+    #[test]
+    fn connect_device_times_out() {
+        use crate::commands::open_vault_at;
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let (base, _code, _ctx) = crate::sync_server::test_util::start_phone_server_with_ctx(
+            phone_dir.path(),
+            Arc::clone(&phone),
+        );
+        let t0 = std::time::Instant::now();
+        let attempt = request_pair_blocking(&base, Duration::from_secs(2));
+        assert_eq!(attempt.status, "timeout");
+        assert!(attempt.profile.is_none());
+        assert!(t0.elapsed() < Duration::from_secs(15), "超时应及时返回");
+    }
+
+    /// 连不上（端口无人）→ error，不 panic
+    #[test]
+    fn connect_device_unreachable_reports_error() {
+        let attempt = request_pair_blocking("http://127.0.0.1:1", Duration::from_secs(2));
+        assert_eq!(attempt.status, "error");
+        assert!(attempt.reason.is_some());
+    }
+
+    /// 地址非法 → error（不做任何网络动作）
+    #[test]
+    fn connect_device_validates_url() {
+        let attempt = request_pair_blocking("192.168.1.5:4180", Duration::from_secs(2));
+        assert_eq!(attempt.status, "error");
+        assert!(attempt.reason.unwrap().contains("http://"));
+    }
+
+    #[test]
+    fn nonce_is_unique_and_hex() {
+        let a = gen_nonce();
+        let b = gen_nonce();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 }
