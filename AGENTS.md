@@ -91,7 +91,7 @@ Android 相关的非显然几条：
 6. **窄屏断点是双源**：JS `useIsNarrow`（`innerWidth < 768`，`src/App.tsx`）与 CSS `@media (max-width: 767.98px)`（`src/index.css`），必须同步改。
 7. **Crepe 主题覆盖靠 specificity**：引入的是 `frame-dark.css`（仅变量块）+ common 规则，浅色「晨窗」全靠 `index.css` 更高优先级规则盖（如 `.editor-host .milkdown`）。新增覆盖要核对优先级；注释里标了已知漏覆盖点。
 8. **提交信息一律 `类型(可选范围): 中文简述`**（如 `fix(sync): 删除传播补 tombstone 时序`、`feat: M3b tombstone 删除传播`）；类型只用 feat/fix/perf/refactor/style/test/docs/build/ci/chore/revert，半角冒号 + 一个空格，简述不加句号。
-   **自测账**：收尾必跑 `pnpm test` 与 `cd src-tauri && cargo test`（先 source `scripts/env.sh`；两套的先后顺序有坑，见「命令」段），提交里带**本次实际跑出的**成绩（2026-09-24 M4 基线：前端 127/127 + Rust 156/156；勿照抄历史数字）；里程碑收尾与移动端改动另附真机走查结论（机型 + Android 版本）。
+   **自测账**：收尾必跑 `pnpm test` 与 `cd src-tauri && cargo test`（先 source `scripts/env.sh`；两套的先后顺序有坑，见「命令」段），提交里带**本次实际跑出的**成绩（2026-09-24 M4 基线：前端 141/141 + Rust 156/156；勿照抄历史数字）；里程碑收尾与移动端改动另附真机走查结论（机型 + Android 版本）。
 9. **构建路径上的东西必须入库，`.cache/` 只放可再生的缓存**：`patches/tauri-runtime-wry`（tauri#15671，仅 lib.rs 7 行差异，`[patch.crates-io]` 指向它）曾放 `.cache/` 导致 CI 三端全挂。升级该依赖时重拷 registry 原件 + 重放补丁，步骤见 `patches/README.md`。
 10. **设备偏好进 `AppConfig`，vault 级视图状态进 localStorage，笔记内容进文件**（M4a 定，docs/08 §4.1）：字体/字号/行距/编辑器偏好/回收站策略都存 `app_config_dir/config.json`，**换库不该改变偏好**；折叠目录等跟库走的视图状态留 localStorage；`.lanmark/settings.json` 这种放 vault 里的做法是错的（会让设置随库漂移并卷进同步清单判定）。
 11. **外观设置只走 CSS 变量，绝不进编辑器 `key`**（M4b 定，docs/08 §9 R2）：改字体/字号不得重建 Crepe 实例——建实例会发伪 `markdownUpdated`，等于把打开着的笔记重写一遍（硬约定 3）。`editorKey(path, mode)` 是这条的护栏函数，`settings.test.ts` 有用例钉住；`applyCssVars`（`src/lib/settings.ts`）是唯一写入点。
