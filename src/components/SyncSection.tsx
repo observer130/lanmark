@@ -130,7 +130,7 @@ function ServerPanel() {
       {pairing.running && pairing.lanIp && (
         <div className="flex items-center gap-2 rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
           <div className="min-w-0 flex-1">
-            <div className="text-[11px] text-ink-3">本机地址（桌面端可手动输入）</div>
+            <div className="text-[11px] text-ink-3">本机地址</div>
             <div className="truncate font-mono text-xs text-ink">{pairing.lanIp}</div>
           </div>
           <CopyButton text={pairing.lanIp} />
@@ -141,7 +141,7 @@ function ServerPanel() {
       {pairing.running && (
         <details className="rounded-[10px] border border-line bg-card px-3 py-2 shadow-card">
           <summary className="cursor-pointer text-[11px] text-ink-3">
-            桌面端无法一键连接？用配对码（兜底）
+            桌面端连不上？用配对码
           </summary>
           <div className="mt-2 flex items-center gap-2">
             <div className="min-w-0 flex-1">
@@ -325,7 +325,7 @@ function ClientPanel() {
           className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs text-ink-2 hover:bg-canvas disabled:opacity-50"
         >
           {scanning ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
-          {scanning ? "正在查找…" : "自动查找（同一局域网）"}
+          {scanning ? "正在查找…" : "自动查找手机"}
         </button>
 
         {/* 等待对方确认（≤90s；可取消视觉上回设备列表） */}
@@ -366,9 +366,8 @@ function ClientPanel() {
 
         {connecting == null && !scanning && scanned.length === 0 && scanRan && (
           <p className="mt-1.5 text-[11px] leading-4 text-ink-3">
-            没找到已开启同步的手机。
-            {!lanScanEnabled && "「局域网扫描」已关闭，只查了已知设备。"}
-            {" "}确认手机端 Lanmark 已打开笔记库、且与电脑在同一 WiFi。
+            没有找到手机。请确认手机上 Lanmark 已打开、且与本机连同一个 WiFi。
+            {!lanScanEnabled && "（「局域网扫描」已关闭）"}
           </p>
         )}
 
@@ -408,7 +407,7 @@ function ClientPanel() {
 
             {/* 8 位配对码：一键授权失败或对方是旧版本时的兜底（docs/08 §13.3 ②） */}
             <div className="border-t border-line pt-1.5">
-              <div className="text-[11px] text-ink-3">旧版本 / 一键授权不可用：配对码</div>
+              <div className="text-[11px] text-ink-3">桌面端连不上时，用配对码</div>
               <div className="mt-1 flex gap-1.5">
                 <input
                   value={code}
@@ -583,7 +582,7 @@ export function SyncSection() {
             <button
               title={
                 servers.length === 0
-                  ? "尚未配对手机（点行展开面板添加）"
+                  ? "尚未配对手机"
                   : "立即同步（所有在线设备）"
               }
               disabled={syncing || servers.length === 0}
@@ -611,9 +610,11 @@ export function SyncSection() {
         />
       </div>
 
-      {/* 上拉管理面板：锚定在常驻条上方，略宽于侧栏（窄屏钳制在视口内） */}
+      {/* 上拉管理面板：锚定在常驻条上方，**与侧栏同宽对齐**。
+          此前是写死的 330px + left-2，比侧栏（288px）宽出 42px 向右突出，
+          视觉上像没对齐（用户走查反馈）。改为 left/right 内缩后左右对称。 */}
       {open && (
-        <div className="absolute bottom-full left-2 z-40 mb-2 w-[330px] max-w-[calc(100vw-24px)] rounded-xl border border-line bg-card shadow-pop">
+        <div className="absolute bottom-full left-2 right-2 z-40 mb-2 rounded-xl border border-line bg-card shadow-pop">
           <div className="flex items-center justify-between pb-1 pl-4 pr-2 pt-2.5">
             <span className="text-[13px] font-semibold text-ink">同步</span>
             <button

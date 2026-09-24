@@ -83,8 +83,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     onNavigate?.();
   };
 
+  // 窄屏时抽屉容器已是 w-full；aside 用 w-full 填满，桌面保留固定 288px 栏宽。
+  // 硬约定 6：窄屏断点双源——这里用 Tailwind 的 md:（768px），
+  // 与 App.tsx 的 useIsNarrow（<768）和 index.css 的 767.98px 同一阈值。
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-side">
+    <aside className="flex w-full shrink-0 flex-col border-r border-line bg-side md:w-72">
       {/* 头部（Linux 无边框窗口：空白处可拖拽窗口，双击最大化） */}
       <div
         onMouseDown={isLinuxDesktop ? dragWindow : undefined}
@@ -100,7 +103,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           </div>
         </div>
         <button
-          title="重新扫描 vault（外部改动后点这个）"
+          title="重新扫描笔记库"
           className="rounded-md p-1.5 text-ink-3 hover:bg-canvas hover:text-ink"
           onClick={() => void reindex()}
         >

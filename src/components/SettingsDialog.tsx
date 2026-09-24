@@ -187,7 +187,7 @@ function AppearanceSection() {
           />
         </Row>
         {a.uiFont === "custom" && (
-          <Row label="自定义界面字体" hint="填系统已装字体名；取决于系统已装字体">
+          <Row label="自定义界面字体" hint="填写系统已安装的字体名">
             <CustomFontInput
               value={a.customFonts.ui}
               placeholder="例如 Fira Sans"
@@ -205,7 +205,7 @@ function AppearanceSection() {
           />
         </Row>
         {a.textFont === "custom" && (
-          <Row label="自定义正文字体" hint="取决于系统已装字体">
+          <Row label="自定义正文字体" hint="填写系统已安装的字体名">
             <CustomFontInput
               value={a.customFonts.text}
               placeholder="例如 LXGW WenKai"
@@ -221,7 +221,7 @@ function AppearanceSection() {
           />
         </Row>
         {a.monoFont === "custom" && (
-          <Row label="自定义等宽字体" hint="取决于系统已装字体">
+          <Row label="自定义等宽字体" hint="填写系统已安装的字体名">
             <CustomFontInput
               value={a.customFonts.mono}
               placeholder="例如 Fira Code"
@@ -271,7 +271,7 @@ function EditorSection() {
           onChange={(k) => set({ defaultMode: k as EditorMode })}
         />
       </Row>
-      <Row label="自动保存延迟" hint="停止输入后多久落盘（连续输入期间不中途写盘）">
+      <Row label="自动保存延迟" hint="停止输入后多久自动保存">
         <Segmented
           value={e.autosaveMs}
           options={AUTOSAVE_OPTIONS.map((o) => ({ key: o.key, label: o.label }))}
@@ -285,7 +285,7 @@ function EditorSection() {
           onToggle={() => set({ sourceLineNumbers: !e.sourceLineNumbers })}
         />
       </Row>
-      <Row label="新建笔记默认位置" hint="「上次所在目录」仅本次会话记忆">
+      <Row label="新建笔记默认位置" hint="选「上次所在目录」时，关闭应用后不再记住">
         <Segmented
           value={e.newNoteLocation}
           options={NEW_NOTE_LOCATION_OPTIONS}
@@ -442,7 +442,7 @@ function StorageSection() {
       <Group title="回收站">
         <Row
           label="自动清理"
-          hint="删除的笔记先移到回收站；这里清的是本地回收站，与同步的删除传播无关"
+          hint="删除的笔记会先移到这里，到期自动清理"
         >
           <Segmented
             value={retention}
@@ -516,7 +516,7 @@ function SyncSection2() {
   return (
     <>
       <Group title="自动同步">
-        <Row label="自动同步" hint="与侧栏同步条的开关是同一个状态">
+        <Row label="自动同步" hint="自动把改动同步到已连接的设备">
           <Switch on={on} label="自动同步" onToggle={() => void setSyncAuto(!on)} />
         </Row>
       </Group>
@@ -524,7 +524,7 @@ function SyncSection2() {
       <Group title="设备发现">
         <Row
           label="局域网扫描"
-          hint="查找手机时并发探测本机局域网内的地址；关闭后只能用「手动连接」输地址"
+          hint="关闭后需要手动输入手机地址"
         >
           <Switch
             on={lanScanEnabled}
@@ -541,7 +541,7 @@ function SyncSection2() {
 
       {/* 配对 UI 只有一套：关掉设置面板并展开侧栏的同步面板（docs/08 §3.4 D3） */}
       <Group title="设备配对">
-        <Row label="管理设备与配对" hint="在侧栏的同步面板里操作，不另做一套 UI">
+        <Row label="管理设备与配对" hint="配对、查看已连接设备">
           <button
             onClick={requestSyncPanel}
             className="rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink"
@@ -657,7 +657,7 @@ function AboutSection() {
             <span className="text-xs text-ink-3">—</span>
           )}
         </Row>
-        <Row label="复制诊断信息" hint="版本、路径、规模与当前设置">
+        <Row label="复制诊断信息" hint="遇到问题时复制给开发者">
           <button
             onClick={() => {
               void navigator.clipboard?.writeText(diagnostics());

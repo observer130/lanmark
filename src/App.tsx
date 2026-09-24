@@ -153,7 +153,11 @@ function App() {
         <ResizeEdges />
         {narrow ? (
           <>
-            {/* 窄屏：侧栏为覆盖式抽屉（flex 让 aside 拉满高度，内部列表才能滚动） */}
+            {/* 窄屏：侧栏为覆盖式抽屉，**铺满全屏**。
+                此前抽屉只占侧栏的 288px —— 在 385px 逻辑宽的手机上占 ~75%，
+                右侧露出一条编辑器，既不整齐也不好点（用户走查反馈）。
+                铺满后等同「全屏导航页」，点条目即关闭（onNavigate）回到编辑器。
+                内部列表全部用 truncate + min-w-0 flex-1，不依赖固定宽度。 */}
             {navOpen && (
               <div
                 className="fixed inset-0 z-30 bg-black/40"
@@ -161,7 +165,7 @@ function App() {
               />
             )}
             <div
-              className={`fixed inset-y-0 left-0 z-40 flex transform transition-transform duration-200 ${
+              className={`fixed inset-y-0 left-0 z-40 flex w-full transform transition-transform duration-200 ${
                 navOpen ? "translate-x-0" : "-translate-x-full"
               }`}
             >
