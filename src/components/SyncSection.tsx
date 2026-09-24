@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { useSyncStore } from "../stores/sync";
+import { useSettingsStore } from "../stores/settings";
 import { useVaultStore } from "../stores/vault";
 import { isAndroid } from "../lib/sync";
 
@@ -479,6 +480,16 @@ export function SyncSection() {
   const [android] = useState(isAndroid());
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // D3：设置页「管理设备与配对」关掉自己后置位计数器，这里展开面板。
+  // 用计数器而非布尔订阅，连点两次也能再次张开。
+  const syncPanelRequest = useSettingsStore((s) => s.syncPanelRequest);
+  const lastSyncRequest = useRef(syncPanelRequest);
+  useEffect(() => {
+    if (syncPanelRequest !== lastSyncRequest.current) {
+      lastSyncRequest.current = syncPanelRequest;
+      setOpen(true);
+    }
+  }, [syncPanelRequest]);
 
   // 桌面：拉取已配对服务器（本地 profile 读取，轻量）；手机：轮询配对信息
   // （常驻条要显示运行状态，面板收起时也得保持，与旧版 ServerPanel 同周期）

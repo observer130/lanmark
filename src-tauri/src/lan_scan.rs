@@ -19,7 +19,7 @@
 //! **只做 TCP connect + GET /api/v1/info，不发任何笔记数据**，绝不探公网。
 //! 设置页提供「局域网扫描」开关，关掉即退化为纯手输 URL（§13.8 走查项 5）。
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,8 +31,6 @@ use crate::sync_server::DEFAULT_PORT;
 /// 扫描端口范围：与 `DEFAULT_PORT` + 少量容错一致。
 /// 刻意不扫 `MAX_PORT_TRIES`(60) 全段——那是测试并行的产物，真实设备只用前几个。
 pub const SCAN_PORT_SPAN: u16 = 10;
-/// 单次 TCP connect 超时。150ms 是按 §13.6 R9 的「不做扫描行为」约束取的保守值。
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
 /// 并发上限（§13.6 R9：并发 128 起，不再往上加，避免触发企业 IDS）。
 const MAX_CONCURRENCY: usize = 128;
 /// L2 全扫的总预算硬截断：超时即返回已命中部分，UI 不再转圈（§13.3 R13）。
@@ -49,17 +47,6 @@ pub struct ScannedDevice {
     /// M4h-3：设备身份（旧服务器无该字段则为空串，调用方回退名称匹配）
     pub device_id: String,
     pub notes: u64,
-}
-
-/// 候选来源层（决定代价与 UI 提示；L0 命中即不扫后面的层）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ScanLayer {
-    /// mDNS + 已配对 profile 的历史 IP
-    Known,
-    /// ARP / 邻居表
-    Neighbor,
-    /// 本机网段全扫
-    Subnet,
 }
 
 /// 一层扫描的结果
@@ -388,18 +375,6 @@ pub fn neighbor_addresses() -> Vec<Ipv4Addr> {
         }
     }
     vec![]
-}
-
-/// 直连 4180..4189 里第一个 accept 的端口（探测目标端口未知时先探常见端口）。
-/// 与 `probe_all` 不同：这里只做 TCP connect，不发 HTTP。
-pub fn first_open_port(ip: IpAddr, ports: &[u16]) -> Option<u16> {
-    for p in ports {
-        let addr = SocketAddr::new(ip, *p);
-        if TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).is_ok() {
-            return Some(*p);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

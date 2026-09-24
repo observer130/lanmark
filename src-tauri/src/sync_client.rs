@@ -1062,8 +1062,16 @@ pub async fn sync_scan_lan(
         };
         let probe = crate::lan_scan::HttpInfoProbe;
         let out = crate::lan_scan::run_scan(&plan, &probe);
+        // 标注哪些候选是**已配对**设备（按设备身份匹配，IP 变了也算同一台）——
+        // UI 据此把已配对设备排在前面 / 显示「已连接」，而不是让用户对着一堆
+        // 陌生卡片猜哪个是自己的手机（docs/08 §13.4）。
+        let mut devices = out.devices;
+        devices.sort_by_key(|d| {
+            let known = match_by_identity(&servers, &d.device_id, &d.name).is_some();
+            (!known, d.name.clone())
+        });
         Ok(ScanResult {
-            devices: out.devices,
+            devices,
             truncated: out.truncated,
             scanned_subnet: allow_subnet,
         })
@@ -1304,9 +1312,41 @@ pub async fn sync_pair(
     .map_err(|e| format!("配对任务失败: {e}"))?
 }
 
+/// 已配对服务器列表。
+///
+/// M4h-3：这里顺带做一次**惰性 profile 迁移**——M2/M3 的旧 profile 用
+/// `hash(url+token)` 当 id，IP 一变就得重配对且基线文件会换名（docs/08 §13.1 P4）。
+/// 迁移要探测设备（拿 deviceId），是网络动作，所以放在「打开同步面板」这条
+/// 用户可见的路径上做，而不是每次 `load_servers` 都做（那会让同步回合变慢）。
+/// 迁移失败/设备离线都不阻断列表返回——下次再迁。
 #[tauri::command]
-pub fn sync_servers(app: tauri::AppHandle) -> CmdResult<Vec<ServerProfile>> {
-    Ok(load_servers(&app))
+pub async fn sync_servers(app: tauri::AppHandle) -> CmdResult<Vec<ServerProfile>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut servers = load_servers(&app);
+        // 只在确有旧格式 profile 时才动网（避免无谓探测拖慢面板打开）
+        if servers.iter().any(|s| s.device_id.is_empty()) {
+            let vault = vault_of(&app);
+            let n = match vault {
+                Some(v) => migrate_profiles_to_device_id(&v, &mut servers),
+                None => 0,
+            };
+            if n > 0 {
+                log::info!("M4h-3：{n} 个已配对设备换绑到设备身份（IP 变化不再需要重配）");
+                save_servers(&app, &servers)?;
+            }
+        }
+        Ok(servers)
+    })
+    .await
+    .map_err(|e| format!("读取服务器列表失败: {e}"))?
+}
+
+/// 当前 vault 路径（迁移需要它来定位 `.lanmark/sync-<id>.json` 基线文件）
+fn vault_of(app: &tauri::AppHandle) -> Option<PathBuf> {
+    crate::vault::load_config(app)
+        .vault_path
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
 }
 
 #[tauri::command]

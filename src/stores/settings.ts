@@ -57,6 +57,12 @@ interface SettingsStore {
   dialogOpen: boolean;
   /** 设置页当前分组（窄屏单列分节时用于滚动定位） */
   activeSection: SectionKey;
+  /**
+   * D3：「管理设备与配对」的跳转请求。设置页不复制一套配对 UI，
+   * 而是关掉自己 + 请侧栏把同步面板展开（docs/08 §3.4 D3）。
+   * 计数器而非布尔：连点两次也要能再次触发（布尔会因「已经是 true」失效）。
+   */
+  syncPanelRequest: number;
 
   load: () => Promise<void>;
   /** 改某个小节：乐观更新 → 应用 CSS 变量 → 落库 → 以返回值覆盖 */
@@ -64,6 +70,8 @@ interface SettingsStore {
   reset: () => Promise<void>;
   openDialog: (section?: SectionKey) => void;
   closeDialog: () => void;
+  /** D3：关设置页并请求展开侧栏同步面板 */
+  requestSyncPanel: () => void;
   setActiveSection: (s: SectionKey) => void;
   clearError: () => void;
 }
@@ -78,6 +86,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   error: null,
   dialogOpen: false,
   activeSection: "appearance",
+  syncPanelRequest: 0,
 
   load: async () => {
     const seq = ++loadSeq;
@@ -134,6 +143,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   openDialog: (section) =>
     set({ dialogOpen: true, activeSection: section ?? get().activeSection }),
   closeDialog: () => set({ dialogOpen: false }),
+  requestSyncPanel: () =>
+    set((s) => ({ dialogOpen: false, syncPanelRequest: s.syncPanelRequest + 1 })),
   setActiveSection: (s) => set({ activeSection: s }),
   clearError: () => set({ error: null }),
 }));

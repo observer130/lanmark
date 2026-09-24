@@ -14,6 +14,7 @@ const m = vi.hoisted(() => ({
   syncNow: vi.fn(),
   servers: vi.fn(),
   discover: vi.fn(),
+  scanLan: vi.fn(),
   serverSetUrl: vi.fn(),
   readNote: vi.fn(),
   vaultStatus: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("../lib/sync", () => ({
     syncNow: m.syncNow,
     servers: m.servers,
     discover: m.discover,
+    scanLan: m.scanLan,
     serverSetUrl: m.serverSetUrl,
     pairingInfo: vi.fn(),
     pair: vi.fn(),
@@ -86,6 +88,7 @@ function reset() {
   m.syncNow.mockResolvedValue(REPORT);
   m.servers.mockResolvedValue([SRV]);
   m.discover.mockResolvedValue([]);
+  m.scanLan.mockResolvedValue({ devices: [], truncated: false, scannedSubnet: false });
   m.vaultStatus.mockResolvedValue({
     configured: true,
     open: true,
@@ -158,7 +161,7 @@ describe("M3 自动同步循环状态机", () => {
     expect(m.syncNow).toHaveBeenCalledTimes(2);
   });
 
-  it("触发 B：离线退避 1s→2s→4s，第 3 次失败尝试 mDNS，恢复跳变立即回合", async () => {
+  it("触发 B：离线退避 1s→2s→4s，第 3 次失败按设备身份找回，恢复跳变立即回合", async () => {
     let calls = 0;
     m.probe.mockImplementation(async () => {
       calls += 1;
@@ -168,7 +171,7 @@ describe("M3 自动同步循环状态机", () => {
     });
     useSyncStore.getState().startAutoLoop();
 
-    // 探测序列：t=1s（失败1，退避1s）、t=2s（失败2，退避2s）、t=4s（失败3→mDNS，退避4s）、t=8s（恢复）
+    // 探测序列：t=1s（失败1，退避1s）、t=2s（失败2，退避2s）、t=4s（失败3→找回，退避4s）、t=8s（恢复）
     await vi.advanceTimersByTimeAsync(1_000);
     expect(m.probe).toHaveBeenCalledTimes(1);
     expect(useSyncStore.getState().probeStates.s1?.online).toBe(false);
@@ -178,8 +181,10 @@ describe("M3 自动同步循环状态机", () => {
 
     await vi.advanceTimersByTimeAsync(2_000);
     expect(m.probe).toHaveBeenCalledTimes(3);
-    // 连续失败 3 次 → mDNS 重发现（本环境常不可达，best effort）
-    expect(m.discover).toHaveBeenCalledTimes(1);
+    // M4h-3：连续失败 3 次 → LAN 找回（取代旧的 mDNS 重发现）
+    expect(m.scanLan).toHaveBeenCalledTimes(1);
+    // **只跑 L0+L1**（allowSubnet=false）：后台周期任务不做网段全扫
+    expect(m.scanLan).toHaveBeenCalledWith(false);
     // 恢复前不应有回合
     expect(m.syncNow).not.toHaveBeenCalled();
 
@@ -188,6 +193,79 @@ describe("M3 自动同步循环状态机", () => {
     expect(useSyncStore.getState().probeStates.s1?.online).toBe(true);
     // 离线→在线跳变 → 立即回合（不受 60s 门控）
     expect(m.syncNow).toHaveBeenCalledTimes(1);
+  });
+
+  /** P4 回归：手机换 IP 后按**设备身份**找回，只改 url、id 不变（基线不丢） */
+  it("离线恢复按 deviceId 匹配：IP 变了也认得，只改 url", async () => {
+    useSyncStore.setState({
+      servers: [
+        {
+          id: "ddev-1",
+          name: "REDMI K90",
+          url: "http://192.168.1.23:4180",
+          token: "t",
+          lastSuccessAt: null,
+          deviceId: "dev-1",
+        },
+      ],
+    });
+    m.probe.mockResolvedValue({ online: false, name: "REDMI K90", notes: 0, assets: 0 });
+    // 扫描到同一台设备的新地址（身份相同、url 不同）
+    m.scanLan.mockResolvedValue({
+      devices: [
+        { name: "REDMI K90", url: "http://192.168.1.99:4180", deviceId: "dev-1", notes: 5 },
+      ],
+      truncated: false,
+      scannedSubnet: false,
+    });
+    m.serverSetUrl.mockResolvedValue({
+      id: "ddev-1",
+      name: "REDMI K90",
+      url: "http://192.168.1.99:4180",
+      token: "t",
+      lastSuccessAt: null,
+      deviceId: "dev-1",
+    });
+
+    useSyncStore.getState().startAutoLoop();
+    // 连续失败 3 次触发找回
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(m.serverSetUrl).toHaveBeenCalledWith("ddev-1", "http://192.168.1.99:4180");
+  });
+
+  /** 身份不同则不得误认（同名不同机 / 别人家的手机） */
+  it("离线恢复不误配：deviceId 不同就不改 url", async () => {
+    useSyncStore.setState({
+      servers: [
+        {
+          id: "ddev-1",
+          name: "REDMI K90",
+          url: "http://192.168.1.23:4180",
+          token: "t",
+          lastSuccessAt: null,
+          deviceId: "dev-1",
+        },
+      ],
+    });
+    m.probe.mockResolvedValue({ online: false, name: "REDMI K90", notes: 0, assets: 0 });
+    // 同名但是另一台设备（deviceId 不同）
+    m.scanLan.mockResolvedValue({
+      devices: [
+        { name: "REDMI K90", url: "http://192.168.1.99:4180", deviceId: "dev-OTHER", notes: 5 },
+      ],
+      truncated: false,
+      scannedSubnet: false,
+    });
+
+    useSyncStore.getState().startAutoLoop();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(m.serverSetUrl).not.toHaveBeenCalled();
   });
 
   it("串行锁：回合进行中 → 探测照常但不双发回合", async () => {

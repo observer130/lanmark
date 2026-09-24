@@ -111,18 +111,30 @@ async function autoTick(): Promise<void> {
           if (ok) setProbeState(s.id, { ...next, lastRoundAt: Date.now() });
         }
       } else if (next.failCount === MDNS_RETRY_FAILS && !next.mdnsRetried) {
-        // P2：mDNS 重发现（本环境桌面多播常不可达，best effort，失败继续退避）
+        // 离线恢复：连续失败 3 次后尝试一次「按设备身份找回」（docs/08 §13.3 ③）。
+        //
+        // 取代原来的「mDNS 重发现」：本环境桌面多播常不可达、公司网也拦广播，
+        // 而 M4h-1 的 LAN 扫描不依赖多播。**按 deviceId 匹配**（不是按名字）——
+        // 同一台手机换了 IP 仍然认得出来，只改 url、不动 id、基线文件不换名，
+        // 因此不会像过去那样触发「全库无基线 → 双方都改」的假冲突风暴（P4）。
         setProbeState(s.id, { ...next, mdnsRetried: true });
         try {
-          const found = await sync.discover();
-          const match = found.find((d) => d.name === s.name && d.url !== s.url);
+          // 只跑 L0+L1（已知地址 + 邻居表），不做网段全扫——后台周期任务
+          // 不该做秒级扫描（docs/08 §13.3 ①）
+          const found = await sync.scanLan(false);
+          const match = found.devices.find((d) => {
+            if (d.url === s.url) return false;
+            // 有身份就按身份精确匹配；对方是旧版本（无身份）才退回名称
+            if (s.deviceId && d.deviceId) return d.deviceId === s.deviceId;
+            return !s.deviceId && !d.deviceId && d.name === s.name;
+          });
           if (match) {
             await sync.serverSetUrl(s.id, match.url);
             await useSyncStore.getState().refreshServers();
             setProbeState(s.id, defaultProbeState()); // 立即重新探测新 url
           }
         } catch {
-          /* best effort */
+          /* best effort：找回失败就继续退避，不打断循环 */
         }
       }
       st = useSyncStore.getState();

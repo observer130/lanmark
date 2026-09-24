@@ -509,7 +509,8 @@ function SyncSection2() {
   const setSyncAuto = useSyncStore((s) => s.setSyncAuto);
   const lanScanEnabled = useSyncStore((s) => s.lanScanEnabled);
   const setLanScanEnabled = useSyncStore((s) => s.setLanScanEnabled);
-  const openDialog = useSettingsStore((s) => s.closeDialog);
+  // D3：关设置页 + 展开侧栏同步面板（不在这里复制一套配对 UI）
+  const requestSyncPanel = useSettingsStore((s) => s.requestSyncPanel);
   // `syncAuto` 为 null 表示尚未读到（取默认开；与侧栏同步条同一 store 同一状态）
   const on = syncAuto !== false;
   return (
@@ -540,7 +541,7 @@ function SyncSection2() {
       <Group title="设备配对">
         <Row label="管理设备与配对" hint="在侧栏的同步面板里操作，不另做一套 UI">
           <button
-            onClick={() => openDialog()}
+            onClick={requestSyncPanel}
             className="rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink"
           >
             打开同步面板
@@ -558,6 +559,21 @@ function AboutSection() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [stats, setStats] = useState<VaultStats | null>(null);
   const android = isAndroid();
+  // E3 诊断信息里的同步状态：与侧栏同步面板同一 store（订阅而非 getState，
+  // 否则面板开着时同步状态变化不会反映到复制的文本里）
+  const pairing = useSyncStore((s) => s.pairing);
+  const servers = useSyncStore((s) => s.servers);
+  const probeStates = useSyncStore((s) => s.probeStates);
+  const syncAuto = useSyncStore((s) => s.syncAuto);
+  const conflictCount = useSyncStore((s) => s.conflictCount);
+  const refreshPairing = useSyncStore((s) => s.refreshPairing);
+  const refreshServers = useSyncStore((s) => s.refreshServers);
+
+  // 打开关于页时补一次同步状态（关于页可能在同步面板没轮询时被单独打开）
+  useEffect(() => {
+    void refreshPairing();
+    void refreshServers();
+  }, [refreshPairing, refreshServers]);
 
   useEffect(() => {
     void vault
@@ -570,20 +586,60 @@ function AboutSection() {
       .catch(() => setStats(null));
   }, []);
 
-  /** E3：一键复制诊断信息（版本 + 平台 + 路径 + 规模 + 外观设置） */
-  const diagnostics = () =>
-    [
+  /**
+   * E3：一键复制诊断信息——版本 + 平台 + 路径 + 规模 + **同步状态** + 当前设置。
+   *
+   * 目的（docs/08 §3.5 E3）：替代完整错误上报。用户遇到问题把这段贴出来，
+   * 就能判断是「库没打开 / 同步没连上 / 版本太旧」哪一类，不必来回追问。
+   */
+  const diagnostics = () => {
+    const syncLines: string[] = [];
+    if (pairing) {
+      syncLines.push(
+        pairing.running
+          ? `同步中心: 运行中 · 端口 ${pairing.port}`
+          : "同步中心: 未运行",
+      );
+      if (pairing.lanIp) syncLines.push(`本机地址: ${pairing.lanIp}`);
+      if (pairing.deviceId) syncLines.push(`设备身份: ${pairing.deviceId}`);
+      if ((pairing.pendingPairs?.length ?? 0) > 0) {
+        syncLines.push(`待确认配对: ${pairing.pendingPairs!.length} 条`);
+      }
+    }
+    if (servers.length > 0) {
+      for (const s of servers) {
+        const st = probeStates[s.id]?.online;
+        const health =
+          st === true ? "在线" : st === false ? "离线" : "未探测";
+        syncLines.push(
+          `已配对: ${s.name} (${s.url}) · ${health}` +
+            (s.lastSuccessAt ? ` · 上次同步 ${new Date(s.lastSuccessAt).toLocaleString()}` : ""),
+        );
+      }
+    } else if (!pairing?.running) {
+      syncLines.push("已配对设备: 无");
+    }
+    if (conflictCount != null && conflictCount > 0) {
+      syncLines.push(`冲突副本: ${conflictCount} 个`);
+    }
+    if (syncAuto != null) {
+      syncLines.push(`自动同步: ${syncAuto ? "开" : "关"}`);
+    }
+
+    return [
       `Lanmark ${info?.version ?? "?"} (${info?.platform ?? "?"})`,
       `笔记库: ${vaultPath ?? "未配置"}`,
       stats
         ? `规模: ${stats.notes} 篇 / ${stats.folders} 目录 / ${stats.assets} 附件 / ${fmtBytes(stats.bytes)}`
         : "规模: 未知",
       `回收站: ${stats ? `${stats.trashEntries} 项 · ${fmtBytes(stats.trashBytes)}` : "未知"}`,
+      ...syncLines,
       `外观: 界面=${settings.appearance.uiFont} 正文=${settings.appearance.textFont} 字号=${settings.appearance.textSize}/${settings.appearance.codeSize} 行距=${settings.appearance.lineHeight}`,
       `编辑器: 默认模式=${settings.editor.defaultMode} 自动保存=${settings.editor.autosaveMs}ms`,
       `配置目录: ${info?.configDir ?? "?"}`,
       `日志目录: ${info?.logDir ?? "?"}`,
     ].join("\n");
+  };
 
   return (
     <>

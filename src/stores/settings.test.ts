@@ -201,3 +201,61 @@ describe("editorKey：外观不得进入编辑器 key（硬约定 3 护栏）", 
     expect(k2).toBe(k1);
   });
 });
+
+describe("D3：设置页「管理设备与配对」跳转侧栏同步面板", () => {
+  it("requestSyncPanel 关掉设置页并递增请求计数", () => {
+    useSettingsStore.setState({ dialogOpen: true, syncPanelRequest: 0, error: null });
+    useSettingsStore.getState().requestSyncPanel();
+    const s = useSettingsStore.getState();
+    expect(s.dialogOpen).toBe(false);
+    expect(s.syncPanelRequest).toBe(1);
+  });
+
+  it("连点两次计数继续递增（布尔会因「已是 true」失效，故用计数器）", () => {
+    useSettingsStore.setState({ dialogOpen: true, syncPanelRequest: 0 });
+    useSettingsStore.getState().requestSyncPanel();
+    useSettingsStore.setState({ dialogOpen: true });
+    useSettingsStore.getState().requestSyncPanel();
+    expect(useSettingsStore.getState().syncPanelRequest).toBe(2);
+    expect(useSettingsStore.getState().dialogOpen).toBe(false);
+  });
+});
+
+describe("E4：恢复默认设置只重置设置小节", () => {
+  it("reset 走 IPC 并以返回值为准", async () => {
+    invoke.mockResolvedValueOnce({
+      appearance: DEFAULT_APPEARANCE,
+      editor: { defaultMode: "wysiwyg", autosaveMs: 700, sourceLineNumbers: true, newNoteLocation: "root" },
+      storage: { trashRetentionDays: 30 },
+    });
+    useSettingsStore.setState({
+      settings: {
+        appearance: { ...DEFAULT_APPEARANCE, textSize: "xl", textFont: "serif" },
+        editor: { defaultMode: "source", autosaveMs: 3000, sourceLineNumbers: false, newNoteLocation: "last" },
+        storage: { trashRetentionDays: 7 },
+      },
+    });
+    await useSettingsStore.getState().reset();
+    expect(invoke.mock.calls[0][0]).toBe("settings_reset");
+    const s = useSettingsStore.getState().settings;
+    expect(s.appearance.textSize).toBe("md");
+    expect(s.editor.autosaveMs).toBe(700);
+    expect(s.storage.trashRetentionDays).toBe(30);
+    // CSS 变量随之复位
+    expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("16px");
+  });
+
+  it("reset 失败 → 回滚到上一版设置与变量", async () => {
+    const prev = {
+      appearance: { ...DEFAULT_APPEARANCE, textSize: "lg" as const },
+      editor: { defaultMode: "wysiwyg" as const, autosaveMs: 700, sourceLineNumbers: true, newNoteLocation: "root" as const },
+      storage: { trashRetentionDays: 30 },
+    };
+    useSettingsStore.setState({ settings: prev });
+    invoke.mockRejectedValueOnce(new Error("写盘失败"));
+    await useSettingsStore.getState().reset();
+    expect(useSettingsStore.getState().settings.appearance.textSize).toBe("lg");
+    expect(useSettingsStore.getState().error).toContain("写盘失败");
+    expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("18px");
+  });
+});
