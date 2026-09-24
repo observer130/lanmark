@@ -42,12 +42,12 @@ Android 相关的非显然几条：
 
 | 位置 | 内容 |
 |---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3）· `SyncSection` · `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控） |
-| `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索）、`sync.ts`（配对/探测/自动循环）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
-| `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`bridge.ts` |
+| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控） |
+| `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量 + 回滚）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
+| `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`settings.ts`（字体栈与枚举→像素映射的**唯一来源** + `applyCssVars`）、`bridge.ts` |
 | `src/milkdown/roundtrip.test.ts` | 编辑器往返保真护栏（M1 决策门） |
 | `src/index.css` | 设计 token（`:root` + `@theme`，「晨窗」浅色）与**全部 Crepe / CodeMirror 主题覆盖**；改编辑器外观先来这里 |
-| `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/目录颜色）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
+| `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/目录颜色/**vault 统计与回收站清理**）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `settings`/`settings_cmd`（M4a 设备级偏好：结构 + 归一化 + 白名单，与 vault 无关）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `lan_scan`（M4h-1 LAN 并发探测发现）· `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
 | `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
 | `scripts/` | `env.sh`（构建环境，必 source）· `android-check.sh`（交叉编译门禁）· `cdp-eval.mjs`（真机 CDP）· `make-demo-vault.sh` · `lanmark-desktop.sh` · `gen-icon.py` · `install-desktop-entry.sh` |
 | `patches/` | vendor 的依赖补丁（tauri-runtime-wry，tauri#15671），见硬约定 9 |
@@ -91,8 +91,10 @@ Android 相关的非显然几条：
 6. **窄屏断点是双源**：JS `useIsNarrow`（`innerWidth < 768`，`src/App.tsx`）与 CSS `@media (max-width: 767.98px)`（`src/index.css`），必须同步改。
 7. **Crepe 主题覆盖靠 specificity**：引入的是 `frame-dark.css`（仅变量块）+ common 规则，浅色「晨窗」全靠 `index.css` 更高优先级规则盖（如 `.editor-host .milkdown`）。新增覆盖要核对优先级；注释里标了已知漏覆盖点。
 8. **提交信息一律 `类型(可选范围): 中文简述`**（如 `fix(sync): 删除传播补 tombstone 时序`、`feat: M3b tombstone 删除传播`）；类型只用 feat/fix/perf/refactor/style/test/docs/build/ci/chore/revert，半角冒号 + 一个空格，简述不加句号。
-   **自测账**：收尾必跑 `pnpm test` 与 `cd src-tauri && cargo test`（先 source `scripts/env.sh`；两套的先后顺序有坑，见「命令」段），提交里带**本次实际跑出的**成绩（2026-09-24 实测基线：前端 91/91 + Rust 92/92；勿照抄历史数字）；里程碑收尾与移动端改动另附真机走查结论（机型 + Android 版本）。
+   **自测账**：收尾必跑 `pnpm test` 与 `cd src-tauri && cargo test`（先 source `scripts/env.sh`；两套的先后顺序有坑，见「命令」段），提交里带**本次实际跑出的**成绩（2026-09-24 M4 基线：前端 127/127 + Rust 156/156；勿照抄历史数字）；里程碑收尾与移动端改动另附真机走查结论（机型 + Android 版本）。
 9. **构建路径上的东西必须入库，`.cache/` 只放可再生的缓存**：`patches/tauri-runtime-wry`（tauri#15671，仅 lib.rs 7 行差异，`[patch.crates-io]` 指向它）曾放 `.cache/` 导致 CI 三端全挂。升级该依赖时重拷 registry 原件 + 重放补丁，步骤见 `patches/README.md`。
+10. **设备偏好进 `AppConfig`，vault 级视图状态进 localStorage，笔记内容进文件**（M4a 定，docs/08 §4.1）：字体/字号/行距/编辑器偏好/回收站策略都存 `app_config_dir/config.json`，**换库不该改变偏好**；折叠目录等跟库走的视图状态留 localStorage；`.lanmark/settings.json` 这种放 vault 里的做法是错的（会让设置随库漂移并卷进同步清单判定）。
+11. **外观设置只走 CSS 变量，绝不进编辑器 `key`**（M4b 定，docs/08 §9 R2）：改字体/字号不得重建 Crepe 实例——建实例会发伪 `markdownUpdated`，等于把打开着的笔记重写一遍（硬约定 3）。`editorKey(path, mode)` 是这条的护栏函数，`settings.test.ts` 有用例钉住；`applyCssVars`（`src/lib/settings.ts`）是唯一写入点。
 
 ## 完成标准（DoD）
 
@@ -108,7 +110,10 @@ Android 相关的非显然几条：
 - **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`.github/workflows/release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis` 对应这个约定
 - 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）→ 提交推送 → **先** `gh release create vX.Y.Z --title … --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
 - 坑：仓库默认 GITHUB_TOKEN 只读，`release.yml` 的 `permissions: contents: write` 不能删（缺了上传 403）
-- **Android release 资产当前是 debug 签名构建**：`release.yml` 的 android job 用 `--debug` 构建后仅重命名为 release 资产名，行为与本地 debug APK 一致（CDP 可用、debuggable）——M3 验收走查确认设计使然（2026-09-23），非 CI 误配：`scripts/cdp-eval.mjs` 走查发现「release 包」行为像 debug 时勿误判。M4 将切固定 release keystore（docs/08 §12.1），切换后同步更新本条（届时 release 资产不再带 CDP）
+- **Android release 资产走固定 release 签名（M4g，2026-09-24 起）**：`release.yml` 的 android job 解码 `RELEASE_KEYSTORE` secret → 真实 release 构建（**不再是 `--debug`**）→ `apksigner` 校验指纹后才上传；产物路径 `outputs/apk/universal/release/`。keystore 永不入库，4 个值来自 repo secrets，**缺失时 job 直接 fail**（不再静默产出 debug 签名的「release」）。
+  - 本地构建（无环境变量）**回退 debug 签名**，`build.gradle.kts` 里 `hasReleaseSigning=false` 时 `release` build type 用 debug signingConfig——所以本地 `--apk` 产物仍是 debuggable、CDP 可用；**看到 CDP 可用先确认产物路径是 `debug/` 还是本地回退，别误判 CI 配置**
+  - 一次性迁移：v0.2.1 及更早的存量 Android 用户还需**最后一次**卸载重装（签名从 CI debug 钥匙换成固定钥匙）；应用目录用户的笔记库在应用私有存储，卸载即丢，release notes 必须写明
+  - 真 release 包 **CDP 不可用**（`/proc/net/unix` 无 `webview_devtools` 记录）→ 走查回归本地 debug APK
 
 ## 真机调试（手机 = 主验证场）
 
