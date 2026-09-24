@@ -264,3 +264,53 @@ describe("M4h-2 一键授权（手机端）", () => {
     expect(p?.pendingPairs?.[0].clientName).toBe("nwj-PC");
   });
 });
+
+describe("待授权请求的可发现性（真机反馈的 bug 回归）", () => {
+  /**
+   * 真机现象：桌面点「连接」后手机毫无反应——请求已入队，但卡片只在同步面板里
+   * 渲染，而面板默认收起。这里钉住「UI 能拿到 pending 数据」这一层；
+   * 自动展开由 SyncSection 的 pendingCount 效应负责（组件层，见 §13.4）。
+   */
+  it("轮询后 store 里能看到待授权请求（含来源 IP 与等待时长）", async () => {
+    m.pairingInfo.mockResolvedValueOnce({
+      running: true,
+      port: 4180,
+      deviceName: "Lanmark 手机",
+      pairingCode: "12345678",
+      lastRoundAt: null,
+      lanIp: "http://192.168.131.34:4180",
+      deviceId: "dev-abc",
+      pendingPairs: [
+        { nonce: "n1", clientName: "nwj", clientIp: "192.168.129.45", ageSecs: 5 },
+      ],
+    });
+    await useSyncStore.getState().refreshPairing();
+    const p = useSyncStore.getState().pairing;
+    expect(p?.pendingPairs).toHaveLength(1);
+    expect(p?.pendingPairs?.[0].clientName).toBe("nwj");
+    expect(p?.pendingPairs?.[0].clientIp).toBe("192.168.129.45");
+  });
+
+  it("无待授权时 pendingPairs 为空数组（供 UI 判「由 0 变正」）", async () => {
+    m.pairingInfo.mockResolvedValueOnce({
+      running: true,
+      port: 4180,
+      deviceName: "Lanmark 手机",
+      pairingCode: "12345678",
+      lastRoundAt: null,
+      pendingPairs: [],
+    });
+    await useSyncStore.getState().refreshPairing();
+    expect(useSyncStore.getState().pairing?.pendingPairs?.length ?? 0).toBe(0);
+  });
+
+  it("批准后刷新，pending 清空（卡片消失）", async () => {
+    m.pairApprove.mockResolvedValueOnce(undefined);
+    m.pairingInfo.mockResolvedValueOnce({
+      running: true, port: 4180, deviceName: "x", pairingCode: "1",
+      lastRoundAt: null, pendingPairs: [],
+    });
+    await useSyncStore.getState().pairApprove("n1");
+    expect(useSyncStore.getState().pairing?.pendingPairs ?? []).toHaveLength(0);
+  });
+});

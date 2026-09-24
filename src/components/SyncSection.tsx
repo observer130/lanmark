@@ -490,6 +490,21 @@ export function SyncSection() {
     }
   }, [syncPanelRequest]);
 
+  // 手机端：**收到待授权请求时自动展开面板**。
+  //
+  // 真机反馈的 bug：桌面点「连接」后手机毫无反应——请求其实已入队，但授权卡片
+  // 只在同步面板里渲染，而面板默认收起，用户根本不知道有人正在请求连接。
+  // 手机常常不在手边，靠用户自己去翻面板不现实。
+  //
+  // 只在**待授权数由 0 变正**时自动展开：每次轮询都强制 setOpen(true) 会让用户
+  // 刚收起的面板又被弹开（且面板内的操作会被打断）。
+  const pendingCount = useSyncStore((s) => s.pairing?.pendingPairs?.length ?? 0);
+  const prevPending = useRef(0);
+  useEffect(() => {
+    if (pendingCount > 0 && prevPending.current === 0) setOpen(true);
+    prevPending.current = pendingCount;
+  }, [pendingCount]);
+
   // 桌面：拉取已配对服务器（本地 profile 读取，轻量）；手机：轮询配对信息
   // （常驻条要显示运行状态，面板收起时也得保持，与旧版 ServerPanel 同周期）
   useEffect(() => {
@@ -527,21 +542,29 @@ export function SyncSection() {
 
   const status = android ? null : clientStatus(servers, probeStates);
   const dot = android
-    ? pairing?.running
-      ? "bg-emerald-500"
-      : "bg-ink-3/40"
+    ? pendingCount > 0
+      ? "bg-accent animate-pulse"
+      : pairing?.running
+        ? "bg-emerald-500"
+        : "bg-ink-3/40"
     : (status?.dot ?? "bg-ink-3/40");
+  // 常驻条：有待授权请求时优先显示它——即使面板被用户收起，
+  // 也要能一眼看到「有人在请求连接」（真机反馈的 bug 的第二道保险）。
   const label = android
-    ? "同步中心"
+    ? pendingCount > 0
+      ? "有设备请求连接"
+      : "同步中心"
     : syncing
       ? "同步中…"
       : (status?.label ?? "同步");
   const dim = android
-    ? pairing?.running
-      ? `端口 ${pairing.port}${pairing.lastRoundAt ? ` · 最近回合 ${fmtClock(pairing.lastRoundAt)}` : ""}`
-      : pairing
-        ? "未启动"
-        : ""
+    ? pendingCount > 0
+      ? "点此处理"
+      : pairing?.running
+        ? `端口 ${pairing.port}${pairing.lastRoundAt ? ` · 最近回合 ${fmtClock(pairing.lastRoundAt)}` : ""}`
+        : pairing
+          ? "未启动"
+          : ""
     : (status?.dim ?? "");
 
   return (
