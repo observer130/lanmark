@@ -1,32 +1,33 @@
 # AGENTS.md — Lanmark
 
 局域网优先的 Markdown 笔记：**手机 = 同步中心节点**（App 内嵌 axum 服务器），**桌面 = 客户端**（Win/Linux）。
-Tauri 2 + React 19 + TS + Tailwind v4 + Zustand，一套 Rust core 跑三端。
+技术栈：Tauri 2 · React 19 · TypeScript 6（strict）· Vite 8 · Tailwind v4 · Zustand 5 · pnpm，一套 Rust core 跑三端。测试：vitest（jsdom，`src/**/*.test.ts`）+ `cargo test`。
 
-> 本文只记**不随实现漂移的稳定约定与操作手册**。具体行为一律**以代码为准**：`docs/` 是各里程碑的设计与验收记录，会滞后于代码；两者冲突时信代码，并顺手更正文档。
-
-## 布局
-
-| 位置 | 内容 |
-|---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部同步条）· `TreeView` · `EditorPane` · `SyncSection` · `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控） |
-| `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索）、`sync.ts`（配对/探测/自动循环）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
-| `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts` |
-| `src/milkdown/roundtrip.test.ts` | 编辑器往返保真护栏（M1 决策门） |
-| `src/index.css` | 设计 token（`:root` + `@theme`，「晨窗」浅色）与**全部 Crepe / CodeMirror 主题覆盖**；改编辑器外观先来这里 |
-| `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `fs_ops`（文件/回收站/目录颜色）· `db`（SQLite 索引 + FTS5）· `vault`（`AppConfig` 持久化）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
-| `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
-| `patches/` | vendor 的依赖补丁（tauri-runtime-wry，tauri#15671），见硬约定 9 |
-| `.cache/` | 全部工具链与缓存（已 gitignore）：cargo/rustup、pnpm、JDK 21、Android SDK/NDK、gradle、QA 截图 |
-| `design/` | 本地设计稿（gitignore，不入库） |
+> **本文定位**：只记**不随实现漂移的稳定约定与操作手册**，是面向 agent 的**唯一事实源**；具体行为一律**以代码为准**。
+> `README.md` 面向用户（功能/下载/首次使用），开发约定不进 README。
+> `docs/`、`design/` 是本地阶段稿，**已被 gitignore、不入库**：天然滞后于代码，且已与 M4 起的新决策有多处冲突（如已取消的扫码配对、已推翻的前台服务插件方案）。**读它会错**；拿不准时用代码与本文，并顺手更正本地稿。
 
 ## 命令
 
 ```bash
-pnpm dev / build / test          # vite 开发 / 前端构建 / 前端测试（vitest）
-cd src-tauri && cargo check && cargo test   # Rust 检查与测试
+source scripts/env.sh            # 构建环境（Android / 交叉编译前必跑）；兼容 zsh/bash
+
+pnpm dev                         # vite 开发
+pnpm build                       # tsc + vite build（tsc 即类型门禁）
+pnpm test                        # vitest run
+pnpm vitest run -t "往返"         # 按用例名过滤
+pnpm vitest run src/lib/vault-url.test.ts   # 只跑单个文件
+
+cd src-tauri && cargo check      # Rust 静态检查
+cd src-tauri && cargo test       # Rust 测试
+cd src-tauri && cargo test --lib sync_server   # 按模块过滤
+
 scripts/android-check.sh         # Android 交叉编译门禁（不跑 gradle）
 ```
+
+**没有 lint / format 工具**：仓库无 ESLint / Biome / prettier / rustfmt / clippy 配置，`lint` 脚本不存在，别去找。静态门禁只有 `tsc`（strict + `noUnusedLocals`/`noUnusedParameters`/`noFallthroughCasesInSwitch`）与 `cargo check`。风格沿用既有文件：TS 双引号 + 分号 + 2 空格缩进；Rust 走 rustfmt 默认。
+
+**`/tmp` 只有 10M tmpfs（本机/沙箱），它会成为测试门禁的瓶颈**：Node 的编译缓存跑一次 `pnpm test` 就吃掉近 9M，紧接着 `cargo test` 里 `tempfile::TempDir` 建 SQLite 会成批报 `disk I/O error`（实测：先测前端再测 Rust，30 项必挂——正是硬约定 8 规定的顺序）。`scripts/env.sh` 已把 `TMPDIR` 指到 `.cache/tmp` 规避；没 source 时请按「先 `cargo test` 再 `pnpm test`」的顺序跑。之前 `env.sh` 只认 `BASH_SOURCE`，在 zsh 下会把仓库根算到上级目录、把整套缓存写到仓库外，**现已兼容 zsh**（找不到 `src-tauri` 会直接报错退出，不再静默写错位置）。
 
 Android 相关的非显然几条：
 
@@ -37,12 +38,48 @@ Android 相关的非显然几条：
 - 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`（中文/图片/frontmatter + 验收清单），首启页「打开现有笔记库」指向它
 - 桌面 release 用 `scripts/lanmark-desktop.sh`（原生二进制；本机 AppImage 有 Intel Arc 兼容性问题）
 
-## 发版（v0.1 起）
+## 布局
 
-- **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`.github/workflows/release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis` 对应这个约定
-- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）→ 提交推送 → **先** `gh release create vX.Y.Z --title … --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
-- 坑：仓库默认 GITHUB_TOKEN 只读，`release.yml` 的 `permissions: contents: write` 不能删（缺了上传 403）
-- **Android release 资产当前是 debug 签名构建**：`release.yml` 的 android job 用 `--debug` 构建后仅重命名为 release 资产名，行为与本地 debug APK 一致（CDP 可用、debuggable）——M3 验收走查确认设计使然（2026-09-23），非 CI 误配：`scripts/cdp-eval.mjs` 走查发现「release 包」行为像 debug 时勿误判。M4 将切固定 release keystore（docs/08 §12.1），切换后同步更新本条（届时 release 资产不再带 CDP）
+| 位置 | 内容 |
+|---|---|
+| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3）· `SyncSection` · `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控） |
+| `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索）、`sync.ts`（配对/探测/自动循环）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
+| `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`bridge.ts` |
+| `src/milkdown/roundtrip.test.ts` | 编辑器往返保真护栏（M1 决策门） |
+| `src/index.css` | 设计 token（`:root` + `@theme`，「晨窗」浅色）与**全部 Crepe / CodeMirror 主题覆盖**；改编辑器外观先来这里 |
+| `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/目录颜色）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
+| `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
+| `scripts/` | `env.sh`（构建环境，必 source）· `android-check.sh`（交叉编译门禁）· `cdp-eval.mjs`（真机 CDP）· `make-demo-vault.sh` · `lanmark-desktop.sh` · `gen-icon.py` · `install-desktop-entry.sh` |
+| `patches/` | vendor 的依赖补丁（tauri-runtime-wry，tauri#15671），见硬约定 9 |
+| `.github/workflows` | `build.yml`（改动检查）· `release.yml`（三端发版） |
+| `.cache/` | 全部工具链与缓存（已 gitignore）：cargo/rustup、pnpm、JDK 21、Android SDK/NDK、gradle、QA 截图 |
+| `README.md` · `design/` · `docs/` | 面向用户说明 / 本地设计稿 / 本地阶段稿——后两者 gitignore 不入库，**读它会错**（见开头「本文定位」） |
+
+## 改动边界
+
+**总是**
+
+- 收尾跑 `pnpm test` 与 `cd src-tauri && cargo test`，成绩写进提交（见硬约定 8）
+- 新增工具链或缓存 → 落 `.cache/` 并由 `scripts/env.sh` 导出，不污染 `$HOME`
+- 改了构建流程 / 测试约定 / 目录结构 → **同一提交内**更新本文
+
+**先问**
+
+- 改 `src-tauri/gen/android/**` 与 `patches/**`——手工维护且是构建路径依赖，动错即 CI 三端挂
+- 改往返保真链路：`src/components/EditorPane.tsx`、`src/lib/vault-url.ts`、`src/lib/frontmatter.ts`、`src/lib/wikilink.ts`
+- 改同步语义：LWW 裁决、tombstone 传播、端口策略（硬约定 5）
+- 改窄屏断点（硬约定 6 是 JS + CSS 双源，必须同步改）
+- 加 / 升级依赖，尤其 `tauri-runtime-wry`（升级需重放 `patches/` 补丁）
+- 改发版产物矩阵或 `release.yml`
+
+**从不**
+
+- 删掉 `src-tauri/gen/android` 重新 init（会冲掉 SyncService / SAF 代码，见硬约定 2）
+- 把构建路径上的东西移进 `.cache/`（`patches/` 曾因此让 CI 三端全挂，见硬约定 9）
+- 把密钥 / keystore / `.env` 写进仓库（Android release keystore 只走环境变量；与 `patches/` 公开源码的性质相反）
+- 让 `db.rs` 的 SQLite 变成事实源——vault 下的文件才是（硬约定 4）
+- 打开笔记时重写文件（硬约定 3）
+- 手改 `src-tauri/gen/schemas`（每次构建自动再生，已 gitignore）
 
 ## 硬约定
 
@@ -54,8 +91,24 @@ Android 相关的非显然几条：
 6. **窄屏断点是双源**：JS `useIsNarrow`（`innerWidth < 768`，`src/App.tsx`）与 CSS `@media (max-width: 767.98px)`（`src/index.css`），必须同步改。
 7. **Crepe 主题覆盖靠 specificity**：引入的是 `frame-dark.css`（仅变量块）+ common 规则，浅色「晨窗」全靠 `index.css` 更高优先级规则盖（如 `.editor-host .milkdown`）。新增覆盖要核对优先级；注释里标了已知漏覆盖点。
 8. **提交信息一律 `类型(可选范围): 中文简述`**（如 `fix(sync): 删除传播补 tombstone 时序`、`feat: M3b tombstone 删除传播`）；类型只用 feat/fix/perf/refactor/style/test/docs/build/ci/chore/revert，半角冒号 + 一个空格，简述不加句号。
-   **自测账**：收尾必跑 `pnpm test` 与 `cd src-tauri && cargo test`，提交里带**本次实际跑出的**成绩（当前基线：前端 87/87 + Rust 92/92；勿照抄历史数字）；里程碑收尾与移动端改动另附真机走查结论（机型 + Android 版本）。
+   **自测账**：收尾必跑 `pnpm test` 与 `cd src-tauri && cargo test`（先 source `scripts/env.sh`；两套的先后顺序有坑，见「命令」段），提交里带**本次实际跑出的**成绩（2026-09-24 实测基线：前端 91/91 + Rust 92/92；勿照抄历史数字）；里程碑收尾与移动端改动另附真机走查结论（机型 + Android 版本）。
 9. **构建路径上的东西必须入库，`.cache/` 只放可再生的缓存**：`patches/tauri-runtime-wry`（tauri#15671，仅 lib.rs 7 行差异，`[patch.crates-io]` 指向它）曾放 `.cache/` 导致 CI 三端全挂。升级该依赖时重拷 registry 原件 + 重放补丁，步骤见 `patches/README.md`。
+
+## 完成标准（DoD）
+
+- [ ] `pnpm test` 与 `cd src-tauri && cargo test` 全绿，成绩写进提交（命令与当前基线见硬约定 8）
+- [ ] 动过往返链路 → `src/milkdown/roundtrip.test.ts` 与相关往返用例必须绿
+- [ ] 动过 UI → 先用 `scripts/cdp-eval.mjs` 核数值，再截图存档到 `.cache/screenshots/`（见「真机调试」）
+- [ ] 移动端改动 / 里程碑收尾 → 附真机走查结论（机型 + Android 版本）
+- [ ] 改了构建、测试约定或目录结构 → 同一提交内更新本文
+- [ ] 涉及发版 → `.github/workflows` 三端全绿
+
+## 发版（v0.1 起）
+
+- **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`.github/workflows/release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis` 对应这个约定
+- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）→ 提交推送 → **先** `gh release create vX.Y.Z --title … --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
+- 坑：仓库默认 GITHUB_TOKEN 只读，`release.yml` 的 `permissions: contents: write` 不能删（缺了上传 403）
+- **Android release 资产当前是 debug 签名构建**：`release.yml` 的 android job 用 `--debug` 构建后仅重命名为 release 资产名，行为与本地 debug APK 一致（CDP 可用、debuggable）——M3 验收走查确认设计使然（2026-09-23），非 CI 误配：`scripts/cdp-eval.mjs` 走查发现「release 包」行为像 debug 时勿误判。M4 将切固定 release keystore（docs/08 §12.1），切换后同步更新本条（届时 release 资产不再带 CDP）
 
 ## 真机调试（手机 = 主验证场）
 
