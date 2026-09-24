@@ -1,6 +1,14 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
-    <style name="Theme.lanmark" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+    <!-- Base application theme.
+         M4 真机反馈：手机系统处于深色模式时，状态栏图标变白 —— 而 App 只有
+         「晨窗」浅色一套主题（docs/08 §1 非目标：暗色不做），白图标落在白色
+         背景上完全看不见。
+         修法：钉死浅色（Light 而非 DayNight），并显式声明状态栏图标为深色。
+         windowLightStatusBar 在 API 23+ 可用（minSdk 24，无需 values-v23）。 -->
+    <style name="Theme.lanmark" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/lanmark_status_bar</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/lanmark_status_bar</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
     </style>
 </resources>

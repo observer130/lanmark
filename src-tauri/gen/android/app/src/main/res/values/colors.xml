@@ -7,4 +7,8 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- 状态栏底色：与应用顶部（bg-side，见 src/index.css 的 c-side 变量）一致，
+         避免状态栏与 WebView 之间出现色带。 -->
+
+    <color name="lanmark_status_bar">#FFFDFDFF</color>
 </resources>

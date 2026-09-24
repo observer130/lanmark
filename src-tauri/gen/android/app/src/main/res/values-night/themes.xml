@@ -1,6 +1,11 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
-    <style name="Theme.lanmark" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+    <!-- 系统深色模式下的同名主题：**必须显式覆盖**，否则 Android 会优先取
+         本目录的 DayNight 变体，把状态栏拉回深色 + 白图标。
+         App 只有浅色主题，这里与 values/ 保持一致。 -->
+    <style name="Theme.lanmark" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/lanmark_status_bar</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/lanmark_status_bar</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
     </style>
 </resources>
