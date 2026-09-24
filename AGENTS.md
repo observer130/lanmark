@@ -42,6 +42,7 @@ Android 相关的非显然几条：
 - **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`.github/workflows/release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis` 对应这个约定
 - 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）→ 提交推送 → **先** `gh release create vX.Y.Z --title … --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
 - 坑：仓库默认 GITHUB_TOKEN 只读，`release.yml` 的 `permissions: contents: write` 不能删（缺了上传 403）
+- **Android release 资产当前是 debug 签名构建**：`release.yml` 的 android job 用 `--debug` 构建后仅重命名为 release 资产名，行为与本地 debug APK 一致（CDP 可用、debuggable）——M3 验收走查确认设计使然（2026-09-23），非 CI 误配：`scripts/cdp-eval.mjs` 走查发现「release 包」行为像 debug 时勿误判。M4 将切固定 release keystore（docs/08 §12.1），切换后同步更新本条（届时 release 资产不再带 CDP）
 
 ## 硬约定
 
