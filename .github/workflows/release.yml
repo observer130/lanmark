@@ -91,10 +91,41 @@ jobs:
         run: echo "NDK_HOME=$(ls -d $ANDROID_HOME/ndk/* | sort -V | tail -n1)" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
       # gen/android 已提交（含 buildToolsVersion 钉 34.0.0），无需再 init
-      - name: Build debug APK (arm64, debug 签名可直接安装)
-        run: pnpm tauri android build --debug --apk --target aarch64
+      #
+      # M4g（docs/08 §12.1）：改用**固定 release keystore** 签名。
+      # 此前用 --debug 构建 → debug keystore 由 AGP 在每台全新 runner 上随机生成
+      # → 每个版本签名都不同 → 用户只能卸载重装（应用目录用户的笔记库会一起没）。
+      - name: 解码 release keystore
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+        run: |
+          if [ -z "$RELEASE_KEYSTORE" ]; then
+            echo "::error::RELEASE_KEYSTORE secret 未配置——拒绝构建未固定签名的 release 资产"
+            exit 1
+          fi
+          echo "$RELEASE_KEYSTORE" | base64 -d > "$RUNNER_TEMP/lanmark-release.keystore"
+          echo "LANMARK_KEYSTORE_PATH=$RUNNER_TEMP/lanmark-release.keystore" >> "$GITHUB_ENV"
+      # 真实 release 构建（非 --debug）：走 signingConfigs.release + R8 混淆
+      - name: Build release APK (arm64, 固定 release 签名)
+        env:
+          LANMARK_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          LANMARK_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          LANMARK_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: pnpm tauri android build --apk --target aarch64
+      # 签名指纹佐证：连续两次构建应得到相同证书（固定性证明，docs/08 §12.1 验收）
+      - name: 校验签名指纹
+        run: |
+          APK=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          "$BT/apksigner" verify --print-certs "$APK" | tee /tmp/certs.txt
+          if grep -q "CN=Android Debug" /tmp/certs.txt; then
+            echo "::error::产物仍是 debug 签名——release keystore 未生效"
+            exit 1
+          fi
       - name: 重命名为 release 资产名
-        run: mv src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk lanmark-android-aarch64.apk
+        run: |
+          mv src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+             lanmark-android-aarch64.apk
       - uses: softprops/action-gh-release@v2
         with:
           files: lanmark-android-aarch64.apk
