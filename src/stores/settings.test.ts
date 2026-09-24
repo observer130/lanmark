@@ -211,6 +211,14 @@ describe("D3：设置页「管理设备与配对」跳转侧栏同步面板", ()
     expect(s.syncPanelRequest).toBe(1);
   });
 
+  /** 真机走查发现：窄屏下只置 syncPanelRequest 不够——侧栏抽屉是收起的，
+   *  同步面板会在 `-translate-x-full` 的容器里展开、被挤出屏幕左侧。 */
+  it("同时请求展开侧栏抽屉（窄屏必需，否则面板被裁到屏幕外）", () => {
+    useSettingsStore.setState({ dialogOpen: true, syncPanelRequest: 0, navDrawerRequest: 0 });
+    useSettingsStore.getState().requestSyncPanel();
+    expect(useSettingsStore.getState().navDrawerRequest).toBe(1);
+  });
+
   it("连点两次计数继续递增（布尔会因「已是 true」失效，故用计数器）", () => {
     useSettingsStore.setState({ dialogOpen: true, syncPanelRequest: 0 });
     useSettingsStore.getState().requestSyncPanel();

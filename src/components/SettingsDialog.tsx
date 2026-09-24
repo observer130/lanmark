@@ -533,7 +533,9 @@ function SyncSection2() {
           />
         </Row>
       </Group>
-      <p className="px-1 text-[11px] leading-4 text-ink-3">
+      {/* 走查发现：这段说明直接顶到「设备配对」分组标题上，读起来像属于下一组。
+          加下边距与缩进把它明确收在「局域网扫描」这一项下。 */}
+      <p className="-mt-3 mb-5 px-1 text-[11px] leading-4 text-ink-3">
         扫描只连本机局域网内的地址、只读取设备名与笔记数，不发送任何笔记内容。
       </p>
 

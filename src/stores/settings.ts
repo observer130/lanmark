@@ -63,6 +63,12 @@ interface SettingsStore {
    * 计数器而非布尔：连点两次也要能再次触发（布尔会因「已经是 true」失效）。
    */
   syncPanelRequest: number;
+  /**
+   * 窄屏专用：D3 跳转请求同时要**打开侧栏抽屉**——否则同步面板会在一个
+   * 已收起（`-translate-x-full`）的容器里展开，视觉上被挤出屏幕左侧
+   * （真机走查发现）。桌面无抽屉，此值恒不消费。
+   */
+  navDrawerRequest: number;
 
   load: () => Promise<void>;
   /** 改某个小节：乐观更新 → 应用 CSS 变量 → 落库 → 以返回值覆盖 */
@@ -87,6 +93,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   dialogOpen: false,
   activeSection: "appearance",
   syncPanelRequest: 0,
+  navDrawerRequest: 0,
 
   load: async () => {
     const seq = ++loadSeq;
@@ -144,7 +151,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ dialogOpen: true, activeSection: section ?? get().activeSection }),
   closeDialog: () => set({ dialogOpen: false }),
   requestSyncPanel: () =>
-    set((s) => ({ dialogOpen: false, syncPanelRequest: s.syncPanelRequest + 1 })),
+    set((s) => ({
+      dialogOpen: false,
+      syncPanelRequest: s.syncPanelRequest + 1,
+      navDrawerRequest: s.navDrawerRequest + 1,
+    })),
   setActiveSection: (s) => set({ activeSection: s }),
   clearError: () => set({ error: null }),
 }));

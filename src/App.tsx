@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Menu, TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
@@ -54,6 +54,16 @@ function App() {
   const syncAuto = useSyncStore((s) => s.syncAuto);
   const narrow = useIsNarrow();
   const [navOpen, setNavOpen] = useState(false);
+  // 窄屏：设置页「管理设备与配对」要求展开侧栏抽屉（否则同步面板在收起容器里
+  // 渲染，被挤出屏幕左侧——真机走查发现）。与 SyncSection 同样用计数器订阅。
+  const navDrawerRequest = useSettingsStore((s) => s.navDrawerRequest);
+  const lastNavRequest = useRef(navDrawerRequest);
+  useEffect(() => {
+    if (navDrawerRequest !== lastNavRequest.current) {
+      lastNavRequest.current = navDrawerRequest;
+      setNavOpen(true);
+    }
+  }, [navDrawerRequest]);
 
   useEffect(() => {
     void useVaultStore.getState().init();
