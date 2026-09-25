@@ -5,6 +5,7 @@ import { useSyncStore } from "../stores/sync";
 import { useSettingsStore } from "../stores/settings";
 import { isAndroid } from "../lib/sync";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./WindowControls";
+import { AppMark } from "./AppMark";
 
 /**
  * 首启选库。桌面走系统文件夹选择器；
@@ -61,9 +62,7 @@ export function VaultPicker() {
         data-no-drag
         className="relative w-full max-w-md rounded-2xl border border-line bg-card p-8 text-center shadow-card"
       >
-        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent text-2xl font-bold text-white shadow-slider">
-          L
-        </div>
+        <AppMark size={56} className="mx-auto mb-4 block" />
         {/* M4a：未配置 vault 时设置页也可用（设置存在设备配置目录，与 vault 无关） */}
         <button
           aria-label="设置"

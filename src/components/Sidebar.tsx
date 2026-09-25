@@ -5,6 +5,7 @@ import { TreeView } from "./TreeView";
 import { SyncSection } from "./SyncSection";
 import { useSettingsStore } from "../stores/settings";
 import { CreateDialog } from "./CreateDialog";
+import { AppMark } from "./AppMark";
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
 import type { PathTitle } from "../lib/vault";
 
@@ -92,9 +93,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         onMouseDown={isLinuxDesktop ? dragWindow : undefined}
         className="flex items-center gap-2 px-3 py-3"
       >
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent text-sm font-bold text-white shadow-slider">
-          L
-        </div>
+        <AppMark size={28} className="shrink-0" />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-ink">Lanmark</div>
           <div className="truncate text-[11px] text-ink-3" title={vaultPath ?? ""}>

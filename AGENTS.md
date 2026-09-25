@@ -42,7 +42,7 @@ Android 相关的非显然几条：
 
 | 位置 | 内容 |
 |---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控） |
+| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
 | `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量 + 回滚）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
 | `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`settings.ts`（字体栈与枚举→像素映射的**唯一来源** + `applyCssVars`）、`bridge.ts` |
 | `src/milkdown/roundtrip.test.ts` | 编辑器往返保真护栏（M1 决策门） |
@@ -94,6 +94,7 @@ Android 相关的非显然几条：
 9. **构建路径上的东西必须入库，`.cache/` 只放可再生的缓存**：`patches/tauri-runtime-wry`（tauri#15671，仅 lib.rs 7 行差异，`[patch.crates-io]` 指向它）曾放 `.cache/` 导致 CI 三端全挂。升级该依赖时重拷 registry 原件 + 重放补丁，步骤见 `patches/README.md`。
 10. **设备偏好进 `AppConfig`，vault 级视图状态进 localStorage，笔记内容进文件**（M4a 定，docs/08 §4.1）：字体/字号/行距/编辑器偏好/回收站策略都存 `app_config_dir/config.json`，**换库不该改变偏好**；折叠目录等跟库走的视图状态留 localStorage；`.lanmark/settings.json` 这种放 vault 里的做法是错的（会让设置随库漂移并卷进同步清单判定）。
 11. **外观设置只走 CSS 变量，绝不进编辑器 `key`**（M4b 定，docs/08 §9 R2）：改字体/字号不得重建 Crepe 实例——建实例会发伪 `markdownUpdated`，等于把打开着的笔记重写一遍（硬约定 3）。`editorKey(path, mode)` 是这条的护栏函数，`settings.test.ts` 有用例钉住；`applyCssVars`（`src/lib/settings.ts`）是唯一写入点。
+12. **应用图标改一处要改全套，UI 内品牌标走 `AppMark`**：图标有 4 处独立副本——`src-tauri/icons/`（Tauri 打包位图 + SVG + 桌面 entry 图标）、`scripts/gen-icon.py`、**`src/components/AppMark.tsx`**（界面内联矢量）、`public/app-icon.svg`（favicon）、`src-tauri/gen/android/**/mipmap-*`（Android 自适应层，手工维护）。a6a5a13 换图标时只换了前两处，界面里手写的「蓝底白 L」占位块漏改（就是这个 bug），**别再手写 `bg-accent` + 文字当 logo**。投影用 `index.css` 的 `.lanmark-appmark`（`filter: drop-shadow`），不用 `shadow-*`：那是 `box-shadow`，会按 svg 矩形边界投影，圆角外的透明四角露出直角阴影。`scripts/gen-icon.py` 必须与设计源 `icon.svg` 同步更新——它是「重跑即回退」的陷阱（旧版画的是白 L）。
 
 ## 完成标准（DoD）
 

@@ -1,64 +1,98 @@
 #!/usr/bin/env python3
-"""生成 Lanmark 应用图标全套（src-tauri/icons/）。
+"""生成 Lanmark 应用图标全套（src-tauri/icons/ 下的位图）。
 
-设计：靛蓝圆角方块 + 白色粗体「L」——与侧栏内 logo（bg-accent 圆角 + 白 L）一致。
-色值由 src/index.css 的 --c-acc（oklch(0.53 0.19 264)）换算成 sRGB。
-用法: python3 scripts/gen-icon.py （需要 Pillow + Noto Sans Bold）
+设计：「行与句点」——浅灰渐变圆角方块上四条蓝色圆头横线（第二行弱化衬行）
++ 琥珀色句点。几何参数与配色和 src-tauri/icons/icon.svg 逐一对应（512 视箱）：
+  底 #F9FAFB→#F5F6F8 渐变，rx=118；描边 #E3E5E7 w=2.5；
+  行 #3061D8：(102,119,224,52,r26) (102,217,308,34,r17,α.14)
+             (102,285,224,34,r17) (102,353,152,34,r17)；
+  句点 #F0C781：圆心 (308,370) r=23。
+历史：v0.3.0 前的旧版是「靛蓝圆角方块 + 白 L」（oklch 换算 --c-acc + Noto Sans），
+a6a5a13 换图标后本脚本曾漏改——重跑会把新图覆盖回旧 L，现与 SVG 设计源对齐。
+
+只写位图（png/ico/icns/Store 资产）；SVG 变体（icon*.svg）与
+src-tauri/gen/android 的自适应 mipmap 是手工维护的，本脚本不碰。
+
+用法: python3 scripts/gen-icon.py （需要 Pillow）
 """
 import io
-import math
-import struct
 import pathlib
+import struct
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ICONS = ROOT / "src-tauri" / "icons"
 
-# ── oklch(0.53 0.19 264) → sRGB（Björn Ottosson 的 OKLab 矩阵） ──────────────
-def oklch_to_srgb(L: float, C: float, h_deg: float):
-    h = math.radians(h_deg)
-    a, b = C * math.cos(h), C * math.sin(h)
-    l_ = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
-    m_ = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
-    s_ = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
-    r = +4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_
-    g = -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_
-    bb = -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_
+# icon.svg 的 512 视箱几何（x, y, w, h, r, α），乘 size/512 等比缩放
+BARS = [
+    (102, 119, 224, 52, 26, 1.0),    # 标题行（粗）
+    (102, 217, 308, 34, 17, 0.14),   # 衬行（弱化）
+    (102, 285, 224, 34, 17, 1.0),
+    (102, 353, 152, 34, 17, 1.0),
+]
+DOT = (308, 370, 23)                 # 句点（cx, cy, r）
+BG_TOP, BG_BOTTOM = (0xF9, 0xFA, 0xFB), (0xF5, 0xF6, 0xF8)
+BLUE, GOLD, EDGE = (0x30, 0x61, 0xD8), (0xF0, 0xC7, 0x81), (0xE3, 0xE5, 0xE7)
+CORNER = 118 / 512                   # 底板圆角比例
+STROKE_W = 2.5                       # 发丝描边宽（512 视箱）
+SS = 4                               # 超采样倍率（Pillow 圆角矩形无抗锯齿）
 
-    def gam(x):
-        x = max(0.0, min(1.0, x))
-        return 12.92 * x if x <= 0.0031308 else 1.055 * x ** (1 / 2.4) - 0.055
-
-    return tuple(round(gam(v) * 255) for v in (r, g, bb))
-
-
-ACCENT = oklch_to_srgb(0.53, 0.19, 264)
-FONT = "/usr/share/fonts/noto/NotoSans-Bold.ttf"
 MASTER = 1024
 
 
-def draw_icon(size: int) -> Image.Image:
-    """在 size×size 画布上画图标（内容按 1024 master 等比缩放）。"""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+def _v_gradient(size: int, top: tuple, bottom: tuple) -> Image.Image:
+    """size×size 垂直线性渐变（逐行插值）。"""
+    img = Image.new("RGB", (size, size))
     d = ImageDraw.Draw(img)
-    radius = round(size * 0.285)  # 与侧栏 logo 的 rounded-lg（8/28）一致
-    d.rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=ACCENT + (255,))
-
-    # 白色「L」：按 cap 高度光学居中（L 的 bbox 底部到基线即 cap，直接按 bbox 居中即可）
-    font = ImageFont.truetype(FONT, round(size * 0.60))
-    x0, y0, x1, y1 = font.getbbox("L")
-    w, h = x1 - x0, y1 - y0
-    d.text(
-        ((size - w) / 2 - x0, (size - h) / 2 - y0 - size * 0.008),
-        "L",
-        font=font,
-        fill=(255, 255, 255, 255),
-    )
+    for y in range(size):
+        t = y / max(1, size - 1)
+        c = tuple(round(a + (b - a) * t) for a, b in zip(top, bottom))
+        d.line([(0, y), (size, y)], fill=c)
     return img
 
 
-def write_icns(master: Image.Image, out: pathlib.Path) -> None:
+def draw_icon(size: int) -> Image.Image:
+    """size×size 的完整图标（浅底圆角方块 + 行与句点，四角透明）。"""
+    s = size * SS / 512
+    big = size * SS
+
+    # 底板：渐变透过圆角矩形蒙版
+    img = _v_gradient(big, BG_TOP, BG_BOTTOM).convert("RGBA")
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, big - 1, big - 1], radius=round(CORNER * big), fill=255
+    )
+    img.putalpha(mask)
+
+    # 行与句点：画在独立 RGBA 层再合成，弱化衬行（α=.14）与 SVG 的
+    # opacity 混合语义一致（对局部渐变底逐像素叠加，不做预混近似）
+    overlay = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    for x, y, w, h, r, alpha in BARS:
+        od.rounded_rectangle(
+            [x * s, y * s, (x + w) * s, (y + h) * s],
+            radius=r * s,
+            fill=BLUE + (round(alpha * 255),),
+        )
+    cx, cy, r = DOT
+    od.ellipse([(cx - r) * s, (cy - r) * s, (cx + r) * s, (cy + r) * s], fill=GOLD + (255,))
+    img = Image.alpha_composite(img, overlay)
+
+    # 发丝描边：小尺寸下不足 1px，跳过
+    stroke = round(STROKE_W * s)
+    if stroke >= 1:
+        ImageDraw.Draw(img).rounded_rectangle(
+            [stroke // 2, stroke // 2, big - 1 - stroke // 2, big - 1 - stroke // 2],
+            radius=round(CORNER * big) - stroke // 2,
+            outline=EDGE,
+            width=stroke,
+        )
+
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def write_icns(out: pathlib.Path) -> None:
     """手写 ICNS 容器（各尺寸块直接内嵌 PNG，macOS 10.15+ 均支持）。"""
     entries = [
         (b"icp4", 16),   # 16
@@ -69,9 +103,8 @@ def write_icns(master: Image.Image, out: pathlib.Path) -> None:
     ]
     chunks = b""
     for code, size in entries:
-        png = draw_icon(size)
         buf = io.BytesIO()
-        png.save(buf, "PNG")
+        draw_icon(size).save(buf, "PNG")
         data = buf.getvalue()
         chunks += code + struct.pack(">I", len(data) + 8) + data
     out.write_bytes(b"icns" + struct.pack(">I", len(chunks) + 8) + chunks)
@@ -79,9 +112,6 @@ def write_icns(master: Image.Image, out: pathlib.Path) -> None:
 
 def main() -> None:
     ICONS.mkdir(exist_ok=True)
-    print("accent =", "#%02x%02x%02x" % ACCENT)
-
-    master = draw_icon(MASTER)
 
     # Tauri/Linux 用
     for name, size in [
@@ -92,11 +122,14 @@ def main() -> None:
     ]:
         draw_icon(size).save(ICONS / name)
 
-    # Windows（ico 多尺寸）
-    master.save(ICONS / "icon.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    # Windows（ico 多尺寸，从 1024 master 缩）
+    draw_icon(MASTER).save(
+        ICONS / "icon.ico",
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
 
     # macOS（工程不发布 mac，但保持图标不再是最旧的 Tauri 默认）
-    write_icns(master, ICONS / "icon.icns")
+    write_icns(ICONS / "icon.icns")
 
     # Windows Store 资产（沿用现有文件名/尺寸）
     for name in [

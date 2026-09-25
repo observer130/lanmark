@@ -140,6 +140,14 @@ body {
   font-family: var(--lanmark-font-text);
 }
 
+/* ── 应用品牌标（src/components/AppMark.tsx）──
+   投影用 drop-shadow 而非 box-shadow：图标四角是透明的，box-shadow 会按 svg 的
+   矩形边界投影，圆角外露出直角阴影。drop-shadow 按 alpha 形状投影，贴合圆角。
+   尺寸由调用方用 Tailwind w-* / h-* 控制，这里只管投影与对齐。 */
+.lanmark-appmark {
+  filter: drop-shadow(0 1px 2px rgb(15 18 30 / 0.12));
+}
+
 /* 手机窄屏（<768px，与 App.tsx useIsNarrow 阈值一致）：
    crepe 桌面主题给 .ProseMirror 定了 60px/120px 的大留白，385px 宽的
    手机屏幕上会吃掉约 3/4 宽度（每行只剩 3~4 个字）。窄屏收紧全部留白，
