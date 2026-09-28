@@ -4,13 +4,11 @@ import {
   FileText,
   Folder,
   FolderPlus,
-  Palette,
   Pencil,
   Star,
   Trash2,
 } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
-import { FOLDER_COLOR_VARS } from "./CreateDialog";
 import type { VaultNode } from "../lib/vault";
 
 interface Props {
@@ -102,7 +100,6 @@ export function TreeView({ tree, onNavigate }: Props) {
   const favSet = new Set(favorites.map((f) => f.path));
 
   /* ── 展开/收起（状态在 vault store：新建/打开笔记时要能展开祖先目录） ── */
-  const folderColors = useVaultStore((s) => s.folderColors);
   const openCreate = useVaultStore((s) => s.openCreate);
   const collapsedDirs = useVaultStore((s) => s.collapsedDirs);
   const toggleDirCollapsed = useVaultStore((s) => s.toggleDirCollapsed);
@@ -182,7 +179,6 @@ export function TreeView({ tree, onNavigate }: Props) {
         const isRenaming = node.path === renamingPath;
         const isFav = favSet.has(node.path);
         const isCollapsed = collapsedDirs.has(node.path);
-        const colorToken = isNote ? undefined : folderColors[node.path];
 
         return (
           <li key={node.path} className="group">
@@ -220,11 +216,7 @@ export function TreeView({ tree, onNavigate }: Props) {
               {isNote ? (
                 <FileText size={14} className="shrink-0 text-ink-3" />
               ) : (
-                <Folder
-                  size={15}
-                  className="shrink-0"
-                  style={colorToken ? { color: FOLDER_COLOR_VARS[colorToken] } : undefined}
-                />
+                <Folder size={15} className="shrink-0 text-ink-3" />
               )}
 
               {isRenaming ? (
@@ -307,11 +299,6 @@ export function TreeView({ tree, onNavigate }: Props) {
                 icon={FolderPlus}
                 label="新建文件夹"
                 onClick={() => closeAnd(() => openCreate("folder", menu.node.path))}
-              />
-              <MenuItem
-                icon={Palette}
-                label="设置颜色…"
-                onClick={() => closeAnd(() => openCreate("recolor", menu.node.path))}
               />
               <div className="my-1 h-px bg-line" />
             </>

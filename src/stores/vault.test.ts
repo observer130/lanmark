@@ -31,8 +31,6 @@ vi.mock("../lib/vault", () => ({
     pickAndSet: vi.fn(),
     setPath: m.setPath,
     setPathWithCreate: m.setPathWithCreate,
-    folderColors: vi.fn(async () => ({})),
-    setFolderColor: vi.fn(async () => undefined),
     rename: m.rename,
     remove: vi.fn(),
     move: m.move,

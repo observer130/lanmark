@@ -21,12 +21,10 @@ interface VaultStore {
   recents: PathTitle[];
   favorites: PathTitle[];
   error: string | null;
-  /** 目录颜色（relPath → "fd1"|"fd2"|"fd3"；设备本地，存 .lanmark/folder-colors.json） */
-  folderColors: Record<string, string>;
   /** 收起的目录（relPath 集合；按 vault 持久化到 localStorage） */
   collapsedDirs: Set<string>;
-  /** 新建/配色对话框状态（null = 关闭） */
-  pendingCreate: { kind: "note" | "folder" | "recolor"; parentDir: string } | null;
+  /** 新建对话框状态（null = 关闭） */
+  pendingCreate: { kind: "note" | "folder"; parentDir: string } | null;
 
   init: () => Promise<void>;
   pickVault: (mode: "open" | "create") => Promise<void>;
@@ -48,15 +46,13 @@ interface VaultStore {
   saveNow: () => Promise<boolean>;
   setEditorMode: (m: "read" | "wysiwyg" | "source") => void;
   setRenaming: (path: string | null) => void;
-  /** 打开新建/配色对话框（parentDir：文件夹模式为创建位置；笔记模式为所在目录） */
-  openCreate: (kind: "note" | "folder" | "recolor", parentDir: string) => void;
+  /** 打开新建对话框（parentDir：文件夹模式为父目录；笔记模式为所在目录） */
+  openCreate: (kind: "note" | "folder", parentDir: string) => void;
   closeCreate: () => void;
   /** 对话框确认：创建笔记（自动补 .md / 重名自动 -2）。返回是否成功 */
   createNoteIn: (name: string, dir: string) => Promise<boolean>;
-  /** 对话框确认：创建文件夹（可同时设颜色）。返回是否成功 */
-  createFolderIn: (name: string, dir: string, color: string | null) => Promise<boolean>;
-  /** 设置/清除目录颜色（null = 恢复默认）。返回是否成功 */
-  setFolderColor: (path: string, color: string | null) => Promise<boolean>;
+  /** 对话框确认：创建文件夹（名称可含 `/` 直接建多级）。返回是否成功 */
+  createFolderIn: (name: string, dir: string) => Promise<boolean>;
   /** M4d：切换笔记库（严格顺序见 docs/08 §6.1）。返回是否成功 */
   switchVault: (path: string, mode: "open" | "create") => Promise<boolean>;
   toggleDirCollapsed: (path: string) => void;
@@ -134,7 +130,6 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   recents: [],
   favorites: [],
   error: null,
-  folderColors: {},
   collapsedDirs: new Set<string>(),
   pendingCreate: null,
 
@@ -229,11 +224,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   refreshTree: async () => {
     try {
-      const [tree, folderColors] = await Promise.all([
-        vault.tree(),
-        vault.folderColors().catch(() => ({})),
-      ]);
-      set({ tree, folderColors: folderColors ?? {} });
+      const tree = await vault.tree();
+      set({ tree });
       // 换库后重载该 vault 的收起目录（每个 vault 只重载一次）
       const vp = get().vaultPath;
       if (collapsedLoadedFor !== vp) {
@@ -410,10 +402,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     }
   },
 
-  createFolderIn: async (name, dir, color) => {
+  createFolderIn: async (name, dir) => {
     try {
       const node = await vault.createFolder(dir, name);
-      if (color) await vault.setFolderColor(node.path, color);
       await get().refreshTree();
       get().expandAncestors(node.path);
       return true;
@@ -469,22 +460,6 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     } catch (e) {
       // 失败：原 vault 与状态原样保留（Rust 侧开库失败不会改 state）
       set({ error: String(e) });
-      return false;
-    }
-  },
-
-  setFolderColor: async (path, color) => {
-    // 乐观更新，失败回滚由错误提示兜底
-    const prev = get().folderColors;
-    const next = { ...prev };
-    if (color) next[path] = color;
-    else delete next[path];
-    set({ folderColors: next });
-    try {
-      await vault.setFolderColor(path, color);
-      return true;
-    } catch (e) {
-      set({ folderColors: prev, error: String(e) });
       return false;
     }
   },

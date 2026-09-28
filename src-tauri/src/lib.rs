@@ -2,6 +2,8 @@ mod bridge;
 mod commands;
 mod db;
 mod fs_ops;
+// 设备代号（alias，M4h-4）：仅内部 API 供 sync_server / sync_client 读，无命令
+mod alias;
 mod lan_scan;
 mod mobile;
 mod protocol;
@@ -77,6 +79,9 @@ pub fn run() {
                     );
                 }));
             }
+            // M4h-4：首启初始化设备代号（桌面默认 HOSTNAME / 手机词表随机），
+            // 并预热进程内缓存——HTTP handler 拿不到 AppHandle，全靠缓存说代号
+            crate::alias::ensure_default_alias(&handle);
             tauri::async_runtime::spawn(async move {
                 let cfg = vault::load_config(&handle);
                 if let Some(p) = cfg.vault_path.filter(|p| !p.is_empty()) {
@@ -105,6 +110,7 @@ pub fn run() {
             settings_cmd::settings_get,
             settings_cmd::settings_patch,
             settings_cmd::settings_reset,
+            settings_cmd::device_alias_set,
             commands::vault_status,
             commands::vault_set_path,
             commands::vault_set_sync_auto,
@@ -117,8 +123,6 @@ pub fn run() {
             commands::entry_rename,
             commands::entry_move,
             commands::entry_delete,
-            commands::folder_colors,
-            commands::folder_color_set,
             commands::note_read,
             commands::note_write,
             commands::search,

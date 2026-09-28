@@ -200,7 +200,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           常驻只剩一行（状态+开关+同步），管理/配对在点击行后的上拉面板里 */}
       <SyncSection />
 
-      {/* 新建笔记 / 新建文件夹 / 文件夹配色 对话框 */}
+      {/* 新建笔记 / 新建文件夹 对话框 */}
       <CreateDialog />
     </aside>
   );
