@@ -53,7 +53,7 @@
 | Linux（x64） | `lanmark-linux-x64.tar.gz` | 原生二进制，解压后直接运行 |
 | Android（arm64） | `lanmark-android-aarch64.apk` | 侧载安装；Android 7.0（API 24）及以上 |
 
-安装包在 [Releases](https://github.com/observer130/lanmark/releases) 页面下载，当前版本 **v0.3.0**。
+安装包在 [Releases](https://github.com/observer130/lanmark/releases) 页面下载，当前版本 **v0.4.0**。
 
 **Android 须知**
 
