@@ -1,10 +1,10 @@
 import { create } from "zustand";
-import { vault, remapPath, type VaultNode, type SearchHit, type PathTitle } from "../lib/vault";
+import { vault, remapPath, type VaultNode, type SearchHit, type PathTitle, type TrashEntry } from "../lib/vault";
 import { vaultPicker } from "../lib/sync";
 import { useSettingsStore } from "./settings";
 
-const RECENTS_SHOWN = 8;
-const FAVORITES_SHOWN = 8;
+/** 「最近」固定 3 条（v0.5.1 用户定版：不折叠，多出的不看） */
+const RECENTS_SHOWN = 3;
 
 interface VaultStore {
   status: "loading" | "unconfigured" | "ready";
@@ -20,9 +20,16 @@ interface VaultStore {
   searchResults: SearchHit[];
   recents: PathTitle[];
   favorites: PathTitle[];
+  /** v0.5.1：回收站条目（随 refreshMeta 一起刷新，删除/恢复/远端改动后自动更新） */
+  trash: TrashEntry[];
   error: string | null;
   /** 收起的目录（relPath 集合；按 vault 持久化到 localStorage） */
   collapsedDirs: Set<string>;
+  /**
+   * v0.5.1：侧栏分区展开状态（"favorites" | "trash" 在集合里 = 展开）。
+   * 默认收起（只展示 3 条 + 展开栏）；按 vault 持久化到 localStorage（硬约定 10）。
+   */
+  expandedSections: Set<string>;
   /** 新建对话框状态（null = 关闭） */
   pendingCreate: { kind: "note" | "folder"; parentDir: string } | null;
 
@@ -58,6 +65,10 @@ interface VaultStore {
   toggleDirCollapsed: (path: string) => void;
   /** 展开路径的全部祖先目录（打开笔记/新建文件落在收起目录里时用） */
   expandAncestors: (path: string) => void;
+  /** v0.5.1：切换侧栏分区展开/收起（"favorites" | "trash"） */
+  toggleMetaSection: (id: string) => void;
+  /** v0.5.1：从回收站恢复条目，返回恢复后的路径（失败返回 null，error 已提示） */
+  restoreFromTrash: (trashPath: string) => Promise<string | null>;
   commitRename: (path: string, newName: string) => Promise<void>;
   deleteNode: (path: string) => Promise<void>;
   moveNode: (path: string, newDir: string) => Promise<void>;
@@ -104,6 +115,29 @@ function saveCollapsed(vaultPath: string | null, set: Set<string>): void {
   }
 }
 
+/* ── 侧栏分区展开状态的 localStorage 持久化（v0.5.1，按 vault 隔离） ──
+   存「已展开」集合：缺省（无记录）= 全部收起，即需求默认态「3 条 + 展开栏」 */
+function metaSectionsKey(vaultPath: string | null): string {
+  return `lanmark:meta-sections:${vaultPath ?? ""}`;
+}
+
+function loadMetaSections(vaultPath: string | null): Set<string> {
+  try {
+    const raw = localStorage.getItem(metaSectionsKey(vaultPath));
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveMetaSections(vaultPath: string | null, set: Set<string>): void {
+  try {
+    localStorage.setItem(metaSectionsKey(vaultPath), JSON.stringify([...set]));
+  } catch {
+    /* 存储不可用时静默，仅本次会话生效 */
+  }
+}
+
 // 记录 collapsedDirs 已为哪个 vault 加载过，避免每次 refreshTree 重置用户操作
 let collapsedLoadedFor: string | null | undefined;
 
@@ -129,8 +163,10 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   searchResults: [],
   recents: [],
   favorites: [],
+  trash: [],
   error: null,
   collapsedDirs: new Set<string>(),
+  expandedSections: new Set<string>(),
   pendingCreate: null,
 
   init: async () => {
@@ -226,11 +262,11 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     try {
       const tree = await vault.tree();
       set({ tree });
-      // 换库后重载该 vault 的收起目录（每个 vault 只重载一次）
+      // 换库后重载该 vault 的收起目录与分区展开状态（每个 vault 只重载一次）
       const vp = get().vaultPath;
       if (collapsedLoadedFor !== vp) {
         collapsedLoadedFor = vp;
-        set({ collapsedDirs: loadCollapsed(vp) });
+        set({ collapsedDirs: loadCollapsed(vp), expandedSections: loadMetaSections(vp) });
       }
     } catch (e) {
       set({ error: String(e) });
@@ -239,14 +275,17 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   refreshMeta: async () => {
     try {
-      const [recents, favorites] = await Promise.all([vault.recents(), vault.favorites()]);
+      // trash 随 meta 一起刷：开库、删除、恢复、远端改动（都走这里）后侧栏同步更新
+      const [recents, favorites, trash] = await Promise.all([
+        vault.recents(),
+        vault.favorites(),
+        vault.trashList(),
+      ]);
       set({
-        recents: recents
-          .slice(0, RECENTS_SHOWN)
-          .map(([path, title]) => ({ path, title })),
-        favorites: favorites
-          .slice(0, FAVORITES_SHOWN)
-          .map(([path, title]) => ({ path, title })),
+        // 「最近」固定 3 条（v0.5.1 定版，不折叠）；收藏不截断——展示交给侧栏折叠
+        recents: recents.slice(0, RECENTS_SHOWN).map(([path, title]) => ({ path, title })),
+        favorites: favorites.map(([path, title]) => ({ path, title })),
+        trash,
       });
     } catch (e) {
       set({ error: String(e) });
@@ -486,6 +525,28 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     if (!changed) return;
     saveCollapsed(get().vaultPath, next);
     set({ collapsedDirs: next });
+  },
+
+  toggleMetaSection: (id) => {
+    const next = new Set(get().expandedSections);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    saveMetaSections(get().vaultPath, next);
+    set({ expandedSections: next });
+  },
+
+  restoreFromTrash: async (trashPath) => {
+    try {
+      const restored = await vault.trashRestore(trashPath);
+      await get().refreshTree();
+      await get().refreshMeta();
+      // 恢复后展开其祖先目录，用户能在树里直接看到回来的笔记
+      get().expandAncestors(restored);
+      return restored;
+    } catch (e) {
+      set({ error: String(e) });
+      return null;
+    }
   },
 
   commitRename: async (path, newName) => {

@@ -141,6 +141,8 @@ pub fn run() {
             commands::vault_stats,
             commands::trash_clear,
             commands::trash_prune,
+            commands::trash_list,
+            commands::trash_restore,
             commands::app_info,
             commands::open_in_file_manager,
             sync_server::sync_pairing_info,

@@ -10,6 +10,8 @@ const m = vi.hoisted(() => ({
   writeNote: vi.fn(),
   recents: vi.fn(),
   favorites: vi.fn(),
+  trashList: vi.fn(),
+  trashRestore: vi.fn(),
   tree: vi.fn(),
   search: vi.fn(),
   rename: vi.fn(),
@@ -27,6 +29,8 @@ vi.mock("../lib/vault", () => ({
     tree: m.tree,
     recents: m.recents,
     favorites: m.favorites,
+    trashList: m.trashList,
+    trashRestore: m.trashRestore,
     reindex: vi.fn(),
     pickAndSet: vi.fn(),
     setPath: m.setPath,
@@ -55,7 +59,7 @@ const stopAutoLoopMock = vi.fn();
 
 import { useVaultStore } from "./vault";
 
-const { readNote, writeNote, recents, favorites, tree, search, rename, move } = m;
+const { readNote, writeNote, recents, favorites, trashList, tree, search, rename, move } = m;
 
 function baseState() {
   useVaultStore.setState({
@@ -72,7 +76,10 @@ function baseState() {
     searchResults: [],
     recents: [],
     favorites: [],
+    trash: [],
     error: null,
+    collapsedDirs: new Set<string>(),
+    expandedSections: new Set<string>(),
   });
 }
 
@@ -83,6 +90,7 @@ beforeEach(() => {
   writeNote.mockResolvedValue(undefined);
   recents.mockResolvedValue([]);
   favorites.mockResolvedValue([]);
+  trashList.mockResolvedValue([]);
   tree.mockResolvedValue([]);
 });
 
@@ -375,5 +383,80 @@ describe("switchVault：切换笔记库", () => {
     expect(tree).toHaveBeenCalled();
     expect(recents).toHaveBeenCalled();
     expect(favorites).toHaveBeenCalled();
+  });
+});
+
+/* ── v0.5.1：侧栏「回收站」与分区折叠 ── */
+
+describe("v0.5.1 refreshMeta：最近固定 3 条、收藏不截断、回收站随刷", () => {
+  it("recents 只保留 3 条", async () => {
+    recents.mockResolvedValue(
+      Array.from({ length: 6 }, (_, i) => [`n${i}.md`, `笔记${i}`] as [string, string]),
+    );
+    await useVaultStore.getState().refreshMeta();
+    const s = useVaultStore.getState();
+    expect(s.recents).toHaveLength(3);
+    expect(s.recents[0].path).toBe("n0.md");
+  });
+
+  it("favorites 不截断（展示交给侧栏折叠）", async () => {
+    favorites.mockResolvedValue(
+      Array.from({ length: 7 }, (_, i) => [`f${i}.md`, `收藏${i}`] as [string, string]),
+    );
+    await useVaultStore.getState().refreshMeta();
+    expect(useVaultStore.getState().favorites).toHaveLength(7);
+  });
+
+  it("trash 随 refreshMeta 更新（开笔记/删除/恢复/远端改动后自动同步）", async () => {
+    m.trashList.mockResolvedValue([
+      { trashPath: ".lanmark/trash/1-a.md", name: "a.md", kind: "note", origin: "a.md", deletedAt: 1, bytes: 3 },
+    ]);
+    await useVaultStore.getState().refreshMeta();
+    expect(m.trashList).toHaveBeenCalled();
+    expect(useVaultStore.getState().trash).toHaveLength(1);
+  });
+
+  it("trashList 失败不炸 meta（error 提示，recents/favorites 照旧设置前的旧值）", async () => {
+    m.trashList.mockRejectedValue(new Error("无 vault"));
+    await useVaultStore.getState().refreshMeta();
+    expect(useVaultStore.getState().error).toContain("无 vault");
+  });
+});
+
+describe("v0.5.1 restoreFromTrash", () => {
+  it("恢复成功：刷新树与 meta + 展开祖先目录", async () => {
+    m.trashRestore.mockResolvedValue("研发/回来了.md");
+    useVaultStore.setState({
+      tree: [{ path: "研发", kind: "folder", name: "研发", title: null }],
+      collapsedDirs: new Set(["研发"]),
+    });
+
+    const restored = await useVaultStore.getState().restoreFromTrash(".lanmark/trash/1-x.md");
+
+    expect(restored).toBe("研发/回来了.md");
+    expect(m.trashRestore).toHaveBeenCalledWith(".lanmark/trash/1-x.md");
+    expect(tree).toHaveBeenCalled();
+    expect(useVaultStore.getState().collapsedDirs.has("研发")).toBe(false);
+    expect(useVaultStore.getState().error).toBeNull();
+  });
+
+  it("恢复失败：error 提示，返回 null", async () => {
+    m.trashRestore.mockRejectedValue(new Error("恢复失败"));
+    const restored = await useVaultStore.getState().restoreFromTrash(".lanmark/trash/1-x.md");
+    expect(restored).toBeNull();
+    expect(useVaultStore.getState().error).toContain("恢复失败");
+  });
+});
+
+describe("v0.5.1 分区折叠状态（按 vault 持久化）", () => {
+  it("默认收起；toggle 展开/再收起", () => {
+    const s = useVaultStore.getState();
+    expect(s.expandedSections.size).toBe(0);
+
+    useVaultStore.getState().toggleMetaSection("favorites");
+    expect(useVaultStore.getState().expandedSections.has("favorites")).toBe(true);
+
+    useVaultStore.getState().toggleMetaSection("favorites");
+    expect(useVaultStore.getState().expandedSections.has("favorites")).toBe(false);
   });
 });

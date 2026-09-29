@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderPlus, History, Plus, Search, Settings, Star } from "lucide-react";
+import {
+  ChevronDown,
+  FileText,
+  Folder,
+  FolderPlus,
+  History,
+  Plus,
+  RotateCcw,
+  Search,
+  Settings,
+  Star,
+} from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { TreeView } from "./TreeView";
 import { SyncSection } from "./SyncSection";
@@ -7,11 +18,42 @@ import { useSettingsStore } from "../stores/settings";
 import { CreateDialog } from "./CreateDialog";
 import { AppMark } from "./AppMark";
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
-import type { PathTitle } from "../lib/vault";
+import { parentDir, type PathTitle, type TrashEntry } from "../lib/vault";
+
+/** 收藏/回收站收起时的预览条数（v0.5.1：默认 3 条 + 窄展开栏） */
+const SECTION_PREVIEW = 3;
 
 function SectionLabel({ children }: { children: string }) {
   return (
     <div className="mb-1 mt-4 px-3 text-[11px] font-medium text-ink-3">{children}</div>
+  );
+}
+
+/**
+ * 窄展开栏：收起时显示「展开全部 N 项」，展开后变「收起」。
+ * 箭头随状态旋转给足反馈；触控目标 44px 仅窄屏（硬约定 13）。
+ */
+function ExpandRow({
+  expanded,
+  count,
+  onToggle,
+}: {
+  expanded: boolean;
+  count: number;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      aria-expanded={expanded}
+      className="mt-0.5 flex min-h-[44px] w-full items-center gap-1 rounded-lg px-2.5 py-1 text-xs text-ink-3 hover:bg-canvas hover:text-ink-2 md:min-h-0 md:py-0.5"
+    >
+      <ChevronDown
+        size={12}
+        className={`shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
+      />
+      {expanded ? "收起" : `展开全部 ${count} 项`}
+    </button>
   );
 }
 
@@ -46,6 +88,110 @@ function MetaList({
   );
 }
 
+/** 收藏分区（v0.5.1 起可折叠：默认 3 条 + 展开栏，状态在 vault store 按 vault 持久化） */
+function FavoritesSection({
+  items,
+  expanded,
+  onToggle,
+  onOpen,
+}: {
+  items: PathTitle[];
+  expanded: boolean;
+  onToggle: () => void;
+  onOpen: (path: string) => void;
+}) {
+  return (
+    <>
+      <SectionLabel>收藏</SectionLabel>
+      <MetaList items={expanded ? items : items.slice(0, SECTION_PREVIEW)} onOpen={onOpen} starred />
+      {items.length > SECTION_PREVIEW && (
+        <ExpandRow expanded={expanded} count={items.length} onToggle={onToggle} />
+      )}
+    </>
+  );
+}
+
+/** 删除时刻的相对时间（回收站副标题） */
+function relTime(ms: number | null): string {
+  if (ms === null) return "未知时间";
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** 回收站条目行：名 + 时间·来源副标题 + 常驻恢复按钮（手机无 hover，不能靠显隐） */
+function TrashRow({ item, onRestore }: { item: TrashEntry; onRestore: (p: string) => void }) {
+  // 来源统一取父目录展示：笔记「研发/会议.md」→ 研发；根目录笔记/文件夹 → 根目录。
+  // origin 为 null（无来源记录，恢复会落根目录）则不显示来源。
+  const from = item.origin ? parentDir(item.origin) : null;
+  return (
+    <li className="flex min-h-[44px] items-center gap-2 rounded-lg py-1 pl-2.5 pr-1 hover:bg-canvas md:min-h-0">
+      <span className="shrink-0 text-ink-3">
+        {item.kind === "folder" ? <Folder size={15} /> : <FileText size={14} />}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm text-ink">{item.name}</span>
+        <span className="block truncate text-[11px] text-ink-3">
+          {relTime(item.deletedAt)}
+          {from !== null ? ` · 来自 ${from || "根目录"}` : ""}
+        </span>
+      </span>
+      <button
+        title="恢复"
+        aria-label={`恢复 ${item.name}`}
+        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-3 hover:bg-line/60 hover:text-ink md:h-6 md:w-6"
+        onClick={() => onRestore(item.trashPath)}
+      >
+        <RotateCcw size={13} />
+      </button>
+    </li>
+  );
+}
+
+/** 回收站分区：预览 3 条 + 展开栏；空态一句话。恢复动作即时生效（无破坏性） */
+function TrashSection({
+  items,
+  expanded,
+  onToggle,
+  onRestore,
+}: {
+  items: TrashEntry[];
+  expanded: boolean;
+  onToggle: () => void;
+  onRestore: (p: string) => void;
+}) {
+  return (
+    <>
+      <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-2">
+        <span className="text-[11px] font-medium text-ink-3">回收站</span>
+        {items.length > 0 && (
+          <span className="text-[11px] text-ink-3" title="回收站条目数">
+            {items.length}
+          </span>
+        )}
+      </div>
+      {items.length === 0 ? (
+        <div className="px-3 py-1 text-xs text-ink-3">回收站为空</div>
+      ) : (
+        <>
+          <ul className="space-y-0.5">
+            {(expanded ? items : items.slice(0, SECTION_PREVIEW)).map((it) => (
+              <TrashRow key={it.trashPath} item={it} onRestore={onRestore} />
+            ))}
+          </ul>
+          {items.length > SECTION_PREVIEW && (
+            <ExpandRow expanded={expanded} count={items.length} onToggle={onToggle} />
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const {
     tree,
@@ -54,11 +200,20 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     searchResults,
     recents,
     favorites,
+    trash,
+    expandedSections,
     openNote,
     openCreate,
     doSearch,
+    toggleMetaSection,
+    restoreFromTrash,
   } = useVaultStore();
   const [q, setQ] = useState(searchQuery);
+
+  /** 恢复回收站条目（store 里会刷新树/meta 并展开祖先目录） */
+  const restore = (trashPath: string) => {
+    void restoreFromTrash(trashPath);
+  };
 
   // 搜索防抖
   useEffect(() => {
@@ -161,11 +316,15 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           </ul>
         ) : (
           <>
-            {/* 收藏 */}
-            <SectionLabel>收藏</SectionLabel>
-            <MetaList items={favorites} starred onOpen={openNoteAndClose} />
+            {/* 收藏（v0.5.1 起可折叠：默认 3 条 + 展开栏） */}
+            <FavoritesSection
+              items={favorites}
+              expanded={expandedSections.has("favorites")}
+              onToggle={() => toggleMetaSection("favorites")}
+              onOpen={openNoteAndClose}
+            />
 
-            {/* 最近 */}
+            {/* 最近：固定 3 条（store 已截断），不折叠（v0.5.1 定版） */}
             <SectionLabel>最近</SectionLabel>
             <MetaList items={recents} onOpen={openNoteAndClose} />
 
@@ -198,6 +357,16 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
               </span>
             </div>
             <TreeView tree={tree} onNavigate={onNavigate} />
+
+            {/* 回收站（v0.5.1）：`.lanmark/trash` 的条目，可恢复到删除前位置。
+                放在笔记本树之后（顺序：收藏—最近—笔记本—回收站）。
+                条目不可打开（trash 里的笔记不属于工作区），只提供恢复。 */}
+            <TrashSection
+              items={trash}
+              expanded={expandedSections.has("trash")}
+              onToggle={() => toggleMetaSection("trash")}
+              onRestore={restore}
+            />
           </>
         )}
       </div>

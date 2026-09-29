@@ -465,7 +465,54 @@ pub fn delete_entry(vault: &Path, rel_path: &str, conn: &Connection) -> std::io:
     fs::rename(&abs, &trash_abs)?;
     db::remove_prefix(conn, rel_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    // 记来源：恢复时回到删除前的原位置（best effort，写失败 = 恢复时落 vault 根）
+    trash_index_record(vault, &trash_name, rel_path);
     Ok(format!("{TRASH_DIR}/{trash_name}"))
+}
+
+// ---------- 回收站来源索引与条目列表（v0.5.1 侧栏「回收站」） ----------
+
+/// 来源索引：`.lanmark/trash/index.json`，条目文件名 → 删除前 vault 相对路径。
+/// 只服务「恢复到原位置」；缺失/损坏按无记录处理（恢复落 vault 根，内容不丢）。
+/// 与 tombstones.json 同属 `.lanmark/` 元数据；trash 不进同步，索引也不进。
+pub const TRASH_INDEX_FILE: &str = "index.json";
+
+fn trash_index_path(vault: &Path) -> PathBuf {
+    vault.join(TRASH_DIR).join(TRASH_INDEX_FILE)
+}
+
+fn trash_index_load(vault: &Path) -> std::collections::HashMap<String, String> {
+    fs::read_to_string(trash_index_path(vault))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// best effort：索引写失败只影响「恢复到原位置」，不阻断删除主流程
+fn trash_index_save(vault: &Path, map: &std::collections::HashMap<String, String>) {
+    let json = match serde_json::to_string(map) {
+        Ok(j) => j,
+        Err(e) => {
+            log::warn!("回收站来源索引序列化失败（忽略）: {e}");
+            return;
+        }
+    };
+    if let Err(e) = fs::write(trash_index_path(vault), json) {
+        log::warn!("回收站来源索引写入失败（忽略）: {e}");
+    }
+}
+
+fn trash_index_record(vault: &Path, trash_name: &str, origin: &str) {
+    let mut map = trash_index_load(vault);
+    map.insert(trash_name.to_string(), origin.to_string());
+    trash_index_save(vault, &map);
+}
+
+fn trash_index_remove(vault: &Path, trash_name: &str) {
+    let mut map = trash_index_load(vault);
+    if map.remove(trash_name).is_some() {
+        trash_index_save(vault, &map);
+    }
 }
 
 // ---------- M4d/M4e：vault 统计与回收站清理 ----------
@@ -562,13 +609,16 @@ fn count_files(dir: &Path) -> usize {
     n
 }
 
-/// 回收站条目数 + 占用字节。
+/// 回收站条目数 + 占用字节。来源索引（index.json）是元数据不是条目，不计入。
 pub fn trash_usage(vault: &Path) -> (usize, u64) {
     let Ok(trash) = safe_join(vault, TRASH_DIR) else { return (0, 0) };
     let Ok(rd) = fs::read_dir(&trash) else { return (0, 0) };
     let mut n = 0;
     let mut bytes = 0u64;
     for e in rd.flatten() {
+        if e.file_name().to_string_lossy() == TRASH_INDEX_FILE {
+            continue;
+        }
         n += 1;
         let p = e.path();
         match e.file_type() {
@@ -578,6 +628,69 @@ pub fn trash_usage(vault: &Path) -> (usize, u64) {
         }
     }
     (n, bytes)
+}
+
+/// 回收站条目（侧栏「回收站」分区的展示体，`trash_list` 的返回体）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashEntry {
+    /// 回收站内相对路径（`trash_restore` 的入参）
+    pub trash_path: String,
+    /// 展示名：去掉 `<ms>-` 删除时刻前缀后的原名
+    pub name: String,
+    /// "note" | "folder" | "file"（回收站里也可能有非 md 文件）
+    pub kind: String,
+    /// 删除前位置；来源索引缺失 = None（恢复时落 vault 根）
+    pub origin: Option<String>,
+    /// 删除时刻（unix ms，文件名前缀解析）；解析不出 = None（此类条目永不自动清理）
+    pub deleted_at: Option<i64>,
+    pub bytes: u64,
+}
+
+/// 列出回收站顶层条目，新删的在前（deletedAt 降序，同刻按名升序）。
+/// index.json 是元数据不列出；单个坏条目（读元数据失败）跳过，不让整个列表失败。
+pub fn trash_list(vault: &Path) -> std::io::Result<Vec<TrashEntry>> {
+    let trash = safe_join(vault, TRASH_DIR)?;
+    if !trash.is_dir() {
+        return Ok(Vec::new());
+    }
+    let index = trash_index_load(vault);
+    let mut out = Vec::new();
+    for e in fs::read_dir(&trash)?.flatten() {
+        let raw = e.file_name().to_string_lossy().to_string();
+        if raw == TRASH_INDEX_FILE {
+            continue;
+        }
+        let Ok(ft) = e.file_type() else { continue };
+        let ms = trash_entry_ms(&raw);
+        let name = if ms.is_some() {
+            raw.split_once('-').map(|(_, rest)| rest.to_string()).unwrap_or_else(|| raw.clone())
+        } else {
+            raw.clone()
+        };
+        let kind = if ft.is_dir() {
+            "folder"
+        } else if is_note_file(&e.path()) {
+            "note"
+        } else {
+            "file"
+        };
+        let bytes = if ft.is_dir() {
+            dir_bytes(&e.path())
+        } else {
+            e.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        out.push(TrashEntry {
+            trash_path: format!("{TRASH_DIR}/{raw}"),
+            name,
+            kind: kind.into(),
+            origin: index.get(&raw).cloned(),
+            deleted_at: ms,
+            bytes,
+        });
+    }
+    out.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at).then_with(|| a.name.cmp(&b.name)));
+    Ok(out)
 }
 
 /// 从 `.lanmark/trash/<ms>-<name>` 的文件名前缀解析删除时刻（unix ms）。
@@ -618,6 +731,18 @@ pub fn trash_prune(vault: &Path, days: u32, now: i64) -> std::io::Result<usize> 
             log::warn!("回收站条目清理失败（跳过）: {}", p.display());
         }
     }
+    // 来源索引自愈：丢掉磁盘上已不存在条目的记录（含本次清掉的与此前手动删掉的）。
+    // 删除失败的条目仍存在 → 记录保留，恢复不受影响。
+    let mut index = trash_index_load(vault);
+    let mut changed = false;
+    index.retain(|k, _| {
+        let still = trash.join(k).exists();
+        changed |= !still;
+        still
+    });
+    if changed {
+        trash_index_save(vault, &index);
+    }
     Ok(removed)
 }
 
@@ -629,6 +754,9 @@ pub fn trash_clear(vault: &Path) -> std::io::Result<usize> {
     }
     let mut removed = 0;
     for e in fs::read_dir(&trash)?.flatten() {
+        if e.file_name().to_string_lossy() == TRASH_INDEX_FILE {
+            continue; // 来源索引最后统一删（见下）
+        }
         let p = e.path();
         let res = if p.is_dir() { fs::remove_dir_all(&p) } else { fs::remove_file(&p) };
         if res.is_ok() {
@@ -637,7 +765,121 @@ pub fn trash_clear(vault: &Path) -> std::io::Result<usize> {
             log::warn!("回收站条目删除失败（跳过）: {}", p.display());
         }
     }
+    // 索引一并清掉：条目全没了，来源记录也不再有任何意义
+    let _ = fs::remove_file(trash.join(TRASH_INDEX_FILE));
     Ok(removed)
+}
+
+// ---------- 回收站恢复 ----------
+
+/// 从回收站恢复条目：优先回到删除前的原位置（来源索引），索引缺失或原目录
+/// 无法重建时落到 vault 根。同名冲突自动 -2、-3…。返回恢复后的相对路径。
+///
+/// 同步语义：删除时记过的 tombstone 在此清除（与 rename/move 同纪律）——
+/// 文件在原路径复活，不清的话下一次同步回合会把恢复又「删」给对端。
+pub fn trash_restore(vault: &Path, trash_rel: &str, conn: &Connection) -> std::io::Result<String> {
+    let trash_dir = safe_join(vault, TRASH_DIR)?;
+    let abs = resolve_in_vault(vault, trash_rel)?;
+    // 只恢复回收站顶层条目（trash_list 只产出一层；防「.lanmark/trash」外借道）
+    if abs.parent() != Some(trash_dir.as_path()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "不是回收站条目",
+        ));
+    }
+    let raw = abs
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "无文件名"))?;
+    if raw == TRASH_INDEX_FILE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "来源索引不是可恢复条目",
+        ));
+    }
+
+    // 目标：原位置优先；无记录/非法路径/父目录重建失败 → 回退根目录。
+    // 默认名去掉 `<ms>-` 时刻前缀（回落根目录时不该带着时间戳前缀）。
+    let mut target_dir = vault.to_path_buf();
+    let mut target_name = match trash_entry_ms(&raw) {
+        Some(_) => raw
+            .split_once('-')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| raw.clone()),
+        None => raw.clone(),
+    };
+    if let Some(origin) = trash_index_load(vault).get(&raw).cloned() {
+        let restored = (|| -> std::io::Result<()> {
+            let origin_abs = safe_join(vault, &origin)?;
+            let name = origin_abs
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "非法来源"))?;
+            let parent_rel = origin
+                .rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default();
+            if !parent_rel.is_empty() {
+                // 父目录不存在则重建；已被同名文件占位等异常 → 回退根目录
+                resolve_in_vault(vault, &parent_rel)?;
+                fs::create_dir_all(vault.join(&parent_rel))?;
+            }
+            target_dir = if parent_rel.is_empty() {
+                vault.to_path_buf()
+            } else {
+                vault.join(&parent_rel)
+            };
+            target_name = name;
+            Ok(())
+        })();
+        if restored.is_err() {
+            log::warn!("回收站来源 {} 无法回原位，改落根目录", origin);
+        }
+    }
+
+    let target = unique_target(&target_dir, &target_name)?;
+    fs::rename(&abs, &target)?;
+    trash_index_remove(vault, &raw);
+    let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
+    // 先入索引再清 tombstone：entry_file_list 对文件夹走 DB 前缀查询，
+    // 顺序反了会漏清子笔记的墓碑
+    index_restored_entry(vault, &new_rel, conn)?;
+    clear_tombstones_for_entry(vault, &new_rel, conn);
+    Ok(new_rel)
+}
+
+/// 恢复条目（重）入索引：文件 → 自身；文件夹 → 其下全部 .md（逐文件逻辑同 reindex）。
+fn index_restored_entry(vault: &Path, rel: &str, conn: &Connection) -> std::io::Result<()> {
+    let abs = resolve_in_vault(vault, rel)?;
+    let mut notes: Vec<String> = Vec::new();
+    if abs.is_file() {
+        notes.push(rel.to_string());
+    } else if abs.is_dir() {
+        // 与 collect_notes 同纪律：跳过 dot 条目与符号链接
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+            for e in fs::read_dir(dir)?.flatten() {
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_symlink() {
+                    continue;
+                }
+                let p = e.path();
+                if e.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                if ft.is_dir() {
+                    walk(&p, root, out)?;
+                } else if is_note_file(&p) {
+                    out.push(rel_to_string(p.strip_prefix(root).unwrap()));
+                }
+            }
+            Ok(())
+        }
+        walk(&abs, vault, &mut notes)?;
+    }
+    for n in &notes {
+        index_note_file(vault, n, conn)?;
+    }
+    Ok(())
 }
 
 // ---------- 读写 ----------
@@ -797,23 +1039,7 @@ pub fn reindex(vault: &Path, conn: &Connection) -> std::io::Result<usize> {
     let mut on_disk = std::collections::HashSet::new();
     collect_notes(vault, vault, &mut on_disk)?;
     for rel in &on_disk {
-        let abs = vault.join(rel);
-        // hash 必须基于**磁盘原始字节**：非 UTF-8（GBK 等）外来文件此前
-        // read_to_string 失败 → unwrap_or_default 得空串 → 入库 hash = sha256(空串)，
-        // 与磁盘字节不符（违反 files.hash 契约）
-        let bytes = fs::read(&abs).unwrap_or_default();
-        let content = String::from_utf8_lossy(&bytes).to_string();
-        let mtime = fs::metadata(&abs)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let hash = content_hash(&bytes);
-        let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let title = extract_frontmatter_title(&content).unwrap_or_else(|| title_from_stem(&name));
-        db::upsert_file(conn, rel, &title, &content, mtime, &hash, true)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        index_note_file(vault, rel, conn)?;
         count += 1;
     }
     // 清掉磁盘上已不存在的行（排除回收站路径本来就不在 vault 树内）
@@ -835,6 +1061,27 @@ pub fn reindex(vault: &Path, conn: &Connection) -> std::io::Result<usize> {
         }
     }
     Ok(count)
+}
+
+/// 单文件入索引（reindex 与回收站恢复共用）。
+/// hash 必须基于**磁盘原始字节**：非 UTF-8（GBK 等）外来文件此前
+/// read_to_string 失败 → unwrap_or_default 得空串 → 入库 hash = sha256(空串)，
+/// 与磁盘字节不符（违反 files.hash 契约）。
+fn index_note_file(vault: &Path, rel: &str, conn: &Connection) -> std::io::Result<()> {
+    let abs = vault.join(rel);
+    let bytes = fs::read(&abs).unwrap_or_default();
+    let content = String::from_utf8_lossy(&bytes).to_string();
+    let mtime = fs::metadata(&abs)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let hash = content_hash(&bytes);
+    let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let title = extract_frontmatter_title(&content).unwrap_or_else(|| title_from_stem(&name));
+    db::upsert_file(conn, rel, &title, &content, mtime, &hash, true)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
 fn collect_notes(
@@ -1242,5 +1489,167 @@ mod tests {
 
         // 3) 兄弟子块连续：备忘 的两个文件相邻，且按名升序（密 < 租）
         assert_eq!(idx("备忘/密码簿.md") + 1, idx("备忘/租房.md"));
+    }
+
+    // ---------- 回收站列表与恢复（v0.5.1 侧栏「回收站」） ----------
+
+    /// 删除记来源 → 列表可见 → 恢复回原位：内容不变、索引重建、墓碑清除
+    #[test]
+    fn delete_records_origin_and_restore_returns_to_origin() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let folder = create_folder(vault, "", "研发").unwrap();
+        let note = create_note(vault, &folder.path, "会议 纪要.md").unwrap();
+        write_note(vault, &note.path, "# 纪要\n\n关键 决策", &conn).unwrap();
+        db::record_recent(&conn, &note.path, 1, 50).unwrap();
+
+        let trash_rel = delete_entry(vault, &note.path, &conn).unwrap();
+        assert!(!vault.join(&note.path).exists());
+
+        // 列表：展示名去时刻前缀、kind/origin/时刻齐全，新删在前
+        let list = trash_list(vault).unwrap();
+        assert_eq!(list.len(), 1);
+        let e = &list[0];
+        assert_eq!(e.trash_path, trash_rel);
+        assert_eq!(e.name, "会议-纪要.md");
+        assert_eq!(e.kind, "note");
+        assert_eq!(e.origin.as_deref(), Some("研发/会议-纪要.md"));
+        assert!(e.deleted_at.is_some());
+        assert!(e.bytes > 0);
+
+        // 恢复：原路径复活，内容与索引同步回来
+        let restored = trash_restore(vault, &trash_rel, &conn).unwrap();
+        assert_eq!(restored, "研发/会议-纪要.md");
+        assert_eq!(
+            fs::read_to_string(vault.join(&restored)).unwrap(),
+            "# 纪要\n\n关键 决策"
+        );
+        let hits = db::search(&conn, "决策", 10).unwrap();
+        assert_eq!(hits.len(), 1, "恢复后应重新入索引");
+        assert_eq!(hits[0].path, restored);
+        assert!(db::get_file(&conn, &restored).unwrap().is_some());
+        // 恢复后列表为空、来源记录已清
+        assert!(trash_list(vault).unwrap().is_empty());
+        assert!(!trash_index_path(vault).exists() || trash_index_load(vault).is_empty());
+    }
+
+    /// 恢复文件夹：其下全部笔记逐个入索引（搜索可命中子笔记）
+    #[test]
+    fn restore_folder_reindexes_all_children() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let folder = create_folder(vault, "", "项目").unwrap();
+        let a = create_note(vault, &folder.path, "a.md").unwrap();
+        let b = create_note(vault, &folder.path, "b.md").unwrap();
+        write_note(vault, &a.path, "苹果 馅饼", &conn).unwrap();
+        write_note(vault, &b.path, "香蕉 牛奶", &conn).unwrap();
+
+        let trash_rel = delete_entry(vault, "项目", &conn).unwrap();
+        assert!(db::search(&conn, "苹果", 10).unwrap().is_empty());
+
+        let restored = trash_restore(vault, &trash_rel, &conn).unwrap();
+        assert_eq!(restored, "项目");
+        assert_eq!(db::search(&conn, "苹果", 10).unwrap()[0].path, "项目/a.md");
+        assert_eq!(db::search(&conn, "香蕉", 10).unwrap()[0].path, "项目/b.md");
+    }
+
+    /// 回归：同名冲突自动 -2（恢复到已有同名文件的位置）
+    #[test]
+    fn trash_restore_conflict_gets_suffix() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let note = create_note(vault, "", "x.md").unwrap();
+        write_note(vault, &note.path, "回收站里的旧版", &conn).unwrap();
+        let trash_rel = delete_entry(vault, &note.path, &conn).unwrap();
+        // 原位置已被新文件占用
+        fs::write(vault.join("x.md"), "新文件").unwrap();
+
+        let restored = trash_restore(vault, &trash_rel, &conn).unwrap();
+        assert_eq!(restored, "x-2.md");
+        assert_eq!(fs::read_to_string(vault.join("x.md")).unwrap(), "新文件");
+        assert_eq!(
+            fs::read_to_string(vault.join(&restored)).unwrap(),
+            "回收站里的旧版"
+        );
+    }
+
+    /// 无来源记录（老版本删除的存量条目 / 手放的文件）→ 恢复落根目录，
+    /// 且名字不带 `<ms>-` 时刻前缀
+    #[test]
+    fn trash_restore_without_index_goes_to_root_stripped() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let trash = vault.join(TRASH_DIR);
+        fs::create_dir_all(&trash).unwrap();
+        fs::write(trash.join("1728-老笔记.md"), "存量内容").unwrap();
+
+        let restored = trash_restore(vault, &format!("{TRASH_DIR}/1728-老笔记.md"), &conn).unwrap();
+        assert_eq!(restored, "老笔记.md");
+        assert!(vault.join("老笔记.md").exists());
+    }
+
+    /// 原目录在删除后也被删掉 → 恢复笔记时重建父目录
+    #[test]
+    fn trash_restore_recreates_missing_origin_dir() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let folder = create_folder(vault, "", "研发").unwrap();
+        let note = create_note(vault, &folder.path, "n.md").unwrap();
+        write_note(vault, &note.path, "内容", &conn).unwrap();
+        let note_trash = delete_entry(vault, &note.path, &conn).unwrap();
+        let dir_trash = delete_entry(vault, "研发", &conn).unwrap();
+        assert!(!vault.join("研发").exists());
+
+        // 先恢复笔记（父目录此刻不存在）→ 自动重建
+        let restored = trash_restore(vault, &note_trash, &conn).unwrap();
+        assert_eq!(restored, "研发/n.md");
+        // 再恢复文件夹 → 原位已被重建占位，自动 -2 让位（内容不丢优先）
+        let dir_restored = trash_restore(vault, &dir_trash, &conn).unwrap();
+        assert_eq!(dir_restored, "研发-2");
+    }
+
+    /// 回收站列表不列 index.json，且新删的排前面
+    #[test]
+    fn trash_list_skips_index_and_sorts_newest_first() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let n1 = create_note(vault, "", "旧.md").unwrap();
+        let trash1 = delete_entry(vault, &n1.path, &conn).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let n2 = create_note(vault, "", "新.md").unwrap();
+        let trash2 = delete_entry(vault, &n2.path, &conn).unwrap();
+
+        let list = trash_list(vault).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].trash_path, trash2, "新删的在前");
+        assert_eq!(list[1].trash_path, trash1);
+        assert!(list.iter().all(|e| !e.trash_path.ends_with(TRASH_INDEX_FILE)));
+    }
+
+    /// 来源索引不是条目：usage 不计；prune 清过期条目时自愈索引；
+    /// clear 连索引一起清
+    #[test]
+    fn trash_index_not_entry_and_self_heals() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let note = create_note(vault, "", "待删.md").unwrap();
+        let trash_rel = delete_entry(vault, &note.path, &conn).unwrap();
+        assert!(trash_index_path(vault).exists());
+        let (n, _) = trash_usage(vault);
+        assert_eq!(n, 1, "index.json 不计条目");
+
+        // prune：条目超期被清 → 来源记录一并消失
+        let trash_name = trash_rel.rsplit('/').next().unwrap();
+        let ms = trash_entry_ms(trash_name).unwrap();
+        let removed = trash_prune(vault, 30, ms + 31 * 24 * 3600 * 1000).unwrap();
+        assert_eq!(removed, 1);
+        assert!(trash_index_load(vault).is_empty(), "过期条目的来源记录应被清掉");
+
+        // 重建条目 + clear：索引文件一起没了
+        let note2 = create_note(vault, "", "再删.md").unwrap();
+        delete_entry(vault, &note2.path, &conn).unwrap();
+        assert_eq!(trash_clear(vault).unwrap(), 1);
+        assert!(!trash_index_path(vault).exists());
+        assert!(vault.join(TRASH_DIR).is_dir(), "清空后目录保留");
     }
 }

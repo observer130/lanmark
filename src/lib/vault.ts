@@ -66,6 +66,21 @@ export interface AppInfo {
   logDir: string | null;
 }
 
+/** v0.5.1：回收站条目（`.lanmark/trash` 顶层，新删的在前） */
+export interface TrashEntry {
+  /** 回收站内相对路径（trashRestore 的入参） */
+  trashPath: string;
+  /** 展示名：去掉 `<ms>-` 删除时刻前缀后的原名 */
+  name: string;
+  /** "note" | "folder" | "file" */
+  kind: "note" | "folder" | "file";
+  /** 删除前位置；null = 无来源记录（恢复时落 vault 根目录） */
+  origin: string | null;
+  /** 删除时刻（unix ms）；null = 文件名前缀解析不出（此类条目永不自动清理） */
+  deletedAt: number | null;
+  bytes: number;
+}
+
 export const vault = {
   status: () => invoke<VaultStatus>("vault_status"),
   /** M3：自动同步开关（持久化到 app_config_dir/config.json） */
@@ -121,6 +136,11 @@ export const vault = {
   trashClear: () => invoke<number>("trash_clear"),
   /** 按保留天数清理回收站（0 = 从不），返回删除条目数 */
   trashPrune: (days: number) => invoke<number>("trash_prune", { days }),
+  /** 回收站条目列表（侧栏「回收站」分区；新删的在前） */
+  trashList: () => invoke<TrashEntry[]>("trash_list"),
+  /** 恢复回收站条目（优先回删除前原位置），返回恢复后的相对路径 */
+  trashRestore: (trashPath: string) =>
+    invoke<string>("trash_restore", { trashPath }),
   /** 关于页信息（版本 / 平台 / 配置目录 / 日志目录） */
   appInfo: () => invoke<AppInfo>("app_info"),
   /** 在系统文件管理器中显示路径（桌面限定） */

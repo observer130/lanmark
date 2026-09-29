@@ -448,6 +448,31 @@ pub fn trash_prune(state: State<Arc<AppState>>, days: u32) -> CmdResult<usize> {
     trash_prune_op(state.inner(), days)
 }
 
+/// 回收站条目列表（侧栏「回收站」分区；新删的在前）。
+pub fn trash_list_op(state: &Arc<AppState>) -> CmdResult<Vec<fs_ops::TrashEntry>> {
+    with_vault(state, |vault| fs_ops::trash_list(vault).map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub fn trash_list(state: State<Arc<AppState>>) -> CmdResult<Vec<fs_ops::TrashEntry>> {
+    trash_list_op(state.inner())
+}
+
+/// 恢复回收站条目：优先回删除前原位置（无来源记录落根目录），
+/// 返回恢复后的相对路径。恢复 = 文件复活 + 重新入索引 + 清删除墓碑。
+pub fn trash_restore_op(state: &Arc<AppState>, trash_path: &str) -> CmdResult<String> {
+    with_vault(state, |vault| {
+        with_db(state, |conn| {
+            fs_ops::trash_restore(vault, trash_path, conn).map_err(|e| e.to_string())
+        })
+    })
+}
+
+#[tauri::command]
+pub fn trash_restore(state: State<Arc<AppState>>, trash_path: String) -> CmdResult<String> {
+    trash_restore_op(state.inner(), &trash_path)
+}
+
 /// 关于页信息（docs/08 §3.5 E1）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -827,5 +852,30 @@ mod e2e_tests {
         trash_clear_op(s).unwrap();
         assert!(tomb.exists(), "清回收站不得动 tombstone");
         assert_eq!(std::fs::read_to_string(&tomb).unwrap(), r#"{"version":1,"entries":[]}"#);
+    }
+
+    /// 侧栏「回收站」链路：删除 → trash_list_op 可见（含来源）→ trash_restore_op
+    /// 回原位 → 读得到、搜得到、统计归零
+    #[test]
+    fn trash_list_and_restore_roundtrip() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        let note = note_create_op(s, "", "会丢的笔记").unwrap();
+        note_write_op(s, &note.path, "找回 我自己").unwrap();
+
+        let trash_rel = entry_delete_op(s, &note.path).unwrap();
+
+        let list = trash_list_op(s).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].trash_path, trash_rel);
+        assert_eq!(list[0].name, "会丢的笔记.md");
+        assert_eq!(list[0].origin.as_deref(), Some("会丢的笔记.md"));
+
+        let restored = trash_restore_op(s, &trash_rel).unwrap();
+        assert_eq!(restored, "会丢的笔记.md");
+        assert!(note_read_op(s, &restored).unwrap().content.contains("找回"));
+        assert_eq!(search_op(s, "找回").unwrap()[0].path, restored);
+        assert_eq!(vault_stats_op(s).unwrap().trash_entries, 0);
+        assert!(trash_list_op(s).unwrap().is_empty());
     }
 }

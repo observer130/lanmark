@@ -42,7 +42,7 @@ Android 相关的非显然几条：
 
 | 位置 | 内容 |
 |---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
+| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
 | `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量 + 回滚）、`update.ts`（M5-4 更新检测：启动静默检查 + 手动检查，关于页展示）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
 | `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`settings.ts`（枚举→像素映射的**唯一来源** + `applyCssVars`；M5 起外观只留字号/行距，字体栈常驻 index.css）、`bridge.ts` |
 | `src/milkdown/roundtrip.test.ts` | 编辑器往返保真护栏（M1 决策门） |
