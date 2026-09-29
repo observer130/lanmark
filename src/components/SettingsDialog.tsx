@@ -833,6 +833,9 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
     syncLines.push(
       i.pairing.running ? `同步中心: 运行中 · 端口 ${i.pairing.port}` : "同步中心: 未运行",
     );
+    // M4h-4：代号是排障第一线索（对端看到的本机名）；deviceName 仅旧版兼容
+    const alias = i.pairing.deviceAlias || i.pairing.deviceName;
+    if (alias) syncLines.push(`设备代号: ${alias}`);
     if (i.pairing.lanIp) syncLines.push(`本机地址: ${i.pairing.lanIp}`);
     if (i.pairing.deviceId) syncLines.push(`设备身份: ${i.pairing.deviceId}`);
     const pending = i.pairing.pendingPairs?.length ?? 0;

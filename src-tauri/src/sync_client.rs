@@ -1070,6 +1070,7 @@ pub async fn sync_scan_lan(
             let known = match_by_identity(&servers, &d.device_id, &d.name).is_some();
             (!known, d.name.clone())
         });
+        let _ = &app; // M4h-4：扫描结果 name 即 /info 的代号，无需客户端再加工
         Ok(ScanResult {
             devices,
             truncated: out.truncated,
@@ -1094,9 +1095,15 @@ pub struct PairAttempt {
     pub reason: Option<String>,
 }
 
-/// 客户端名：桌面主机名（手机端 UI 显示「『nwj-PC』请求连接」）。
-/// 拿不到主机名就退回平台名——UI 里显示成「你的电脑」也比空白强。
+/// 客户端名：M4h-4 起是**设备代号**（AppConfig.deviceAlias；手机端授权卡片
+/// 显示「『青柠台机』请求连接」）。首启由 setup 预热进程内缓存并落默认值
+/// （桌面 = HOSTNAME，手机 = 词表随机），用户可在设置里改；
+/// 缓存未命中（纯逻辑测试）时回退 HOSTNAME 语义。
 fn client_name() -> String {
+    let alias = crate::alias::current_alias(None);
+    if !alias.is_empty() {
+        return alias;
+    }
     std::env::var("HOSTNAME")
         .ok()
         .or_else(|| std::env::var("COMPUTERNAME").ok())
@@ -2753,7 +2760,7 @@ mod tests {
         let device_id = crate::sync_server::load_sync_config(phone_dir.path()).device_id;
 
         // 桌面：造一个「旧格式」profile（id = hash(url+token)），并写一份基线
-        let (desk_dir, desk) = client_vault();
+        let (desk_dir, _desk) = client_vault();
         let old_id = format!("s{}", &fs_ops::content_hash(format!("{base}{token}").as_bytes())[..8]);
         let mut servers = vec![ServerProfile {
             id: old_id.clone(),
@@ -2912,7 +2919,9 @@ mod tests {
         let device_id = crate::sync_server::load_sync_config(phone_dir.path()).device_id;
         assert_eq!(profile.device_id, device_id, "profile 绑设备身份");
         assert_eq!(profile.id, format!("d{device_id}"));
-        assert_eq!(profile.name, "Lanmark 手机");
+        // M4h-4：name = 服务器侧设备代号（AppConfig；测试进程内为缓存默认值）
+        assert_eq!(profile.name, crate::alias::current_alias(None));
+        assert!(!profile.name.is_empty());
         assert!(!profile.token.is_empty());
         assert_eq!(profile.port, port_of_url(&base));
 

@@ -45,6 +45,10 @@ pub struct AppConfig {
     pub editor: EditorPrefs,
     /// M4a：存储策略（回收站保留天数）
     pub storage: StoragePrefs,
+    /// M4h-4：设备代号（局域网内标识本机；设备级，换库不变）。
+    /// 空串 = 未初始化（读侧 `alias::current_alias` 落默认词表代号）。
+    #[serde(default)]
+    pub device_alias: String,
 }
 
 impl Default for AppConfig {
@@ -55,6 +59,7 @@ impl Default for AppConfig {
             appearance: Appearance::default(),
             editor: EditorPrefs::default(),
             storage: StoragePrefs::default(),
+            device_alias: String::new(),
         }
     }
 }

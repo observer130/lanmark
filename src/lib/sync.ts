@@ -73,6 +73,9 @@ export interface ProbeResult {
 export interface SyncPairingInfo {
   running: boolean;
   port: number | null;
+  /** M4h-4：设备代号（AppConfig.deviceAlias，设备级；UI 优先展示它） */
+  deviceAlias: string;
+  /** vault 内 sync.json 的设备名（旧版兼容） */
   deviceName: string;
   pairingCode: string;
   /** 最近一次客户端回合时间（unix ms；服务器重启后为 null） */
@@ -138,6 +141,13 @@ export const sync = {
   /** M3 自动同步循环：轻量在线探测 */
   probe: (id: string) => invoke<ProbeResult>("sync_probe", { id }),
   syncNow: (id: string) => invoke<SyncReport>("sync_now", { id }),
+};
+
+/* ── M4h-4：设备代号（AppConfig 设备级，换库不变） ── */
+
+export const deviceAlias = {
+  /** 改代号：归一化在 Rust 侧做，**以返回值为准**（trim + 24 字截断） */
+  set: (alias: string) => invoke<string>("device_alias_set", { alias }),
 };
 
 /** Android 专项：vault 目录选择 + 全部文件访问授权（mobile.rs 插件） */

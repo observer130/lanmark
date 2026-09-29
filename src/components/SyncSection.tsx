@@ -15,7 +15,9 @@ import {
 import { useSyncStore } from "../stores/sync";
 import { useSettingsStore } from "../stores/settings";
 import { useVaultStore } from "../stores/vault";
-import { isAndroid } from "../lib/sync";
+import { isAndroid, deviceAlias } from "../lib/sync";
+import { AppMark } from "./AppMark";
+import { Pencil } from "lucide-react";
 
 /**
  * 同步区收纳（方案 B，用户选定 2026-09-21，design/direction-approved.md）：
@@ -51,10 +53,90 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+/** M4h-4：设备代号头（手机/桌面共用）。
+ *  展示态 = 代号 + 「点笔改名」；编辑态 = 输入框 + 保存/取消。
+ *  改名走 deviceAlias.set（Rust 侧 trim + 24 字截断，**以返回值为准**），
+ *  成功后乐观更新 sync store 里的 pairing（桌面下次发现即见新名）。 */
+function AliasHeader({ alias }: { alias: string }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(alias);
+  const [saving, setSaving] = useState(false);
+
+  const start = () => {
+    setDraft(alias);
+    setEditing(true);
+  };
+  const save = async () => {
+    setSaving(true);
+    try {
+      const next = await deviceAlias.set(draft);
+      const cur = useSyncStore.getState().pairing;
+      if (cur) useSyncStore.setState({ pairing: { ...cur, deviceAlias: next } });
+      setEditing(false);
+    } catch {
+      /* 改名失败静默：手机端 5s 轮询 / 桌面重开会带回旧值 */
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1.5 rounded-[10px] border border-accent/40 bg-card px-3 py-2 shadow-card">
+        <input
+          autoFocus
+          value={draft}
+          maxLength={24}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+            if (e.key === "Escape") setEditing(false);
+          }}
+          placeholder="给这台设备起个代号"
+          className="min-w-0 flex-1 bg-transparent text-sm font-medium text-ink outline-none placeholder:text-ink-3"
+        />
+        <button
+          title="保存"
+          disabled={saving || !draft.trim()}
+          className="rounded-md p-1 text-accent hover:bg-canvas disabled:opacity-40"
+          onClick={() => void save()}
+        >
+          {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+        </button>
+        <button
+          title="取消"
+          className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
+          onClick={() => setEditing(false)}
+        >
+          <X size={13} />
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
+      <AppMark size={18} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium text-ink">{alias}</div>
+        <div className="text-[11px] text-ink-3">本机代号 · 局域网内用这个名字找到你</div>
+      </div>
+      <button
+        title="改代号"
+        className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
+        onClick={start}
+      >
+        <Pencil size={13} />
+      </button>
+    </div>
+  );
+}
+
 /** 手机端面板：服务器状态 + **待授权配对请求** + 本机地址 + 冲突副本可发现性。
  *
- *  M4h-2 起主路径变了：桌面点「连接」→ 这里出现「『nwj-PC』请求连接」+ [允许][拒绝]，
+ *  M4h-2 起主路径变了：桌面点「连接」→ 这里出现「『青柠台机』请求连接」+ [允许][拒绝]，
  *  取代过去「手机读数、桌面抄 8 位码」（docs/08 §13.4）。配对码降为兜底。
+ *  M4h-4：面板头部是**设备代号**（LocalSend alias 语义）——局域网内 Machine
+ *  靠它标识，点笔可改；IP/端口与配对码继续收在兜底区。
  *  轮询在常驻条里做（面板收起时条上也要显示运行状态），这里只做展示。 */
 function ServerPanel() {
   const pairing = useSyncStore((s) => s.pairing);
@@ -67,10 +149,13 @@ function ServerPanel() {
   }
 
   const pending = pairing.pendingPairs ?? [];
+  const alias = pairing.deviceAlias || pairing.deviceName;
 
   return (
     <div className="space-y-2 px-3">
-      {/* M4h-2：待授权请求（仅非空时渲染，强调边框——这是需要用户动手的事） */}
+      {/* M4h-4：本机代号（点击笔改；改名立即生效，桌面端下次发现即见新名） */}
+      <AliasHeader alias={alias} />
+      {/* 待授权请求（仅非空时渲染，强调边框——这是需要用户动手的事） */}
       {pending.map((p) => (
         <div
           key={p.nonce}
@@ -115,7 +200,7 @@ function ServerPanel() {
           </div>
           <div className="text-[11px] text-ink-3">
             {pairing.running
-              ? `端口 ${pairing.port} · 手机与桌面需在同一局域网`
+              ? `「${alias}」等待桌面连接 · 端口 ${pairing.port}`
               : "打开笔记库后自动启动"}
           </div>
         </div>
@@ -205,9 +290,23 @@ function ClientPanel() {
 
   const canPair = url.trim().startsWith("http") && code.trim().length === 8;
 
+  // M4h-4：桌面也有代号（手机授权卡片显示「『晨窗台机』请求连接」的就是它）。
+  // 桌面平时不轮询 pairing（那是手机的活），这里只在挂载时拉一次——
+  // 代号改名不频繁，且改名入口自己会刷新 store。
+  const pairing = useSyncStore((s) => s.pairing);
+  const refreshPairingOnce = useSyncStore((s) => s.refreshPairing);
+  const selfAlias = pairing?.deviceAlias || pairing?.deviceName || "";
+  useEffect(() => {
+    void refreshPairingOnce();
+    // 只在挂载时拉一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="space-y-3 px-3">
-      {/* 已配对服务器（M3e：在线状态 + 最近同步时间） */}
+      {/* 本机代号（对方手机上看到的名字；点笔可改） */}
+      {selfAlias && <AliasHeader alias={selfAlias} />}
+      {/* 已配对服务器（M3e：在线状态 + 最近同步时间；M4h-4 起 name 即手机代号） */}
       {servers.map((s) => {
         const online = probeStates[s.id]?.online ?? null;
         return (
@@ -338,7 +437,7 @@ function ClientPanel() {
           </div>
         )}
 
-        {/* 候选设备卡片（M4h-1：mDNS + LAN 探测合并结果） */}
+        {/* 候选设备卡片（M4h-1：mDNS + LAN 探测合并结果；M4h-4：name = 对方代号） */}
         {connecting == null && scanned.length > 0 && (
           <ul className="mt-1.5 space-y-1">
             {scanned.map((d) => (
@@ -346,13 +445,14 @@ function ClientPanel() {
                 <button
                   onClick={() => void connectDevice(d.url)}
                   disabled={syncing}
+                  title={d.url}
                   className="flex w-full items-center gap-2 rounded-lg border border-line px-2.5 py-1.5 text-left hover:bg-canvas disabled:opacity-50"
                 >
                   <Smartphone size={13} className="shrink-0 text-accent" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-medium text-ink">{d.name}</span>
                     <span className="block truncate text-[11px] text-ink-3">
-                      {d.url.replace("http://", "")} · {d.notes} 篇笔记
+                      {d.notes} 篇笔记
                     </span>
                   </span>
                   <span className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-2">
@@ -561,7 +661,9 @@ export function SyncSection() {
     ? pendingCount > 0
       ? "点此处理"
       : pairing?.running
-        ? `端口 ${pairing.port}${pairing.lastRoundAt ? ` · 最近回合 ${fmtClock(pairing.lastRoundAt)}` : ""}`
+        ? pairing.deviceAlias
+          ? `「${pairing.deviceAlias}」${pairing.lastRoundAt ? ` · 最近回合 ${fmtClock(pairing.lastRoundAt)}` : ""}`
+          : (pairing.port ? `端口 ${pairing.port}` : "运行中")
         : pairing
           ? "未启动"
           : ""

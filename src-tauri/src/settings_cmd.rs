@@ -24,12 +24,19 @@ pub fn settings_apply_op(cfg: &mut AppConfig, patch: SettingsPatch) -> Settings 
     next
 }
 
-/// 纯逻辑：恢复默认设置，**保留 `vault_path` 与 `sync_auto`**（docs/08 §3.5 E4）。
+/// 纯逻辑：恢复默认设置，**保留 `vault_path` / `sync_auto` / `device_alias`**
+/// （docs/08 §3.5 E4；代号是设备身份，恢复外观默认不该把它抹掉）。
 /// 已配对设备不在 AppConfig 里（`sync-servers.json`），天然不受影响。
 pub fn settings_reset_op(cfg: &mut AppConfig) -> Settings {
     let path = cfg.vault_path.clone();
     let sync_auto = cfg.sync_auto;
-    *cfg = AppConfig { vault_path: path, sync_auto, ..AppConfig::default() };
+    let device_alias = cfg.device_alias.clone();
+    *cfg = AppConfig {
+        vault_path: path,
+        sync_auto,
+        device_alias,
+        ..AppConfig::default()
+    };
     cfg.settings()
 }
 
@@ -56,6 +63,13 @@ pub fn settings_reset(app: tauri::AppHandle) -> CmdResult<Settings> {
     let next = settings_reset_op(&mut cfg);
     vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
     Ok(next)
+}
+
+/// M4h-4：改设备代号（设置页 / 首启引导）。归一化后落 AppConfig 并刷缓存，
+/// 返回最终生效值（前端以返回值为准）。
+#[tauri::command]
+pub fn device_alias_set(app: tauri::AppHandle, alias: String) -> CmdResult<String> {
+    crate::alias::set_alias(&app, &alias)
 }
 
 #[cfg(test)]
@@ -131,6 +145,7 @@ mod tests {
         let mut cfg = AppConfig {
             vault_path: Some("/home/u/notes".into()),
             sync_auto: false,
+            device_alias: "青柠台机".into(),
             appearance: Appearance { text_size: "xl".into(), ui_font: "serif".into(), ..Appearance::default() },
             editor: EditorPrefs { autosave_ms: 3000, ..EditorPrefs::default() },
             storage: StoragePrefs { trash_retention_days: 0 },
@@ -139,6 +154,7 @@ mod tests {
         assert_eq!(out, Settings::default(), "设置回到默认");
         assert_eq!(cfg.vault_path.as_deref(), Some("/home/u/notes"), "换库配置不能丢");
         assert!(!cfg.sync_auto, "同步开关是 D1 独立项，恢复默认设置不动它");
+        assert_eq!(cfg.device_alias, "青柠台机", "设备代号是身份，恢复默认设置不抹掉");
     }
 
     #[test]

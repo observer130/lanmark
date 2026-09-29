@@ -314,12 +314,15 @@ fn const_eq(a: &str, b: &str) -> bool {
 
 // ---------- 端点 ----------
 
-/// GET /api/v1/info —— 无需鉴权：设备名 + vault 统计（不含任何笔记数据）
+/// GET /api/v1/info —— 无需鉴权：代号 + vault 统计（不含任何笔记数据）。
+/// M4h-4：`name` 改读设备代号（AppConfig.deviceAlias，设备级不随库漂移），
+/// 进程内缓存由 setup 的 ensure_default_alias 预热（handler 拿不到 AppHandle）。
 async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     let app = ctx.app.clone();
-    let (name, notes, assets) = tokio::task::spawn_blocking(move || light_stats(&app))
+    let (_sync_json_name, notes, assets) = tokio::task::spawn_blocking(move || light_stats(&app))
         .await
         .unwrap_or((String::new(), 0, 0));
+    let name = crate::alias::current_alias(None);
     // M4h-3：deviceId 让桌面端按「设备」而不是「URL」记住服务器（IP 变了自动找回）。
     // 旧服务器无该字段 → 客户端看到空串，回退按名称匹配（docs/08 §13.3 ③）。
     let device_id = ctx.device_id();
@@ -386,7 +389,7 @@ async fn pair(
     let res = save_sync_config(&vault, &cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("保存配置失败: {e}")));
     drop(serial);
     res?;
-    Ok(Json(json!({ "token": token, "name": cfg.device_name })))
+    Ok(Json(json!({ "token": token, "name": crate::alias::current_alias(None) })))
 }
 
 // ---------- M4h-2：一键授权（取代抄 8 位配对码） ----------
@@ -424,11 +427,26 @@ async fn pair_request(
     if name.is_empty() || name.len() > 64 {
         return Err((StatusCode::BAD_REQUEST, "客户端名非法".into()));
     }
+    // M4h-4 重名消解（语义对标 LocalSend）：队列里已有同名待授权请求时
+    // 给后来者追加数字尾缀，卡片上「「晨窗台机」请求连接」就能区分两台。
+    // 只影响展示，不进任何持久化身份。
     let mut list = ctx
         .pending
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "请求队列锁中毒".into()))?;
     prune_pending(&mut list);
+    let name = if list.iter().any(|p| p.client_name == name) {
+        let mut n = 2u32;
+        loop {
+            let cand = format!("{name}{n}");
+            if !list.iter().any(|p| p.client_name == cand) {
+                break cand;
+            }
+            n += 1;
+        }
+    } else {
+        name
+    };
     // 同一 nonce 重复 POST（桌面重试）视作幂等，不占额度
     if list.iter().any(|p| p.nonce == nonce) {
         return Ok(Json(json!({ "status": "pending" })));
@@ -483,7 +501,9 @@ async fn pair_status(
             Ok(token) => Ok(Json(json!({
                 "status": "approved",
                 "token": token,
-                "name": ctx.current_config().map(|(_, c)| c.device_name).unwrap_or_default(),
+                // M4h-4：服务器（手机）名字回传代号——桌面 profile.name 用它，
+                // 设备列表/常驻条全程说代号
+                "name": crate::alias::current_alias(None),
             }))),
             Err(msg) => Ok(Json(json!({ "status": "rejected", "reason": msg }))),
         };
@@ -1003,11 +1023,10 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     // M4h-2：把 ctx 登记给命令层（UI 的「允许/拒绝」要操作它的 pending 队列）
     register_active_ctx(&ctx);
 
-    // mDNS 广播（best effort；Android 需 multicast lock，失败不阻断服务器）
-    let mdns_name = {
-        let cfg = ctx.cfg.lock().map_err(|_| "锁中毒".to_string())?;
-        cfg.device_name.clone()
-    };
+    // mDNS 广播（best effort；Android 需 multicast lock，失败不阻断服务器）。
+    // M4h-4：服务名即设备代号（LocalSend 体验——browse 第一眼是「青柠手机」
+    // 而非 IP）；拿不到 AppHandle 时回退 vault 名，测试照常。
+    let mdns_name = crate::alias::current_alias(None);
     advertise_mdns(port, mdns_name);
 
     std::thread::Builder::new()
@@ -1134,6 +1153,9 @@ fn local_lan_ip() -> Option<String> {
 pub struct SyncPairingInfo {
     pub running: bool,
     pub port: Option<u16>,
+    /// M4h-4：设备代号（AppConfig.deviceAlias；设备级，换库不变）
+    pub device_alias: String,
+    /// vault 内 sync.json 的设备名（旧版兼容展示；UI 优先用 deviceAlias）
     pub device_name: String,
     pub pairing_code: String,
     /// 最近一次客户端回合时间（unix ms；服务器重启后为 None）
@@ -1176,6 +1198,7 @@ pub fn sync_pairing_info(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<Sy
     Ok(SyncPairingInfo {
         running: port.is_some(),
         port,
+        device_alias: crate::alias::current_alias(None),
         device_name: cfg.device_name,
         pairing_code: cfg.pairing_code,
         last_round_at,
@@ -1889,9 +1912,9 @@ mod tests {
             .json()
             .unwrap();
         assert_eq!(st["status"], "approved");
-        // name 是**服务器**（手机）的名字——桌面端拿它填 profile.name，
-        // 不是自己提交的 clientName
-        assert_eq!(st["name"], "Lanmark 手机");
+        // name 是**服务器**（手机）的代号——桌面端拿它填 profile.name，
+        // 不是自己提交的 clientName（M4h-4：代号存 AppConfig，词表随机值）
+        assert_eq!(st["name"], crate::alias::current_alias(None));
         let token = st["token"].as_str().unwrap().to_string();
         assert_eq!(token, cfg.tokens[0], "签发的就是落盘的那个");
 
@@ -2102,7 +2125,9 @@ mod tests {
         let info = crate::sync_client::fetch_info(&base).unwrap();
         assert_eq!(info.app, "lanmark");
         assert_eq!(info.device_id, expected);
-        assert_eq!(info.name, "Lanmark 手机");
+        // M4h-4：name 即设备代号（进程内缓存，词表随机值；同进程内稳定）
+        assert!(!info.name.is_empty());
+        assert_eq!(info.name, crate::alias::current_alias(None));
     }
 
     /// 非 lanmark 服务不得被当成笔记库（LAN 扫描会连到任意开着 4180 的主机）

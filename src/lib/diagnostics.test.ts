@@ -62,6 +62,7 @@ describe("E3 诊断信息", () => {
         pairing: {
           running: true,
           port: 4180,
+          deviceAlias: "青柠手机",
           deviceName: "Lanmark 手机",
           pairingCode: "12345678",
           lastRoundAt: null,
@@ -85,6 +86,7 @@ describe("E3 诊断信息", () => {
         pairing: {
           running: false,
           port: null,
+          deviceAlias: "",
           deviceName: "x",
           pairingCode: "1",
           lastRoundAt: null,
