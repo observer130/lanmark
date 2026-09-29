@@ -181,20 +181,21 @@ interface SyncStore {
   /** M3e：vault 内冲突副本数（手机端可发现性，docs/07 §6） */
   conflictCount: number | null;
 
-  /* ── M4h：LAN 扫描发现与一键授权 ── */
+  /** M4h：LAN 扫描发现与一键授权 ──
+   *  M5-2：原「局域网扫描」开关已移除——扫描只在用户点「自动查找手机」时
+   *  发生（无后台网段扫描），开关不持久化且效果不可见，属无意义设置。
+   *  行为固定为全扫：mDNS + 已知 IP + 邻居表 + 网段探测（Rust 侧 3s 预算封顶）；
+   *  自动循环里的离线找回仍固定走轻量 L0+L1（下方 autoTick 硬编码 false）。 */
   /** 扫描到的候选设备（含 mDNS 与 LAN 探测的合并结果） */
   scanned: ScannedDevice[];
   scanning: boolean;
   /** 最近一次扫描是否被预算截断（UI 提示「可能不全」） */
   scanTruncated: boolean;
-  /** 「局域网扫描」开关：关掉后退化为只查已知设备（docs/08 §13.6 R9） */
-  lanScanEnabled: boolean;
   /** 正在等待对方确认的设备 url（null = 没有在等） */
   connecting: string | null;
   /** 最近一次连接尝试的结局（拒绝/超时的提示文案） */
   connectOutcome: { status: string; reason: string | null } | null;
 
-  setLanScanEnabled: (v: boolean) => void;
   /** M4h-1：扫同一局域网的手机（命中即停） */
   scanLan: () => Promise<void>;
   /** M4h-2：对某台设备发起连接（桌面点 [连接] → 手机点允许） */
@@ -240,17 +241,14 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   scanned: [],
   scanning: false,
   scanTruncated: false,
-  // 「局域网扫描」默认开（发现是主路径）；用户可在设置里关掉
-  lanScanEnabled: true,
   connecting: null,
   connectOutcome: null,
-
-  setLanScanEnabled: (v) => set({ lanScanEnabled: v }),
 
   scanLan: async () => {
     set({ scanning: true, connectOutcome: null });
     try {
-      const r = await sync.scanLan(get().lanScanEnabled);
+      // M5-2：固定全扫（原 lanScanEnabled 开关已移除，理由见接口注释）
+      const r = await sync.scanLan(true);
       set({ scanned: r.devices, scanTruncated: r.truncated });
     } catch (e) {
       set({ error: String(e) });

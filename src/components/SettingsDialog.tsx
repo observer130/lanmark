@@ -411,8 +411,6 @@ function StorageSection() {
 function SyncSection2() {
   const syncAuto = useSyncStore((s) => s.syncAuto);
   const setSyncAuto = useSyncStore((s) => s.setSyncAuto);
-  const lanScanEnabled = useSyncStore((s) => s.lanScanEnabled);
-  const setLanScanEnabled = useSyncStore((s) => s.setLanScanEnabled);
   // D3：关设置页 + 展开侧栏同步面板（不在这里复制一套配对 UI）
   const requestSyncPanel = useSettingsStore((s) => s.requestSyncPanel);
   // `syncAuto` 为 null 表示尚未读到（取默认开；与侧栏同步条同一 store 同一状态）
@@ -425,23 +423,8 @@ function SyncSection2() {
         </Row>
       </Group>
 
-      <Group title="设备发现">
-        <Row
-          label="局域网扫描"
-          hint="关闭后需要手动输入手机地址"
-        >
-          <Switch
-            on={lanScanEnabled}
-            label="局域网扫描"
-            onToggle={() => setLanScanEnabled(!lanScanEnabled)}
-          />
-        </Row>
-      </Group>
-      {/* 走查发现：这段说明直接顶到「设备配对」分组标题上，读起来像属于下一组。
-          加下边距与缩进把它明确收在「局域网扫描」这一项下。 */}
-      <p className="-mt-3 mb-5 px-1 text-[11px] leading-4 text-ink-3">
-        扫描只连本机局域网内的地址、只读取设备名与笔记数，不发送任何笔记内容。
-      </p>
+      {/* M5-2：原「设备发现」组（局域网扫描开关）已移除——扫描只在点
+          「自动查找手机」时发生，且开关从不持久化，属无意义设置。 */}
 
       {/* 配对 UI 只有一套：关掉设置面板并展开侧栏的同步面板（docs/08 §3.4 D3） */}
       <Group title="设备配对">

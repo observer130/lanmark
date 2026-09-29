@@ -2,7 +2,7 @@
  * M4h 连接方式改造的前端测试：LAN 扫描发现 + 一键授权（docs/08 §13.5）。
  *
  * 重点覆盖四态（等待 / 批准 / 拒绝 / 超时）、错误回滚，以及
- * 「局域网扫描」开关关掉后退化为只查已知设备。
+ * M5-2 的扫描行为钉子：开关已移除，扫描恒为全扫（allowSubnet=true）。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -59,7 +59,6 @@ function reset() {
     scanned: [],
     scanning: false,
     scanTruncated: false,
-    lanScanEnabled: true,
     connecting: null,
     connectOutcome: null,
     servers: [],
@@ -133,15 +132,8 @@ describe("M4h-1 LAN 扫描", () => {
     expect(s.scanning).toBe(false);
   });
 
-  /** 关掉「局域网扫描」→ 传 allowSubnet=false，UI 退化为只查已知设备（§13.8 走查项 5） */
-  it("开关关闭时把 allowSubnet=false 传给后端", async () => {
-    useSyncStore.setState({ lanScanEnabled: false });
-    m.scanLan.mockResolvedValueOnce({ devices: [], truncated: false, scannedSubnet: false });
-    await useSyncStore.getState().scanLan();
-    expect(m.scanLan).toHaveBeenCalledWith(false);
-  });
-
-  it("开关开启时传 allowSubnet=true", async () => {
+  /** M5-2：开关已移除，扫描恒为全扫（allowSubnet=true），无轻量路径 */
+  it("总是把 allowSubnet=true 传给后端", async () => {
     m.scanLan.mockResolvedValueOnce({ devices: [], truncated: false, scannedSubnet: true });
     await useSyncStore.getState().scanLan();
     expect(m.scanLan).toHaveBeenCalledWith(true);

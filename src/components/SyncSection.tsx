@@ -267,10 +267,8 @@ function ClientPanel() {
     scanned,
     scanning,
     scanTruncated,
-    lanScanEnabled,
     connecting,
     connectOutcome,
-    setLanScanEnabled,
     scanLan,
     connectDevice,
   } = useSyncStore();
@@ -403,19 +401,12 @@ function ClientPanel() {
         </div>
       )}
 
-      {/* M4h：自动查找同一局域网的手机 → 点「连接」→ 手机上点「允许」 */}
+      {/* M4h：自动查找同一局域网的手机 → 点「连接」→ 手机上点「允许」
+          （M5-2：原「局域网扫描」勾选框已移除，扫描总是全扫且只在主动点击时发生） */}
       <div className="rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
         <div className="flex items-center gap-2">
           <div className="flex-1 text-xs font-medium text-ink">连接手机</div>
-          <label className="flex items-center gap-1 text-[11px] text-ink-3">
-            <input
-              type="checkbox"
-              checked={lanScanEnabled}
-              onChange={(e) => setLanScanEnabled(e.target.checked)}
-              className="accent-[var(--c-acc)]"
-            />
-            局域网扫描
-          </label>
+          <div className="text-[11px] text-ink-3">扫描同一 WiFi 下的设备</div>
         </div>
 
         <button
@@ -426,6 +417,11 @@ function ClientPanel() {
           {scanning ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
           {scanning ? "正在查找…" : "自动查找手机"}
         </button>
+
+        {/* 隐私说明跟着扫描动作走（M5-2 从设置页「设备发现」组移入） */}
+        <p className="mt-1 text-[11px] leading-4 text-ink-3">
+          只连本机局域网内的地址，只读取设备名与笔记数，不发送任何笔记内容。
+        </p>
 
         {/* 等待对方确认（≤90s；可取消视觉上回设备列表） */}
         {connecting != null && (
@@ -467,7 +463,6 @@ function ClientPanel() {
         {connecting == null && !scanning && scanned.length === 0 && scanRan && (
           <p className="mt-1.5 text-[11px] leading-4 text-ink-3">
             没有找到手机。请确认手机上 Lanmark 已打开、且与本机连同一个 WiFi。
-            {!lanScanEnabled && "（「局域网扫描」已关闭）"}
           </p>
         )}
 
