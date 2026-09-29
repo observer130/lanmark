@@ -75,7 +75,7 @@ function MenuItem({
 }) {
   return (
     <button
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-canvas ${
+      className={`flex min-h-[44px] w-full items-center gap-2 px-3 text-left text-sm hover:bg-canvas ${
         danger ? "text-red-600" : "text-ink"
       }`}
       onClick={onClick}
@@ -153,9 +153,14 @@ export function TreeView({ tree, onNavigate }: Props) {
 
   const openMenu = (e: React.MouseEvent, node: VaultNode) => {
     e.preventDefault();
-    // 视口内收口，避免菜单贴边溢出
-    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - 190));
-    const y = Math.max(8, Math.min(e.clientY, window.innerHeight - 260));
+    // 视口内收口，避免菜单贴边溢出。
+    // M4i：菜单项放大到 44px 后整体更高（最多 5 项 ≈ 230px），手机上
+    // 原来的 260px 硬编码余量会把菜单顶到屏幕外（下方点不到「删除」）。
+    // 改为按视口比例留余量：底部至少留 8px，且不超过可用高度的 90%。
+    const menuW = 192; // min-w-[12rem]
+    const menuH = 240; // 5 项 × 44px + 分隔线
+    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - menuW - 8));
+    const y = Math.max(8, Math.min(e.clientY, window.innerHeight - menuH - 8));
     setMenu({ x, y, node });
   };
 
@@ -183,7 +188,7 @@ export function TreeView({ tree, onNavigate }: Props) {
         return (
           <li key={node.path} className="group">
             <div
-              className={`flex cursor-pointer items-center gap-1.5 rounded-lg py-1.5 pr-1 hover:bg-canvas ${
+              className={`flex min-h-[44px] cursor-pointer items-center gap-1.5 rounded-lg py-1.5 pr-1 hover:bg-canvas ${
                 isActive
                   ? "bg-accent-soft font-medium text-accent-text"
                   : "text-ink"
@@ -284,7 +289,7 @@ export function TreeView({ tree, onNavigate }: Props) {
       {menu && (
         <div
           ref={menuRef}
-          className="fixed z-50 min-w-[11rem] rounded-xl border border-line bg-card py-1 shadow-pop"
+          className="fixed z-50 min-w-[12rem] rounded-xl border border-line bg-card py-1 shadow-pop"
           style={{ left: menu.x, top: menu.y }}
           onContextMenu={(e) => e.preventDefault()}
         >

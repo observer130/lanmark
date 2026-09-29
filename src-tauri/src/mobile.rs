@@ -30,6 +30,13 @@ pub struct VaultPickerMobile(
     #[cfg(not(target_os = "android"))] (),
 );
 
+/// M4i 返回手势插件（BackPlugin）的桥句柄
+#[derive(Clone)]
+pub struct BackMobile(
+    #[cfg(target_os = "android")] Option<PluginHandle<tauri::Wry>>,
+    #[cfg(not(target_os = "android"))] (),
+);
+
 /// App 运行时固定 Wry（tauri::Builder::default()）；移动端入口仅 Android
 pub fn init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("vault-picker")
@@ -153,5 +160,76 @@ pub async fn vault_picker_pick_folder(
     {
         let _ = state;
         Err("仅 Android 支持".into())
+    }
+}
+
+/// M4i 返回手势插件，独立 Builder → 独立插件名 `back`。
+///
+/// 插件名取自 `Builder::new(…)` 而非 Kotlin 类名：`invoke("plugin:<名>|…")`
+/// 与 `addPluginListener` 都按它匹配。与 vault-picker 分开注册，避免两个
+/// Kotlin 类共用一个名字时互相遮蔽。
+pub fn init_back() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("back")
+        .setup(|app, api| {
+            #[cfg(target_os = "android")]
+            {
+                let handle = api.register_android_plugin("com.lanmark.app", "BackPlugin")?;
+                app.manage(BackMobile(Some(handle)));
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let _ = api;
+                app.manage(BackMobile(()));
+            }
+            Ok(())
+        })
+        .build()
+}
+
+/// BackPlugin 调用（带参数）
+#[cfg(target_os = "android")]
+fn call_back_with_args<T: DeserializeOwned>(
+    state: BackMobile,
+    method: &str,
+    args: serde_json::Map<String, Value>,
+) -> Result<T, String> {
+    let handle = state.0.as_ref().ok_or("插件未初始化")?;
+    handle
+        .run_mobile_plugin(method.to_string(), Value::Object(args))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn owned_state_back(state: tauri::State<'_, BackMobile>) -> BackMobile {
+    state.inner().clone()
+}
+
+/// M4i 返回手势：前端声明「当前返回该做什么」。
+///
+/// 返回在 Kotlin 侧拦（MainActivity 的 dispatchKeyEvent / OnBackPressedCallback），
+/// 但「该关抽屉还是退出」只有前端知道 —— 由前端在浮层开关时下发处理器名：
+/// `drawer` / `overlay` / 其它=无浮层（原生不拦截，正常退出）。
+/// 事件上行走 DOM CustomEvent（见 BackPlugin.triggerBack），不走插件事件通道：
+/// 真机 2510DRK44C / Android 16 实测 addPluginListener 注册后 hasListener=false。
+#[tauri::command]
+pub async fn set_ui_back_handler(
+    state: tauri::State<'_, BackMobile>,
+    handler: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let st = owned_state_back(state);
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut args = serde_json::Map::new();
+            args.insert("handler".into(), serde_json::Value::String(handler));
+            call_back_with_args::<Value>(st, "setUiBackHandler", args).map(|_| ())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (state, handler);
+        Ok(())
     }
 }

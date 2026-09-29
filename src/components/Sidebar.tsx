@@ -107,7 +107,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         <button
           title="设置"
           aria-label="设置"
-          className="rounded-md p-1.5 text-ink-3 hover:bg-canvas hover:text-ink"
+          className="flex h-11 w-11 items-center justify-center rounded-md text-ink-3 hover:bg-canvas hover:text-ink"
           onClick={() => {
             useSettingsStore.getState().openDialog();
             onNavigate?.();
@@ -127,7 +127,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="搜索笔记…"
-            className="w-full rounded-[10px] border border-line bg-card py-1.5 pl-8 pr-3 text-sm text-ink shadow-card outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+            className="w-full min-h-[44px] rounded-[10px] border border-line bg-card py-1.5 pl-8 pr-3 text-sm text-ink shadow-card outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
           />
         </div>
       </div>

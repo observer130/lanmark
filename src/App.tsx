@@ -6,6 +6,8 @@ import { useSyncStore } from "./stores/sync";
 import { useSettingsStore } from "./stores/settings";
 import { isAndroid } from "./lib/sync";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./components/WindowControls";
+import { NewEntryFab } from "./components/NewEntryFab";
+import { listenBackPress, reportBackHandler } from "./stores/back";
 import { VaultPicker } from "./components/VaultPicker";
 import { Sidebar } from "./components/Sidebar";
 import { EditorPane } from "./components/EditorPane";
@@ -64,6 +66,37 @@ function App() {
       setNavOpen(true);
     }
   }, [navDrawerRequest]);
+
+  // M4i：返回手势——原生管「返回发生了」，这里管「返回该做什么」。
+  // 优先级：抽屉 → 浮层 → 退出确认（后者在原生侧，见 BackPlugin.resolve）
+  useEffect(() => {
+    // 用 getState 读最新值：闭包若捕获渲染时的 state 会读到陈旧的开关状态
+    // （用户可能在监听建立之后才打开设置页）
+    const unlisten = listenBackPress(() => {
+      if (useVaultStore.getState().pendingCreate) {
+        useVaultStore.getState().closeCreate();
+        return;
+      }
+      if (useSettingsStore.getState().dialogOpen) {
+        useSettingsStore.getState().closeDialog();
+        return;
+      }
+      setNavOpen(false);
+    });
+    return unlisten;
+  }, []);
+
+  // 抽屉 / 设置页 / 新建对话框 —— 任一开着，返回就先关它（而不是退出）。
+  // 上报给原生（去重后下发，见 stores/back.ts）。
+  // 同步面板是 SyncSection 的组件内 state，不在此列：它在抽屉里，抽屉开着时
+  // 返回的语义已经是「关抽屉」，无需再细分。
+  const dialogOpen = useSettingsStore((s) => s.dialogOpen);
+  const pendingCreate = useVaultStore((s) => s.pendingCreate);
+  useEffect(() => {
+    if (navOpen) reportBackHandler("drawer");
+    else if (dialogOpen || pendingCreate) reportBackHandler("overlay");
+    else reportBackHandler("none");
+  }, [navOpen, dialogOpen, pendingCreate]);
 
   useEffect(() => {
     void useVaultStore.getState().init();
@@ -153,36 +186,40 @@ function App() {
         <ResizeEdges />
         {narrow ? (
           <>
-            {/* 窄屏：侧栏为覆盖式抽屉，**铺满全屏**。
-                此前抽屉只占侧栏的 288px —— 在 385px 逻辑宽的手机上占 ~75%，
-                右侧露出一条编辑器，既不整齐也不好点（用户走查反馈）。
-                铺满后等同「全屏导航页」，点条目即关闭（onNavigate）回到编辑器。
-                内部列表全部用 truncate + min-w-0 flex-1，不依赖固定宽度。 */}
-            {navOpen && (
-              <div
-                className="fixed inset-0 z-30 bg-black/40"
-                onClick={() => setNavOpen(false)}
-              />
-            )}
+            {/* 窄屏：侧栏为 **半屏抽屉 + 遮罩**（M4i，Gmail / Obsidian Mobile 式）。
+                 此前是全屏铺满：右侧没有可点的遮罩区，看着不像抽屉，用户只能靠
+                 点条目或再点一次汉堡关掉它（走查反馈「像桌面端」的根因之一）。
+                 改为 w-[85vw]（屏宽留出一竖条），右侧露出的部分即遮罩——点它关
+                 抽屉，这是 Material Navigation Drawer 的标准行为。
+                 内部列表沿用 truncate + min-w-0 flex-1，不依赖固定宽度。 */}
             <div
-              className={`fixed inset-y-0 left-0 z-40 flex w-full transform transition-transform duration-200 ${
+              className={`fixed inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
+                navOpen ? "opacity-100" : "pointer-events-none opacity-0"
+              }`}
+              onClick={() => setNavOpen(false)}
+            />
+            <div
+              className={`fixed inset-y-0 left-0 z-40 flex w-[85vw] max-w-[320px] transform transition-transform duration-200 ${
                 navOpen ? "translate-x-0" : "-translate-x-full"
               }`}
             >
               <Sidebar onNavigate={() => setNavOpen(false)} />
             </div>
-            {/* 悬浮抽屉按钮：占据头部左侧 ~56px，EditorPane 窄屏头部需让出该宽度 */}
+            {/* 悬浮抽屉按钮：占头部左侧 ~56px，EditorPane 窄屏头部需让出该宽度。
+                触控尺寸放大到 44px（M4i：原来只有 32px，手机上偏小） */}
             <button
               aria-label="打开侧栏"
               onClick={() => setNavOpen(true)}
-              className="fixed left-3 top-3 z-20 rounded-lg border border-line bg-card p-2 text-ink-2 shadow-card"
+              className="fixed left-3 top-3 z-20 flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-card text-ink-2 shadow-card"
             >
-              <Menu size={16} />
+              <Menu size={18} />
             </button>
             {/* flex-col 接续高度链：让 EditorPane 的 flex-1 生效，编辑卡占满剩余高度 */}
             <div className="flex min-w-0 flex-1 flex-col">
               <EditorPane narrow={narrow} />
             </div>
+            {/* M4i：右下角新建 FAB（手机上原入口在标题行右侧，太小且够不到） */}
+            <NewEntryFab />
           </>
         ) : (
           <>

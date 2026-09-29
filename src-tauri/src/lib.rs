@@ -52,6 +52,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // M2 移动端小插件：vault 目录选择（SAF + 全部文件访问授权），见 src/mobile.rs
         .plugin(mobile::init())
+        // M4i 返回手势（独立插件名 "back"，与 vault-picker 分开注册，见 mobile.rs）
+        .plugin(mobile::init_back())
         // 日志：stdout（无头 E2E / 终端可见 WebView console）+ 日志文件
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -153,6 +155,8 @@ pub fn run() {
             mobile::vault_picker_request_all_files_access,
             mobile::vault_picker_app_dir,
             mobile::vault_picker_pick_folder,
+            // M4i：前端上报「当前返回该做什么」（浮层状态变化时下发）
+            mobile::set_ui_back_handler,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

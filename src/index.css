@@ -156,6 +156,22 @@ body {
   .editor-host .milkdown .ProseMirror {
     padding: 12px 14px 40px;
   }
+
+  /* M4i 手机端适配：
+     ① 去掉 WebView 的默认点击高亮蓝块 —— 移动端每点一下都闪一层蓝色，
+        是「像网页不像 App」最显眼的一处。
+     ② 列表滚到边界不再把整页带着下拉（Chrome 的下拉刷新手势会让笔记列表
+        跟着弹，编辑时误触尤其明显）。
+     ③ 锁定文本随旋屏自动缩放：部分 WebView 旋屏时会放大字号，破坏按 px
+        定档的正文字号（硬约定 11 的字号档位）。 */
+  body {
+    -webkit-tap-highlight-color: transparent;
+    text-size-adjust: 100%;
+  }
+  aside,
+  .editor-host {
+    overscroll-behavior: contain;
+  }
 }
 
 /* Crepe frame 主题变量 → 晨窗浅色（frame-dark 仅是变量块，覆盖即换肤） */

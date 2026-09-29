@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
 
 class MainActivity : TauriActivity() {
@@ -33,6 +34,53 @@ class MainActivity : TauriActivity() {
     }
     // 同步服务器前台服务保活（Rust 侧 axum 在 vault 打开后启动，见 commands.rs）
     SyncService.start(this)
+
+    registerBackHandler()
+  }
+
+  /**
+   * M4i 返回手势：**有浮层先关浮层，没有就正常退出**（两段式已废弃，
+   * 理由见 BackPlugin 类注释）。
+   *
+   * 两条拦截路径都要：
+   * 1. `OnBackPressedCallback` —— 标准手势返回
+   * 2. `dispatchKeyEvent` —— 部分 ROM（真机 2510DRK44C / Android 16 实测
+   *    MIUI）把返回键转成广播 `miui.intent.KEYCODE_BACK`，**不派发给
+   *    OnBackPressedDispatcher**，只注册回调时根本不触发（已加日志确认）
+   *
+   * 退出不做 `finish()`：`generated/TauriActivity` 的 handleBackNavigation
+   * 为 false 时系统默认行为就是结束 Activity，交给它即可；且 finish 会撞
+   * tauri#15671 的窗口重建问题（见 lib.rs）。
+   */
+  override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+    if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+      event.action == android.view.KeyEvent.ACTION_UP
+    ) {
+      // 有浮层 → 拦下并让前端关；无浮层 → 不消费，走系统默认退出
+      if (BackPlugin.resolve(BackPlugin.currentHandler) == BackAction.CLOSE_OVERLAY) {
+        BackPlugin.triggerBack()
+        return true
+      }
+    }
+    return super.dispatchKeyEvent(event)
+  }
+
+  private fun registerBackHandler() {
+    onBackPressedDispatcher.addCallback(
+      this,
+      object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+          if (BackPlugin.resolve(BackPlugin.currentHandler) == BackAction.CLOSE_OVERLAY) {
+            BackPlugin.triggerBack()
+            return
+          }
+          // 无浮层：交给系统默认行为（结束 Activity）
+          isEnabled = false
+          onBackPressedDispatcher.onBackPressed()
+          isEnabled = true
+        }
+      },
+    )
   }
 
   /** 钉死浅色系统栏：浅色背景 + 深色图标，与「晨窗」浅色主题一致。 */
