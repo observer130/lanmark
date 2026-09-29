@@ -75,7 +75,7 @@ function MenuItem({
 }) {
   return (
     <button
-      className={`flex min-h-[44px] w-full items-center gap-2 px-3 text-left text-sm hover:bg-canvas ${
+      className={`flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-canvas md:min-h-0 ${
         danger ? "text-red-600" : "text-ink"
       }`}
       onClick={onClick}
@@ -188,7 +188,7 @@ export function TreeView({ tree, onNavigate }: Props) {
         return (
           <li key={node.path} className="group">
             <div
-              className={`flex min-h-[44px] cursor-pointer items-center gap-1.5 rounded-lg py-1.5 pr-1 hover:bg-canvas ${
+              className={`flex min-h-[44px] cursor-pointer items-center gap-1.5 rounded-lg py-1.5 pr-1 hover:bg-canvas md:min-h-0 ${
                 isActive
                   ? "bg-accent-soft font-medium text-accent-text"
                   : "text-ink"

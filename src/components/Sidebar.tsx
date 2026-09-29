@@ -104,10 +104,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             它与设置页那个按钮完全重复，而设置入口原先独占底部一整行横幅太占位置。
             重索引在开库与每回合同步时都会自动跑，这个按钮只在「外部程序改了
             vault 且不想等同步」时才需要，属低频操作，收进设置页更合理。 */}
+        {/* 触控 44px 仅窄屏；md: 恢复桌面紧凑尺寸（原 p-1.5，约 26px，硬约定 13） */}
         <button
           title="设置"
           aria-label="设置"
-          className="flex h-11 w-11 items-center justify-center rounded-md text-ink-3 hover:bg-canvas hover:text-ink"
+          className="flex h-11 w-11 items-center justify-center rounded-md text-ink-3 hover:bg-canvas hover:text-ink md:h-auto md:w-auto md:p-1.5"
           onClick={() => {
             useSettingsStore.getState().openDialog();
             onNavigate?.();
@@ -127,7 +128,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="搜索笔记…"
-            className="w-full min-h-[44px] rounded-[10px] border border-line bg-card py-1.5 pl-8 pr-3 text-sm text-ink shadow-card outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+            className="w-full min-h-[44px] rounded-[10px] border border-line bg-card py-1.5 pl-8 pr-3 text-sm text-ink shadow-card outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20 md:min-h-0"
           />
         </div>
       </div>
