@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "M5-5 应用内更新：updater 插件桌面限定（Android/iOS 不编译，其权限解析器里没有 updater:default，无条件声明会让 Android 构建失败——platforms 限定桌面三平台）",
+  "windows": ["main"],
+  "platforms": ["linux", "macOS", "windows"],
+  "permissions": ["updater:default"]
+}
