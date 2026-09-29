@@ -25,4 +25,7 @@ export interface UpdateInfo {
 export const update = {
   /** force=false：启动自动检查（节流）；force=true：手动「检查更新」 */
   check: (force: boolean) => invoke<UpdateInfo>("update_check", { force }),
+  /** M5-6 Linux 自更新：下载验签替换二进制后自动重启（仅 Linux 注册此命令）。
+   *  tag 来自 UpdateInfo.htmlUrl 的 releases/tag/<tag> 段。 */
+  installLinux: (tag: string) => invoke<void>("update_install_linux", { tag }),
 };

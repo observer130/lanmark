@@ -165,6 +165,9 @@ pub fn run() {
             mobile::set_ui_back_handler,
             // M5-4：GitHub release 更新检测（关于页）
             update::update_check,
+            // M5-6：Linux 自更新（裸二进制 tar.gz，官方插件不支持）
+            #[cfg(target_os = "linux")]
+            update::update_install_linux,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

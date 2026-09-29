@@ -38,9 +38,26 @@ jobs:
       - run: pnpm tauri build --no-bundle
       - name: 打包原生二进制
         run: tar -czf lanmark-linux-x64.tar.gz -C src-tauri/target/release lanmark
+      # M5-6：给 tar.gz 出 minisign 签名（与 Windows updater 同一密钥）——
+      # Linux 自更新（update_install_linux）下载后先验签再替换二进制
+      - name: 检查 updater 签名私钥
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret 未配置——拒绝产出无签名的自更新资产"
+            exit 1
+          fi
+      - name: 签名 tar.gz
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri signer sign lanmark-linux-x64.tar.gz
       - uses: softprops/action-gh-release@v2
         with:
-          files: lanmark-linux-x64.tar.gz
+          files: |
+            lanmark-linux-x64.tar.gz
+            lanmark-linux-x64.tar.gz.sig
           fail_on_unmatched_files: true
 
   desktop-windows:

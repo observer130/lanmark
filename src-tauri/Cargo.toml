@@ -42,7 +42,14 @@ log = "0.4.34"
 # 与 tauri#15671 补丁的兼容性：插件依赖 tauri 本体（已钉 2.11.5），不动 runtime-wry。
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
+# M5-6：Linux 自更新（官方插件不支持裸二进制 tar.gz）——下载 release 资产后
+# 解包替换 current_exe 重启。tar+flate2 均为纯 Rust 实现。
+[target."cfg(target_os = \"linux\")".dependencies]
+tar = "0.4"
+flate2 = "1"
+# 与 updater 插件同源的 minisign 验签（tar.gz 不走插件，验签自己做——
+# 不验签就替换二进制是绝对红线）
+minisign-verify = "0.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

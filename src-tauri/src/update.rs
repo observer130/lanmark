@@ -160,6 +160,162 @@ pub async fn update_check(app: tauri::AppHandle, force: bool) -> CmdResult<Updat
         .map_err(|e| format!("更新检查任务失败: {e}"))?
 }
 
+// ---------- M5-6：Linux 自更新 ----------
+//
+// 官方 updater 插件只支持 AppImage/deb/rpm 安装格式，而我们发的是**裸二进制
+// tar.gz**（AppImage 有 Intel Arc 兼容性问题，见 AGENTS.md）。自更新流程：
+//   下载 tar.gz + .sig → minisign 验签（与 Windows 同一密钥）→ 解包找 `lanmark`
+//   → rename 现行可执行文件（Linux 运行中可改名）→ 写入新二进制 + chmod 755
+//   → `app.restart()` 重启（restart_on_exit 语义，见 tauri AppHandle::restart）。
+// 纯逻辑（公钥行提取、tar 内找条目）与网络/命令分离，可单测。
+
+#[cfg(target_os = "linux")]
+pub(crate) mod linux {
+    use base64::Engine as _;
+    use std::io::Read;
+
+    /// tauri.conf.json 里 plugins.updater.pubkey 的同一个值（外层 base64 包装，
+    /// 解开后的第二行才是 minisign 内层公钥）。
+    pub const PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJEQzUzMzY1NDY0QjY2MUEKUldRYVprdEdaVFBGdll6NzZkRzFTV0c3eUxsT052dVVJOFE1SUl3UFh5UXpSMGsxbVpOYmI2cVoK";
+
+    /// 从外层 base64 包装里取 minisign **内层公钥行**（`PublicKey::from_base64`
+    /// 只认这一行，不认整个 pub 文件）。
+    pub fn inner_public_key_line(pubkey_b64: &str) -> Result<String, String> {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(pubkey_b64.trim())
+            .map_err(|e| format!("公钥 base64 解码失败: {e}"))?;
+        let text = String::from_utf8(decoded).map_err(|e| format!("公钥不是 UTF-8: {e}"))?;
+        let line = text
+            .lines()
+            .nth(1)
+            .ok_or("公钥文件缺少第二行（内层 key）")?
+            .trim()
+            .to_string();
+        if line.is_empty() {
+            return Err("公钥内层行为空".into());
+        }
+        Ok(line)
+    }
+
+    /// 从 tar.gz 字节里解出**仓库根名恰为 `lanmark`** 的单个二进制条目。
+    /// 只接受根目录条目（`lanmark`），拒绝任何路径穿越（`/`、`..`）。
+    pub fn extract_binary(tar_gz: &[u8]) -> Result<Vec<u8>, String> {
+        let gz = flate2::read::GzDecoder::new(tar_gz);
+        let mut archive = tar::Archive::new(gz);
+        let mut found: Option<Vec<u8>> = None;
+        for entry in archive
+            .entries()
+            .map_err(|e| format!("tar 遍历失败: {e}"))?
+        {
+            let mut entry = entry.map_err(|e| format!("tar 条目读取失败: {e}"))?;
+            let path = entry
+                .path()
+                .map_err(|e| format!("tar 路径读取失败: {e}"))?
+                .to_path_buf();
+            if path != std::path::Path::new("lanmark") {
+                continue;
+            }
+            if !entry
+                .header()
+                .entry_type()
+                .is_file()
+            {
+                return Err("tar 里的 lanmark 不是普通文件".into());
+            }
+            let mut buf = Vec::new();
+            entry
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("二进制读取失败: {e}"))?;            found = Some(buf);
+            break;
+        }
+        found.ok_or_else(|| "tar 包内未找到根级 `lanmark` 二进制".into())
+    }
+
+    /// 下载 release 资产（tar.gz 与 .sig 走同一构造逻辑）。
+    fn download(url: &str) -> Result<Vec<u8>, String> {
+        let c = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .user_agent("lanmark-update-check")
+            .build()
+            .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
+        let r = c
+            .get(url)
+            .send()
+            .map_err(|e| format!("下载失败: {e}"))?;
+        if !r.status().is_success() {
+            return Err(format!("下载返回 {}", r.status()));
+        }
+        r.bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("下载读取失败: {e}"))
+    }
+
+    /// 自更新同步实现（命令经 spawn_blocking 调用）。
+    pub fn self_update(app: &tauri::AppHandle, tag: &str) -> Result<(), String> {
+        let base = format!("https://github.com/observer130/lanmark/releases/download/{tag}");
+        let tar_gz = download(&format!("{base}/lanmark-linux-x64.tar.gz"))?;
+        let sig_file = download(&format!("{base}/lanmark-linux-x64.tar.gz.sig"))?;
+        // tauri signer 的 .sig 是**外层 base64 包装**的 minisign 签名（与 .pub
+        // 同构），Signature::decode 只认解包后的四行文本
+        let sig_text = {
+            let b64 = String::from_utf8(sig_file).map_err(|_| "签名文件不是 UTF-8".to_string())?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| format!("签名 base64 解码失败: {e}"))?;
+            String::from_utf8(decoded).map_err(|_| "签名内容不是 UTF-8".to_string())?
+        };
+
+        // 验签：公钥固定在二进制里（tauri.conf.json 同源），签名必须有效
+        let pub_key = minisign_verify::PublicKey::from_base64(&inner_public_key_line(PUBKEY_B64)?)
+            .map_err(|e| format!("公钥解析失败: {e}"))?;
+        let signature = minisign_verify::Signature::decode(&sig_text)
+            .map_err(|e| format!("签名解析失败: {e}"))?;
+        pub_key
+            .verify(&tar_gz, &signature, false)
+            .map_err(|e| format!("验签失败（更新包不可信）: {e}"))?;
+
+        let new_bin = extract_binary(&tar_gz)?;
+        if new_bin.is_empty() {
+            return Err("更新包里的二进制为空".into());
+        }
+
+        // 替换现行可执行文件：Linux 允许 rename 运行中的程序。
+        // current_exe 在打包容器里测试不可得，错误信息里带上路径便于排查。
+        let exe = std::env::current_exe().map_err(|e| format!("无法定位自身可执行文件: {e}"))?;
+        let old = exe.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old).map_err(|e| format!("备份旧程序失败（{}）: {e}", exe.display()))?;
+        let write = std::fs::write(&exe, &new_bin);
+        if let Err(e) = write {
+            // 写失败 → 尽力回滚（旧文件还在 .old）
+            let _ = std::fs::rename(&old, &exe);
+            return Err(format!("写入新程序失败: {e}"));
+        }
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)) {
+            let _ = std::fs::rename(&old, &exe);
+            return Err(format!("设置可执行权限失败: {e}"));
+        }
+        // 清理 .old 与签名测试残留成功后才走——保留到重启后也没机会删了，
+        // 让新进程首启清理（这里简单处理：尽力删，失败不影响更新）
+        let _ = std::fs::remove_file(&old);
+
+        log::info!("Linux 自更新完成，重启应用（tag={tag}）");
+        app.restart(); // -> !
+    }
+}
+
+/// Linux 自更新命令：下载 + 验签 + 替换二进制 + 重启。
+/// `tag` 来自前端已确认的 UpdateInfo.htmlUrl 解析（v 前缀可带可不带）。
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub async fn update_install_linux(app: tauri::AppHandle, tag: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || linux::self_update(&app, tag.trim_start_matches('v')))
+        .await
+        .map_err(|e| format!("自更新任务失败: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +396,68 @@ mod tests {
         assert!(json.contains("\"currentVersion\""), "前端按 camelCase 读: {json}");
         assert!(json.contains("\"hasUpdate\""));
         assert!(json.contains("\"checkedAtMs\""));
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_tests {
+        use super::linux::{extract_binary, inner_public_key_line, PUBKEY_B64};
+
+        #[test]
+        fn inner_public_key_line_unpacks_wrapper() {
+            // 归档 pubkey 与 tauri.conf.json 同源：外层解出三行文本，第二行是内层 key
+            // （minisign 公钥 = "RW" 前缀的 base64，56 字符左右——ed25519 key 两行）
+            let line = inner_public_key_line(PUBKEY_B64).unwrap();
+            assert!(!line.contains("untrusted"), "内层行不是注释");
+            assert!(line.starts_with("RW"), "minisign 内层公钥以 RW 开头");
+            assert!((50..=80).contains(&line.len()), "长度 {}/内层 key 应在 50-80 之间", line.len());
+            assert!(inner_public_key_line("!!!not-base64!!!").is_err());
+            assert!(inner_public_key_line("").is_err());
+        }
+
+        #[test]
+        fn extract_binary_reads_root_entry_and_rejects_missing() {
+            // 构造一个只含根级 lanmark 条目的 tar.gz（内容可识别即可，不要求真 ELF）
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::fast(),
+            ));
+            let payload = b"#!/bin/sh\necho lanmark\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, "lanmark", &payload[..]).unwrap();
+            let tar_gz = builder.into_inner().unwrap().finish().unwrap();
+
+            let got = extract_binary(&tar_gz).unwrap();
+            assert_eq!(got, payload);
+
+            // 缺条目 → 明确报错（不静默返回空）
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::fast(),
+            ));
+            let mut header = tar::Header::new_gnu();
+            header.set_size(3);
+            header.set_cksum();
+            builder.append_data(&mut header, "other.txt", &b"abc"[..]).unwrap();
+            let tar_gz = builder.into_inner().unwrap().finish().unwrap();
+            assert!(extract_binary(&tar_gz).is_err());
+        }
+
+        #[test]
+        fn extract_binary_ignores_nested_paths() {
+            // 路径穿越防御：只认根级 `lanmark`，子目录同名不算
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::fast(),
+            ));
+            let mut header = tar::Header::new_gnu();
+            header.set_size(4);
+            header.set_cksum();
+            builder.append_data(&mut header, "sub/lanmark", &b"evil"[..]).unwrap();
+            let tar_gz = builder.into_inner().unwrap().finish().unwrap();
+            assert!(extract_binary(&tar_gz).is_err(), "嵌套路径不得被当成目标条目");
+        }
     }
 }

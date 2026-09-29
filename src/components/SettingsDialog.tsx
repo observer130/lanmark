@@ -20,6 +20,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useSettingsStore, type SectionKey } from "../stores/settings";
 import { useUpdateStore } from "../stores/update";
+import { update as updateApi } from "../lib/update";
 import { useVaultStore } from "../stores/vault";
 import { vault, type AppInfo, type VaultStats } from "../lib/vault";
 import { isAndroid } from "../lib/sync";
@@ -445,9 +446,10 @@ function SyncSection2() {
   );
 }
 
-/** M5-4/M5-5 更新组：检测（全平台）+ 应用内安装（Windows）/打开发布页（其余）。
+/** M5-4/M5-5/M5-6 更新组：检测（全平台）+ 应用内更新（Windows/Linux）。
  *  Windows 走 updater 插件：拉 latest.json 验签下载 NSIS 包并静默安装，
- *  装完自动退出应用；Linux 自更新在 M5-6 接管前同样用发布页兜底。 */
+ *  装完自动退出应用；Linux 走自定义自更新（验签 tar.gz 替换二进制后重启）；
+ *  Android 插件不支持，保持「打开发布页」。 */
 function UpdateGroup({ platform }: { platform?: string }) {
   const info = useUpdateStore((s) => s.info);
   const checking = useUpdateStore((s) => s.checking);
@@ -463,6 +465,12 @@ function UpdateGroup({ platform }: { platform?: string }) {
 
   const openReleasePage = (url: string) => {
     void openUrl(url).catch((e) => setError({ error: String(e) }));
+  };
+
+  /** 从 UpdateInfo.htmlUrl（…/releases/tag/vX.Y.Z）提取 tag，供 Linux 自更新。 */
+  const tagFromUrl = (url: string): string | null => {
+    const m = url.match(/\/releases\/tag\/([^/?#]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
   };
 
   /** Windows 应用内安装：updater 插件 check → 验签下载 → 运行 NSIS 安装器
@@ -494,6 +502,25 @@ function UpdateGroup({ platform }: { platform?: string }) {
     }
   };
 
+  /** M5-6 Linux 自更新：下载 tar.gz + .sig → minisign 验签 → 替换二进制 →
+   *  自动重启（Rust 侧完成；下载大文件耗时，成功即重启，无需复位 installing）。 */
+  const installLinux = async () => {
+    if (!info?.htmlUrl) return;
+    const tag = tagFromUrl(info.htmlUrl);
+    if (!tag) {
+      setError({ error: `无法从发布链接解析版本号: ${info.htmlUrl}` });
+      return;
+    }
+    setInstalling(true);
+    try {
+      await updateApi.installLinux(tag);
+      // 正常不会走到这里：Rust 替换完成后 app.restart() 会退出进程
+    } catch (e) {
+      setError({ error: `自更新失败: ${e}` });
+      setInstalling(false);
+    }
+  };
+
   const progressHint = () => {
     if (contentLength != null && contentLength > 0) {
       return `下载中 ${Math.min(100, Math.round((downloaded / contentLength) * 100))}%`;
@@ -504,8 +531,6 @@ function UpdateGroup({ platform }: { platform?: string }) {
   const hint = info?.checkedAtMs
     ? `上次检查 ${new Date(info.checkedAtMs).toLocaleString()}`
     : "从未检查";
-
-  const isWindows = platform === "windows";
 
   return (
     <Group title="更新">
@@ -534,12 +559,25 @@ function UpdateGroup({ platform }: { platform?: string }) {
       {info?.hasUpdate && info.latestVersion && (
         <Row
           label={`发现新版本 v${info.latestVersion}`}
-          hint={installing ? progressHint() : (info.notes ?? undefined)}
+          hint={installing
+            ? platform === "linux"
+              ? "下载并验签更新包，完成后自动重启…"
+              : progressHint()
+            : (info.notes ?? undefined)}
         >
-          {isWindows ? (
+          {platform === "windows" ? (
             <button
               disabled={installing}
               onClick={() => void installInApp()}
+              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-50"
+            >
+              {installing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+              {installing ? "更新中…" : "立即更新"}
+            </button>
+          ) : platform === "linux" ? (
+            <button
+              disabled={installing}
+              onClick={() => void installLinux()}
               className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-50"
             >
               {installing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
