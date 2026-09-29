@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowLeft,
   Check,
@@ -22,17 +22,12 @@ import { isAndroid } from "../lib/sync";
 import { useSyncStore } from "../stores/sync";
 import {
   AUTOSAVE_OPTIONS,
-  CONTENT_WIDTH_OPTIONS,
   EDITOR_MODE_OPTIONS,
   LINE_HEIGHT_OPTIONS,
-  MONO_FONT_OPTIONS,
   NEW_NOTE_LOCATION_OPTIONS,
   SIZE_OPTIONS,
   TRASH_RETENTION_OPTIONS,
-  UI_FONT_OPTIONS,
   type EditorMode,
-  type FontKey,
-  type MonoFontKey,
 } from "../lib/settings";
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
 
@@ -139,37 +134,9 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-/** 自定义字体输入：失焦/回车提交；Rust 侧白名单校验，非法回退系统默认 */
-function CustomFontInput({
-  value,
-  placeholder,
-  onCommit,
-}: {
-  value: string;
-  placeholder: string;
-  onCommit: (v: string) => void;
-}) {
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (ref.current && ref.current.value !== value) ref.current.value = value;
-  }, [value]);
-  return (
-    <input
-      ref={ref}
-      defaultValue={value}
-      placeholder={placeholder}
-      spellCheck={false}
-      onBlur={(e) => e.target.value !== value && onCommit(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-      }}
-      className="w-56 rounded-lg border border-line bg-card px-2 py-1 text-xs text-ink outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
-    />
-  );
-}
-
 /* ── 分组内容 ── */
 
+/** 外观（M5 减法后只剩排版两项；字体栈常驻 index.css，不再可调） */
 function AppearanceSection() {
   const a = useSettingsStore((s) => s.settings.appearance);
   const patch = useSettingsStore((s) => s.patch);
@@ -178,78 +145,15 @@ function AppearanceSection() {
 
   return (
     <>
-      <Group title="字体">
-        <Row label="界面字体" hint="侧栏、对话框、按钮（不含正文）">
-          <Segmented
-            value={a.uiFont}
-            options={UI_FONT_OPTIONS}
-            onChange={(k) => set({ uiFont: k as FontKey })}
-          />
-        </Row>
-        {a.uiFont === "custom" && (
-          <Row label="自定义界面字体" hint="填写系统已安装的字体名">
-            <CustomFontInput
-              value={a.customFonts.ui}
-              placeholder="例如 Fira Sans"
-              onCommit={(v) =>
-                set({ customFonts: { ...a.customFonts, ui: v } })
-              }
-            />
-          </Row>
-        )}
-        <Row label="正文字体" hint="笔记正文与标题">
-          <Segmented
-            value={a.textFont}
-            options={UI_FONT_OPTIONS}
-            onChange={(k) => set({ textFont: k as FontKey })}
-          />
-        </Row>
-        {a.textFont === "custom" && (
-          <Row label="自定义正文字体" hint="填写系统已安装的字体名">
-            <CustomFontInput
-              value={a.customFonts.text}
-              placeholder="例如 LXGW WenKai"
-              onCommit={(v) => set({ customFonts: { ...a.customFonts, text: v } })}
-            />
-          </Row>
-        )}
-        <Row label="等宽字体" hint="代码块与源码模式">
-          <Segmented
-            value={a.monoFont}
-            options={MONO_FONT_OPTIONS}
-            onChange={(k) => set({ monoFont: k as MonoFontKey })}
-          />
-        </Row>
-        {a.monoFont === "custom" && (
-          <Row label="自定义等宽字体" hint="填写系统已安装的字体名">
-            <CustomFontInput
-              value={a.customFonts.mono}
-              placeholder="例如 Fira Code"
-              onCommit={(v) => set({ customFonts: { ...a.customFonts, mono: v } })}
-            />
-          </Row>
-        )}
-      </Group>
-
       <Group title="排版">
         <Row label="正文字号">
           <Segmented value={a.textSize} options={SIZE_OPTIONS} onChange={(k) => set({ textSize: k })} />
-        </Row>
-        <Row label="源码字号">
-          <Segmented value={a.codeSize} options={SIZE_OPTIONS} onChange={(k) => set({ codeSize: k })} />
         </Row>
         <Row label="行距">
           <Segmented
             value={a.lineHeight}
             options={LINE_HEIGHT_OPTIONS}
             onChange={(k) => set({ lineHeight: k })}
-          />
-        </Row>
-        <Row label="正文宽度" hint="宽屏时限制每行长度，避免一行太长">
-          <Segmented
-            value={a.contentWidth}
-            options={CONTENT_WIDTH_OPTIONS}
-            onChange={(k) => set({ contentWidth: k })}
           />
         </Row>
       </Group>
@@ -868,7 +772,7 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
       : "规模: 未知",
     `回收站: ${i.stats ? `${i.stats.trashEntries} 项 · ${fmtBytes(i.stats.trashBytes)}` : "未知"}`,
     ...syncLines,
-    `外观: 界面=${a.uiFont} 正文=${a.textFont} 字号=${a.textSize}/${a.codeSize} 行距=${a.lineHeight}`,
+    `外观: 字号=${a.textSize} 行距=${a.lineHeight}`,
     `编辑器: 默认模式=${i.settings.editor.defaultMode} 自动保存=${i.settings.editor.autosaveMs}ms`,
     `配置目录: ${i.info?.configDir ?? "?"}`,
     `日志目录: ${i.info?.logDir ?? "?"}`,

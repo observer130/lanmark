@@ -10,15 +10,8 @@ import type { Settings } from "../lib/settings";
 
 const SETTINGS: Settings = {
   appearance: {
-    uiFont: "system",
-    textFont: "sans",
-    monoFont: "system",
-    customFonts: { ui: "", text: "", mono: "" },
     textSize: "md",
-    codeSize: "md",
     lineHeight: "normal",
-    contentWidth: "auto",
-    uiScalePct: 100,
   },
   editor: {
     defaultMode: "wysiwyg",
@@ -161,13 +154,13 @@ describe("E3 诊断信息", () => {
       input({
         settings: {
           ...SETTINGS,
-          appearance: { ...SETTINGS.appearance, textFont: "serif", textSize: "xl" },
+          appearance: { ...SETTINGS.appearance, textSize: "xl", lineHeight: "relaxed" },
           editor: { ...SETTINGS.editor, defaultMode: "source", autosaveMs: 3000 },
         },
       }),
     );
-    expect(t).toContain("正文=serif");
-    expect(t).toContain("字号=xl/md");
+    expect(t).toContain("字号=xl");
+    expect(t).toContain("行距=relaxed");
     expect(t).toContain("默认模式=source 自动保存=3000ms");
   });
 });

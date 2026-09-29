@@ -23,15 +23,8 @@ import {
 
 /** 与 Rust `settings::Appearance::default()` 逐字段一致的兜底默认值 */
 export const DEFAULT_APPEARANCE: Appearance = {
-  uiFont: "system",
-  textFont: "sans",
-  monoFont: "system",
-  customFonts: { ui: "", text: "", mono: "" },
   textSize: "md",
-  codeSize: "md",
   lineHeight: "normal",
-  contentWidth: "auto",
-  uiScalePct: 100,
 };
 
 export const DEFAULT_EDITOR: EditorPrefs = {
@@ -105,7 +98,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } catch (e) {
       if (seq !== loadSeq) return;
       // 读失败也要落地 CSS 变量：否则界面停在「无变量」状态，
-      // index.css 的 var() 全部落空 → 字号/字体塌成浏览器默认
+      // index.css 的 var() 全部落空 → 字号/行距塌成浏览器默认
       set({ loading: false, error: String(e) });
       applyCssVars(DEFAULT_APPEARANCE);
     }
@@ -124,7 +117,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     try {
       const saved = await settingsApi.patch(patch);
       set({ settings: saved, error: null });
-      // 以返回值为准再写一次：非法字体串会被 Rust 回退成 system，
+      // 以返回值为准再写一次：非法档位会被 Rust 归一化回默认，
       // 乐观那一下显示的是用户输入，这里必须纠正
       applyCssVars(saved.appearance);
     } catch (e) {

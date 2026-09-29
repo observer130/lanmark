@@ -120,24 +120,19 @@ mod tests {
     #[test]
     fn patch_returns_normalized_values() {
         let mut cfg = AppConfig::default();
-        // 非法字体串：命令返回值必须是归一化后的 system（前端据此提示并回退）
+        // 非法档位：命令返回值必须是归一化后的 md（前端据此提示并回退）
         let out = settings_apply_op(
             &mut cfg,
             SettingsPatch {
                 appearance: Some(Appearance {
-                    ui_font: "custom".into(),
-                    custom_fonts: crate::settings::CustomFonts {
-                        ui: "x; --c-ink: red".into(),
-                        ..Default::default()
-                    },
-                    ..Appearance::default()
+                    text_size: "huge".into(),
+                    line_height: "normal".into(),
                 }),
                 ..Default::default()
             },
         );
-        assert_eq!(out.appearance.ui_font, "system");
-        assert_eq!(out.appearance.custom_fonts.ui, "");
-        assert_eq!(cfg.appearance.ui_font, "system", "落盘也是归一化后的值");
+        assert_eq!(out.appearance.text_size, "md");
+        assert_eq!(cfg.appearance.text_size, "md", "落盘也是归一化后的值");
     }
 
     #[test]
@@ -146,7 +141,7 @@ mod tests {
             vault_path: Some("/home/u/notes".into()),
             sync_auto: false,
             device_alias: "青柠台机".into(),
-            appearance: Appearance { text_size: "xl".into(), ui_font: "serif".into(), ..Appearance::default() },
+            appearance: Appearance { text_size: "xl".into(), line_height: "normal".into() },
             editor: EditorPrefs { autosave_ms: 3000, ..EditorPrefs::default() },
             storage: StoragePrefs { trash_retention_days: 0 },
         };

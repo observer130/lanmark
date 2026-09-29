@@ -39,7 +39,7 @@ pub struct AppConfig {
     /// M3：桌面端自动同步开关（默认开；旧配置无此字段 → serde default，docs/07 §7）
     #[serde(default = "default_sync_auto")]
     pub sync_auto: bool,
-    /// M4a：外观（字体/字号/行距/行宽/界面缩放）
+    /// M4a：外观（字号/行距；M5 减法后字体/行宽/界面缩放已移除）
     pub appearance: Appearance,
     /// M4a：编辑器偏好
     pub editor: EditorPrefs,

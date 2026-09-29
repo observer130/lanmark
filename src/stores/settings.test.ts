@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * M4b 外观设置的前端测试。
+ * M4b 外观设置的前端测试（M5 减法后：字号/行距 + 编辑器 + 存储链路）。
  *
  * 覆盖两件事：
- * 1. 枚举 → CSS 值映射（字号四档 / 行距 / 行宽 / 字体栈）
+ * 1. 枚举 → CSS 值映射（字号四档 / 行距）
  * 2. 应用与回滚链路（乐观更新、以 Rust 返回值为准、失败复原变量）
- * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号会重建 Crepo 实例，
+ * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号会重建 Crepe 实例，
  *    触发伪 markdownUpdated → 打开笔记被重写，硬约定 3）
  */
 
@@ -15,13 +15,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import {
   applyCssVars,
-  codeSizePx,
   lineHeightValue,
-  monoFontStack,
-  textFontStack,
   textSizePx,
-  uiFontStack,
-  CONTENT_MAX_PX,
   type Appearance,
 } from "../lib/settings";
 import { editorKey } from "../components/EditorPane";
@@ -39,16 +34,8 @@ describe("外观枚举 → 数值映射", () => {
     expect(textSizePx("xl")).toBe(20);
   });
 
-  it("源码字号四档 = 12/14/16/18（整体比正文小 2px）", () => {
-    expect(codeSizePx("sm")).toBe(12);
-    expect(codeSizePx("md")).toBe(14);
-    expect(codeSizePx("lg")).toBe(16);
-    expect(codeSizePx("xl")).toBe(18);
-  });
-
   it("非法档位回退 md", () => {
     expect(textSizePx("huge" as never)).toBe(16);
-    expect(codeSizePx("" as never)).toBe(14);
     expect(lineHeightValue("loose" as never)).toBe(1.75);
   });
 
@@ -57,23 +44,6 @@ describe("外观枚举 → 数值映射", () => {
     expect(lineHeightValue("normal")).toBe(1.75);
     expect(lineHeightValue("relaxed")).toBe(2.0);
   });
-
-  it("字体栈：system 沿用旧栈，serif / mono 各有映射，custom 用用户串", () => {
-    // 默认（system/sans/system）必须与 M3 硬编码一致，升级用户界面不变
-    expect(uiFontStack(app())).toContain("Noto Sans");
-    expect(uiFontStack(app())).toContain("Microsoft YaHei");
-    expect(textFontStack(app({ textFont: "sans" }))).toContain("PingFang SC");
-    expect(uiFontStack(app({ uiFont: "serif" }))).toContain("Noto Serif CJK SC");
-    expect(monoFontStack(app({ monoFont: "mono" }))).toContain("JetBrains Mono");
-    expect(monoFontStack(app({ monoFont: "system" }))).toContain("ui-monospace");
-    // custom 但串为空 → 回退 system（Rust 侧同样会把枚举归一回 system）
-    expect(uiFontStack(app({ uiFont: "custom", customFonts: { ui: "", text: "", mono: "" } }))).toContain(
-      "Noto Sans",
-    );
-    expect(
-      uiFontStack(app({ uiFont: "custom", customFonts: { ui: "Fira Sans", text: "", mono: "" } })),
-    ).toBe("Fira Sans");
-  });
 });
 
 describe("applyCssVars：变量写入", () => {
@@ -81,20 +51,14 @@ describe("applyCssVars：变量写入", () => {
     document.documentElement.removeAttribute("style");
   });
 
-  it("写入全部外观变量（字号/行距/字体/行宽）", () => {
-    applyCssVars(app({ textSize: "xl", codeSize: "sm", lineHeight: "relaxed", contentWidth: "limited" }));
+  it("写入全部外观变量（M5 减法后只剩字号/行距两项）", () => {
+    applyCssVars(app({ textSize: "xl", lineHeight: "relaxed" }));
     const st = document.documentElement.style;
     expect(st.getPropertyValue("--lanmark-text-size")).toBe("20px");
-    expect(st.getPropertyValue("--lanmark-code-size")).toBe("12px");
     expect(st.getPropertyValue("--lanmark-line-height")).toBe("2");
-    expect(st.getPropertyValue("--lanmark-content-max")).toBe(`${CONTENT_MAX_PX}px`);
-    expect(st.getPropertyValue("--lanmark-font-text")).toContain("PingFang SC");
-    expect(st.getPropertyValue("--lanmark-font-mono")).toContain("ui-monospace");
-  });
-
-  it("正文宽度 auto → max-width: none", () => {
-    applyCssVars(app({ contentWidth: "auto" }));
-    expect(document.documentElement.style.getPropertyValue("--lanmark-content-max")).toBe("none");
+    // M5 减法：字体/行宽/界面缩放变量不再由设置写入（常驻 index.css）
+    expect(st.getPropertyValue("--lanmark-font-text")).toBe("");
+    expect(st.getPropertyValue("--lanmark-content-max")).toBe("");
   });
 });
 
@@ -145,18 +109,18 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("20px");
   });
 
-  it("patch 以 Rust 返回值为准（非法自定义字体被回退）", async () => {
+  it("patch 以 Rust 返回值为准（非法档位被归一化）", async () => {
     const a = DEFAULT_APPEARANCE;
-    // 乐观提交 custom，Rust 归一化后回 system
+    // 乐观提交非法档位，Rust 归一化后回 md
     invoke.mockResolvedValueOnce({
-      appearance: { ...a, uiFont: "system", customFonts: { ui: "", text: "", mono: "" } },
+      appearance: { ...a, textSize: "md" },
       editor: useSettingsStore.getState().settings.editor,
       storage: useSettingsStore.getState().settings.storage,
     });
     await useSettingsStore.getState().patch({
-      appearance: { ...a, uiFont: "custom", customFonts: { ui: "", text: "", mono: "" } },
+      appearance: { ...a, textSize: "huge" as never },
     });
-    expect(useSettingsStore.getState().settings.appearance.uiFont).toBe("system");
+    expect(useSettingsStore.getState().settings.appearance.textSize).toBe("md");
   });
 
   it("patch 失败 → 回滚 state 与 CSS 变量", async () => {
@@ -194,9 +158,9 @@ describe("editorKey：外观不得进入编辑器 key（硬约定 3 护栏）", 
 
   it("同一路径同一模式恒等——外观变化不得改变它", () => {
     const k1 = editorKey("n.md", "wysiwyg");
-    // 模拟改字体/字号后重新渲染：key 必须逐字节相同，否则 React 会重建
+    // 模拟改字号/行距后重新渲染：key 必须逐字节相同，否则 React 会重建
     // MilkdownHost → Crepe 建实例发伪 markdownUpdated → 笔记被重写
-    applyCssVars(app({ textFont: "serif", textSize: "xl", lineHeight: "relaxed" }));
+    applyCssVars(app({ textSize: "xl", lineHeight: "relaxed" }));
     const k2 = editorKey("n.md", "wysiwyg");
     expect(k2).toBe(k1);
   });
@@ -238,7 +202,7 @@ describe("E4：恢复默认设置只重置设置小节", () => {
     });
     useSettingsStore.setState({
       settings: {
-        appearance: { ...DEFAULT_APPEARANCE, textSize: "xl", textFont: "serif" },
+        appearance: { ...DEFAULT_APPEARANCE, textSize: "xl", lineHeight: "relaxed" },
         editor: { defaultMode: "source", autosaveMs: 3000, sourceLineNumbers: false, newNoteLocation: "last" },
         storage: { trashRetentionDays: 7 },
       },

@@ -11,49 +11,26 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 字体方案的合法枚举；`custom` 表示用 `custom_fonts` 里的用户串。
-const FONT_KEYS_UI: [&str; 4] = ["system", "sans", "serif", "custom"];
-const FONT_KEYS_MONO: [&str; 3] = ["system", "mono", "custom"];
-/// 字号 / 行距 / 行宽的合法枚举。
+/// 字号 / 行距的合法枚举。
 const SIZE_KEYS: [&str; 4] = ["sm", "md", "lg", "xl"];
 const LINE_HEIGHT_KEYS: [&str; 3] = ["compact", "normal", "relaxed"];
-const CONTENT_WIDTH_KEYS: [&str; 2] = ["auto", "limited"];
 const EDITOR_MODE_KEYS: [&str; 3] = ["read", "wysiwyg", "source"];
 const NEW_NOTE_LOCATION_KEYS: [&str; 2] = ["root", "last"];
 /// 自动保存延迟档位（ms）：仅改防抖时长，不改尾沿纪律（docs/08 §3.2 B2）。
 const AUTOSAVE_KEYS: [u32; 4] = [300, 700, 1500, 3000];
-/// 界面缩放的合法枚举（P2，docs/08 §3.1 A8）。
-const UI_SCALE_KEYS: [u16; 3] = [100, 112, 125];
-
-/// 自定义字体串最长 200 字符：够放一个完整字体栈，又不给畸形串留空间。
-const CUSTOM_FONT_MAX: usize = 200;
 
 // ---------- 数据结构 ----------
 
+/// M5 减法说明：M4a 曾有字体（界面/正文/等宽/自定义）、源码字号、正文宽度、
+/// 界面缩放等字段。移除后旧 config.json 里的残留字段由 serde 静默忽略
+/// （无 deny_unknown_fields），下次保存自然清除，无需迁移代码。
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Appearance {
-    pub ui_font: String,
-    pub text_font: String,
-    pub mono_font: String,
-    pub custom_fonts: CustomFonts,
     /// 正文字号档位；`md` = 16px（与既往硬编码一致 ⇒ 默认视觉不变）
     pub text_size: String,
-    /// 源码字号档位；`md` = 14px（既往 13.5px 取整）
-    pub code_size: String,
+    /// 行距档位；`normal` = 1.75
     pub line_height: String,
-    pub content_width: String,
-    pub ui_scale_pct: u16,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CustomFonts {
-    /// 空串 = 未设置（用空串而非 Option：整节替换即可表达「清除自定义字体」，
-    /// 避开 `Option<Option<T>>` 三态，见 docs/08 §4.3）
-    pub ui: String,
-    pub text: String,
-    pub mono: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -79,15 +56,8 @@ pub struct StoragePrefs {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            ui_font: "system".into(),
-            text_font: "sans".into(),
-            mono_font: "system".into(),
-            custom_fonts: CustomFonts::default(),
             text_size: "md".into(),
-            code_size: "md".into(),
             line_height: "normal".into(),
-            content_width: "auto".into(),
-            ui_scale_pct: 100,
         }
     }
 }
@@ -141,63 +111,13 @@ fn pick(key: &str, allowed: &[&str], fallback: &str) -> String {
     }
 }
 
-/// 自定义字体串白名单校验：允许字母数字、空格与 `, - _ " ' ( )`，长度 ≤200。
-///
-/// **安全要点**：该串由 `applyCssVars` 写进 `:root` 的 CSS 变量（`setProperty`）。
-/// 未过滤可构造声明注入（如 `x; --c-ink: red`），进而篡改全站配色甚至布局。
-/// 这里拒绝一切控制/结构性字符（`;{}<>@!\/` 等），非法即回退 `system`。
-pub fn sanitize_font_stack(raw: &str) -> Option<String> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return None; // 空串 = 清除自定义
-    }
-    if s.chars().count() > CUSTOM_FONT_MAX {
-        return None;
-    }
-    let ok = s.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, ' ' | ',' | '-' | '_' | '"' | '\'' | '(' | ')')
-            // 中文字体名（如 "思源宋体"）需放行；注入字符全是 ASCII，不冲突
-            || (!c.is_ascii() && !c.is_control())
-    });
-    if !ok {
-        return None;
-    }
-    Some(s.to_string())
-}
-
-/// 归一化单个字体字段：合法枚举保留；`custom` 需自定义串通过白名单，
-/// 否则回退（UI/正文回退 `system`，等宽回退 `system`）。
-fn norm_font(key: &str, custom: &str, allowed: &[&str]) -> String {
-    let k = pick(key, allowed, "system");
-    if k != "custom" {
-        return k;
-    }
-    if sanitize_font_stack(custom).is_some() {
-        "custom".to_string()
-    } else {
-        "system".to_string()
-    }
-}
-
 impl Appearance {
     /// 逐字段归一化；返回值即前端应采用的最终值。
+    /// 字体相关的白名单校验（`sanitize_font_stack`）随字体设置一并移除：
+    /// 字体栈现在常驻 index.css，用户输入不再进入 CSS 变量。
     pub fn normalize(mut self) -> Self {
-        self.custom_fonts = CustomFonts {
-            ui: sanitize_font_stack(&self.custom_fonts.ui).unwrap_or_default(),
-            text: sanitize_font_stack(&self.custom_fonts.text).unwrap_or_default(),
-            mono: sanitize_font_stack(&self.custom_fonts.mono).unwrap_or_default(),
-        };
-        self.ui_font = norm_font(&self.ui_font, &self.custom_fonts.ui, &FONT_KEYS_UI);
-        self.text_font = norm_font(&self.text_font, &self.custom_fonts.text, &FONT_KEYS_UI);
-        self.mono_font = norm_font(&self.mono_font, &self.custom_fonts.mono, &FONT_KEYS_MONO);
         self.text_size = pick(&self.text_size, &SIZE_KEYS, "md");
-        self.code_size = pick(&self.code_size, &SIZE_KEYS, "md");
         self.line_height = pick(&self.line_height, &LINE_HEIGHT_KEYS, "normal");
-        self.content_width = pick(&self.content_width, &CONTENT_WIDTH_KEYS, "auto");
-        if !UI_SCALE_KEYS.contains(&self.ui_scale_pct) {
-            self.ui_scale_pct = 100;
-        }
         self
     }
 }
@@ -243,13 +163,8 @@ mod tests {
     fn defaults_match_previous_hardcoded_visuals() {
         // 默认值必须与 M3 的硬编码等价，否则升级用户界面会突变（docs/08 §3 表头）
         let a = Appearance::default();
-        assert_eq!(a.ui_font, "system");
-        assert_eq!(a.text_font, "sans");
         assert_eq!(a.text_size, "md"); // 16px
-        assert_eq!(a.code_size, "md"); // 14px
         assert_eq!(a.line_height, "normal"); // 1.75
-        assert_eq!(a.content_width, "auto");
-        assert_eq!(a.ui_scale_pct, 100);
         let e = EditorPrefs::default();
         assert_eq!(e.default_mode, "wysiwyg");
         assert_eq!(e.autosave_ms, 700); // 原 SAVE_DEBOUNCE_MS
@@ -261,25 +176,12 @@ mod tests {
     #[test]
     fn normalize_falls_back_on_illegal_enums() {
         let a = Appearance {
-            ui_font: "comic".into(),
-            text_font: "comic".into(),
-            mono_font: "comic".into(),
             text_size: "huge".into(),
-            code_size: "".into(),
             line_height: "loose".into(),
-            content_width: "wide".into(),
-            ui_scale_pct: 999,
-            ..Appearance::default()
         }
         .normalize();
-        assert_eq!(a.ui_font, "system");
-        assert_eq!(a.text_font, "system");
-        assert_eq!(a.mono_font, "system");
         assert_eq!(a.text_size, "md");
-        assert_eq!(a.code_size, "md");
         assert_eq!(a.line_height, "normal");
-        assert_eq!(a.content_width, "auto");
-        assert_eq!(a.ui_scale_pct, 100);
 
         let e = EditorPrefs {
             default_mode: "edit".into(),
@@ -305,54 +207,6 @@ mod tests {
             let e = EditorPrefs { autosave_ms: ms, ..EditorPrefs::default() }.normalize();
             assert_eq!(e.autosave_ms, ms);
         }
-        for pct in UI_SCALE_KEYS {
-            let a = Appearance { ui_scale_pct: pct, ..Appearance::default() }.normalize();
-            assert_eq!(a.ui_scale_pct, pct);
-        }
-    }
-
-    #[test]
-    fn font_stack_whitelist_rejects_injection() {
-        // CSS 声明注入：能写进分号就能篡改 :root 其它变量
-        assert!(sanitize_font_stack("x; --c-ink: red").is_none());
-        assert!(sanitize_font_stack("x} .a{display:none").is_none());
-        assert!(sanitize_font_stack("url(/etc/passwd)").is_none());
-        assert!(sanitize_font_stack("<script>").is_none());
-        assert!(sanitize_font_stack("@import 'x'").is_none());
-        assert!(sanitize_font_stack("a\\b").is_none());
-        assert!(sanitize_font_stack("a!important").is_none());
-        // 长度上限
-        assert!(sanitize_font_stack(&"a".repeat(CUSTOM_FONT_MAX + 1)).is_none());
-        assert_eq!(sanitize_font_stack(&"a".repeat(CUSTOM_FONT_MAX)).unwrap().len(), CUSTOM_FONT_MAX);
-        // 空串 = 清除自定义，不是合法栈
-        assert!(sanitize_font_stack("").is_none());
-        assert!(sanitize_font_stack("   ").is_none());
-        // 正常栈放行（含引号、逗号、连字符、括号与中文字体名）
-        let ok = r#""Noto Serif CJK SC", "思源宋体", Songti SC, serif"#;
-        assert_eq!(sanitize_font_stack(ok).unwrap(), ok);
-        assert!(sanitize_font_stack("Fira Code, ui-monospace").is_some());
-    }
-
-    #[test]
-    fn custom_font_requires_valid_stack() {
-        let a = Appearance {
-            ui_font: "custom".into(),
-            custom_fonts: CustomFonts { ui: "x; --c-ink: red".into(), ..Default::default() },
-            ..Appearance::default()
-        }
-        .normalize();
-        // 非法串 → 枚举本身被回退，且串被清空（不留死数据在 config 里）
-        assert_eq!(a.ui_font, "system");
-        assert_eq!(a.custom_fonts.ui, "");
-
-        let a = Appearance {
-            ui_font: "custom".into(),
-            custom_fonts: CustomFonts { ui: "Fira Sans".into(), ..Default::default() },
-            ..Appearance::default()
-        }
-        .normalize();
-        assert_eq!(a.ui_font, "custom");
-        assert_eq!(a.custom_fonts.ui, "Fira Sans");
     }
 
     #[test]
@@ -404,5 +258,13 @@ mod tests {
         // 完全空对象
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());
+        // M5 减法迁移：旧版外观字段（字体/源码字号/行宽/界面缩放）被静默忽略
+        let m5_legacy = r#"{"appearance":{"uiFont":"serif","textFont":"custom",
+            "customFonts":{"ui":"Fira Sans","text":"","mono":""},"textSize":"lg",
+            "codeSize":"sm","contentWidth":"limited","uiScalePct":125}}"#;
+        let s: Settings = serde_json::from_str(m5_legacy).unwrap();
+        assert_eq!(s.appearance.text_size, "lg", "仍可识别的字段照常读取");
+        assert_eq!(s.appearance.line_height, "normal");
+        assert_eq!(s, Settings { appearance: Appearance { text_size: "lg".into(), line_height: "normal".into() }, ..Settings::default() });
     }
 }

@@ -33,18 +33,18 @@
   --sh-pop: 0 1px 2px rgb(15 18 30 / 0.1), 0 2px 6px rgb(15 18 30 / 0.08);
   --sh-slider: 0 1px 2px rgb(15 18 30 / 0.2), 0 2px 8px oklch(0.53 0.19 264 / 0.35);
 
-  /* ── M4a 外观变量 ──
-     `applyCssVars()`（src/lib/settings.ts）是唯一写入点，改字体/字号只动这些变量，
+  /* ── 字体栈（M5 减法：不再可调，常驻这里）──
+     M4a 曾由设置写入（applyCssVars），移除后固定为各自的原默认值：
+     正文栈 = 原「无衬线」默认，等宽 = 原「系统默认」。 */
+  --lanmark-font-text: "Noto Sans", "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --lanmark-font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, "Noto Sans Mono CJK SC", monospace;
+
+  /* ── 外观变量（M5 减法后只剩字号/行距可调）──
+     `applyCssVars()`（src/lib/settings.ts）是唯一写入点，改字号只动这两个变量，
      不重建编辑器实例（硬约定 3：重建会触发伪 markdownUpdated 重写文件）。
      这里给的值 = M3 的硬编码视觉，保证「默认设置下界面不变」。 */
-  --lanmark-font-ui: var(--font-sans);
-  --lanmark-font-text: var(--font-sans);
-  --lanmark-font-mono: var(--font-mono);
   --lanmark-text-size: 16px;
-  --lanmark-code-size: 14px;
   --lanmark-line-height: 1.75;
-  --lanmark-content-max: none;
-  --lanmark-ui-scale: 100%;
 }
 
 /* 把语义 token 映射成 Tailwind utility（bg-canvas / text-ink-2 / border-line …） */
@@ -65,10 +65,10 @@
   --shadow-card: var(--sh-card);
   --shadow-pop: var(--sh-pop);
   --shadow-slider: var(--sh-slider);
-  /* M4b：utility 引用变量，运行时可被 :root 的 --lanmark-font-* 覆盖 →
-     改「界面字体」连带 Tailwind 的 font-sans utility 一起变（Tailwind 默认主题
-     里没有 --font-sans，所以这里必须显式声明）。 */
-  --font-sans: var(--lanmark-font-ui);
+  /* M5：字体不可调，直接给定常驻栈（此前经 --lanmark-font-* 间接、由设置写入）。
+     --font-sans = M4a「系统默认」界面字体栈；等宽沿用上面的常驻变量。 */
+  --font-sans: "Noto Sans", "Segoe UI", system-ui, "Noto Sans CJK SC", "Source Han Sans SC",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: var(--lanmark-font-mono);
 }
 
@@ -82,7 +82,7 @@ body {
   margin: 0;
   background: var(--c-canvas);
   color: var(--c-ink);
-  font-family: var(--lanmark-font-ui);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   text-autospace: normal;
 }
@@ -123,12 +123,11 @@ body {
 .editor-host .milkdown {
   height: auto;
   min-height: 100%;
-  /* 正文宽度设置：`auto` = none（跟随窗口），`limited` = 820px（宽屏防一行太长） */
-  max-width: var(--lanmark-content-max);
+  /* 正文列宽跟随编辑器宽度（M5 移除「正文宽度」设置，不再限宽） */
   margin: 0 auto;
 }
 
-/* 正文排版：字号 / 行高 / 字体全部走变量。
+/* 正文排版：字号 / 行高 / 字体走变量（字体栈为常驻值）。
    选择器用 `.editor-host .milkdown .ProseMirror`：比 `.milkdown` 上的
    --crepe-* 变量规则优先级更高，能盖住 crepe 自带排版（硬约定 7）。 */
 .editor-host .milkdown .ProseMirror {
@@ -198,7 +197,6 @@ body {
   --crepe-font-default: var(--lanmark-font-text);
   --crepe-font-code: var(--lanmark-font-mono);
 }
-
 /* 内联代码 chip：与晨窗设计稿一致（浅靛蓝底 + 深靛蓝字 + 发丝边框），
    替换 crepe 默认的「深底红字」；同规则顺带修正 pre 的 inline-area 底色 */
 .milkdown .ProseMirror code {
@@ -285,7 +283,8 @@ body {
    由 Crepe 规则控制（surface 灰底）；源码模式的白底走 .source-editor 作用域。 */
 .cm-editor {
   height: 100%;
-  font-size: var(--lanmark-code-size);
+  /* 源码字号固定 14px（M5 移除该设置，取原默认档） */
+  font-size: 14px;
   color: var(--c-ink);
 }
 
