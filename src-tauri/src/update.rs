@@ -244,15 +244,17 @@ pub(crate) mod linux {
             .send()
             .map_err(|e| format!("下载失败: {e}"))?;
         if !r.status().is_success() {
-            return Err(format!("下载返回 {}", r.status()));
+            return Err(format!("下载返回 {}：{url}", r.status()));
         }
         r.bytes()
             .map(|b| b.to_vec())
             .map_err(|e| format!("下载读取失败: {e}"))
     }
 
-    /// 自更新同步实现（命令经 spawn_blocking 调用）。
+    /// 自更新同步实现（命令经 spawn_blocking 调用）。tag 接受 `vX.Y.Z` 与
+    /// 裸版本号两种形式，内部统一成完整 tag 再拼下载 URL（见 `normalized_tag`）。
     pub fn self_update(app: &tauri::AppHandle, tag: &str) -> Result<(), String> {
+        let tag = &super::normalized_tag(tag);
         let base = format!("https://github.com/observer130/lanmark/releases/download/{tag}");
         let tar_gz = download(&format!("{base}/lanmark-linux-x64.tar.gz"))?;
         let sig_file = download(&format!("{base}/lanmark-linux-x64.tar.gz.sig"))?;
@@ -306,12 +308,26 @@ pub(crate) mod linux {
     }
 }
 
+/// GitHub release 下载路径需要**完整 tag**（仓库发版惯例 `vX.Y.Z`）。
+/// v0.5.0 的实现先剥 v 再拼 URL → `download/0.5.1/...` 404（v0.5.1 真机
+/// 回归发现：当时只有一个 release，无法端到端验证）。统一在此规范化：
+/// 带 v 原样、裸版本号补 v。
+fn normalized_tag(tag: &str) -> String {
+    let t = tag.trim();
+    if t.starts_with(['v', 'V']) {
+        t.to_string()
+    } else {
+        format!("v{t}")
+    }
+}
+
 /// Linux 自更新命令：下载 + 验签 + 替换二进制 + 重启。
-/// `tag` 来自前端已确认的 UpdateInfo.htmlUrl 解析（v 前缀可带可不带）。
+/// `tag` 来自前端已确认的 UpdateInfo.htmlUrl 解析（v 前缀可带可不带，
+/// `normalized_tag` 统一处理）。
 #[cfg(target_os = "linux")]
 #[tauri::command]
 pub async fn update_install_linux(app: tauri::AppHandle, tag: String) -> CmdResult<()> {
-    tauri::async_runtime::spawn_blocking(move || linux::self_update(&app, tag.trim_start_matches('v')))
+    tauri::async_runtime::spawn_blocking(move || linux::self_update(&app, &tag))
         .await
         .map_err(|e| format!("自更新任务失败: {e}"))?
 }
@@ -341,6 +357,16 @@ mod tests {
         // v 前缀 / 位数不足都可比
         assert!(has_update("0.4.0", "v0.4.1"));
         assert!(!has_update("0.4.0", "0.4"));
+    }
+
+    /// 回归：自更新 URL 必须用完整 tag。v0.5.0 剥 v 再拼 URL →
+    /// `download/0.5.1/...` 404（应用内更新失败：下载返回 404 Not Found）
+    #[test]
+    fn normalized_tag_keeps_or_adds_v_prefix() {
+        assert_eq!(normalized_tag("v0.5.1"), "v0.5.1", "完整 tag 原样保留");
+        assert_eq!(normalized_tag("0.5.1"), "v0.5.1", "裸版本号补 v");
+        assert_eq!(normalized_tag(" v0.5.1 "), "v0.5.1", "首尾空白先裁");
+        assert_eq!(normalized_tag("V1.2.3"), "V1.2.3");
     }
 
     #[test]
