@@ -71,6 +71,11 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let state = app.state::<Arc<AppState>>().inner().clone();
+            // M5-5：应用内更新（updater 插件，桌面限定——Android/iOS 官方不支持；
+            // 版本检测在 update.rs，安装走本插件拉 latest.json 验签装包。
+            // cfg 不能放 builder 链中间的方法上，故在 setup 里注册）
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             // M3f：同步服务器改动 vault（push 落盘/delete 生效）→ 推事件让前端刷新。
             // 手机端是服务器、无客户端循环（桌面 runRound 回合后自行刷新，且桌面不启动服务器）
             if let Ok(mut slot) = state.sync_notify.lock() {

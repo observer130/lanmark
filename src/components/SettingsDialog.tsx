@@ -445,22 +445,67 @@ function SyncSection2() {
   );
 }
 
-/** M5-4 更新组：自动检查开关 + 手动检查 + 结果（发现新版只在这里提示）。
- *  应用内安装是 M5-5/5-6 的活；当前统一提供「打开发布页」兜底。 */
-function UpdateGroup() {
+/** M5-4/M5-5 更新组：检测（全平台）+ 应用内安装（Windows）/打开发布页（其余）。
+ *  Windows 走 updater 插件：拉 latest.json 验签下载 NSIS 包并静默安装，
+ *  装完自动退出应用；Linux 自更新在 M5-6 接管前同样用发布页兜底。 */
+function UpdateGroup({ platform }: { platform?: string }) {
   const info = useUpdateStore((s) => s.info);
   const checking = useUpdateStore((s) => s.checking);
   const error = useUpdateStore((s) => s.error);
   const checkNow = useUpdateStore((s) => s.checkNow);
+  const setError = useUpdateStore.setState;
   const autoCheck = useSettingsStore((s) => s.settings.update.autoCheck);
   const patch = useSettingsStore((s) => s.patch);
+  // 安装进度（M5-5）：仅 Windows 应用内安装时出现，属组件内瞬时 UI 态
+  const [installing, setInstalling] = useState(false);
+  const [downloaded, setDownloaded] = useState(0);
+  const [contentLength, setContentLength] = useState<number | null>(null);
 
   const openReleasePage = (url: string) => {
-    void openUrl(url).catch((e) => useUpdateStore.setState({ error: String(e) }));
+    void openUrl(url).catch((e) => setError({ error: String(e) }));
   };
+
+  /** Windows 应用内安装：updater 插件 check → 验签下载 → 运行 NSIS 安装器
+   *  （安装器启动后插件会退出应用，promise 不必等待返回）。 */
+  const installInApp = async () => {
+    setInstalling(true);
+    setDownloaded(0);
+    setContentLength(null);
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const u = await check();
+      if (!u) {
+        setError({ error: "上游未提供更新包（latest.json 缺失或已是最新）" });
+        setInstalling(false);
+        return;
+      }
+      await u.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          setContentLength(event.data.contentLength ?? null);
+        } else if (event.event === "Progress") {
+          setDownloaded((d) => d + event.data.chunkLength);
+        }
+        // Finished 不处理：安装器接管后应用随即退出
+      });
+      // 走到这里 = 安装器已接管（Windows 上插件随后退出应用）
+    } catch (e) {
+      setError({ error: `应用内更新失败: ${e}` });
+      setInstalling(false);
+    }
+  };
+
+  const progressHint = () => {
+    if (contentLength != null && contentLength > 0) {
+      return `下载中 ${Math.min(100, Math.round((downloaded / contentLength) * 100))}%`;
+    }
+    return `已下载 ${(downloaded / 1048576).toFixed(1)} MB`;
+  };
+
   const hint = info?.checkedAtMs
     ? `上次检查 ${new Date(info.checkedAtMs).toLocaleString()}`
     : "从未检查";
+
+  const isWindows = platform === "windows";
 
   return (
     <Group title="更新">
@@ -473,7 +518,7 @@ function UpdateGroup() {
       </Row>
       <Row label="检查更新" hint={hint}>
         <button
-          disabled={checking}
+          disabled={checking || installing}
           onClick={() => void checkNow()}
           className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink disabled:opacity-50"
         >
@@ -487,14 +532,28 @@ function UpdateGroup() {
         </Row>
       )}
       {info?.hasUpdate && info.latestVersion && (
-        <Row label={`发现新版本 v${info.latestVersion}`} hint={info.notes ?? undefined}>
-          <button
-            onClick={() => info.htmlUrl && openReleasePage(info.htmlUrl)}
-            className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text"
-          >
-            <Download size={13} />
-            打开发布页
-          </button>
+        <Row
+          label={`发现新版本 v${info.latestVersion}`}
+          hint={installing ? progressHint() : (info.notes ?? undefined)}
+        >
+          {isWindows ? (
+            <button
+              disabled={installing}
+              onClick={() => void installInApp()}
+              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-50"
+            >
+              {installing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+              {installing ? "更新中…" : "立即更新"}
+            </button>
+          ) : (
+            <button
+              onClick={() => info.htmlUrl && openReleasePage(info.htmlUrl)}
+              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text"
+            >
+              <Download size={13} />
+              打开发布页
+            </button>
+          )}
         </Row>
       )}
       {info && !info.hasUpdate && !info.skipped && (
@@ -621,7 +680,7 @@ function AboutSection() {
           </button>
         </Row>
       </Group>
-      <UpdateGroup />
+      <UpdateGroup platform={info?.platform} />
       <Group title="重置">
         <Row label="恢复默认设置" hint="保留笔记库位置与已配对设备">
           <button

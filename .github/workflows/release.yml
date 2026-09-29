@@ -59,11 +59,52 @@ jobs:
         with:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
-      # 只发 NSIS 安装包；msi 不进 release（2026-09-18 定）
-      - run: pnpm tauri build --bundles nsis
+      # M5-5：updater 签名私钥（向导生成，GitHub secrets；缺失即 fail——
+      # 不静默产出未签名的更新资产，与 Android keystore 的 M4g 纪律一致）
+      - name: 检查 updater 签名私钥
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret 未配置——拒绝构建无签名更新资产"
+            exit 1
+          fi
+      # 只发 NSIS 安装包；msi 不进 release（2026-09-18 定）。
+      # createUpdaterArtifacts 走 --config overlay 而非写死在 tauri.conf.json：
+      # 写死的话本地任何打包构建都要求 TAURI_SIGNING_PRIVATE_KEY（lanmark-desktop.sh
+      # 的 --no-bundle 不受影响，但裸 build 会挂）。overlay 只影响这一处 CI 构建。
+      - name: Build NSIS + updater 资产
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: >
+          pnpm tauri build --bundles nsis
+          --config '{"bundle":{"createUpdaterArtifacts":true}}'
+      # latest.json：updater 插件的静态清单（端点固定指向
+      # releases/latest/download/latest.json，始终解析到最新一版）。
+      # signature 必须是 .sig 文件的**内容**（不是路径/URL）。
+      - name: 生成 latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          TAG="${GITHUB_REF_NAME}"
+          SETUP=$(ls src-tauri/target/release/bundle/nsis/*.exe | head -n1)
+          SIG=$(cat "${SETUP}.sig")
+          URL="https://github.com/observer130/lanmark/releases/download/${TAG}/$(basename "$SETUP")"
+          NOTES=$(gh release view "$TAG" --json body --jq .body 2>/dev/null | head -c 500 || true)
+          jq -n --arg v "$VERSION" --arg notes "$NOTES" --arg sig "$SIG" --arg url "$URL" \
+            '{version: $v, notes: $notes, pub_date: (now | todate),
+              platforms: { "windows-x86_64": { signature: $sig, url: $url } } }' > latest.json
+          cat latest.json
       - uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/bundle/nsis/*.exe
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            latest.json
           fail_on_unmatched_files: true
 
   android:

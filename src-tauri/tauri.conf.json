@@ -34,5 +34,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJEQzUzMzY1NDY0QjY2MUEKUldRYVprdEdaVFBGdll6NzZkRzFTV0c3eUxsT052dVVJOFE1SUl3UFh5UXpSMGsxbVpOYmI2cVoK",
+      "endpoints": [
+        "https://github.com/observer130/lanmark/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
