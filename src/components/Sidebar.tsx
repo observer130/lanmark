@@ -18,7 +18,7 @@ import { useSettingsStore } from "../stores/settings";
 import { CreateDialog } from "./CreateDialog";
 import { AppMark } from "./AppMark";
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
-import { parentDir, type PathTitle, type TrashEntry } from "../lib/vault";
+import type { PathTitle, TrashEntry } from "../lib/vault";
 
 /** 收藏/回收站收起时的预览条数（v0.5.1：默认 3 条 + 窄展开栏） */
 const SECTION_PREVIEW = 3;
@@ -123,27 +123,25 @@ function relTime(ms: number | null): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** 回收站条目行：名 + 时间·来源副标题 + 常驻恢复按钮（手机无 hover，不能靠显隐） */
+/** 回收站条目行：与收藏/最近同构的单行（统一高度）；来源/删除时刻收进 hover 提示 */
 function TrashRow({ item, onRestore }: { item: TrashEntry; onRestore: (p: string) => void }) {
-  // 来源统一取父目录展示：笔记「研发/会议.md」→ 研发；根目录笔记/文件夹 → 根目录。
-  // origin 为 null（无来源记录，恢复会落根目录）则不显示来源。
-  const from = item.origin ? parentDir(item.origin) : null;
+  const tip =
+    (item.origin ? `来自 ${item.origin}` : "无来源记录（恢复到根目录）") +
+    (item.deletedAt !== null ? ` · 删除于 ${relTime(item.deletedAt)}` : "");
   return (
-    <li className="flex min-h-[44px] items-center gap-2 rounded-lg py-1 pl-2.5 pr-1 hover:bg-canvas md:min-h-0">
+    <li
+      title={tip}
+      className="flex min-h-[44px] items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-ink-2 hover:bg-canvas hover:text-ink md:min-h-0"
+    >
       <span className="shrink-0 text-ink-3">
-        {item.kind === "folder" ? <Folder size={15} /> : <FileText size={14} />}
+        {item.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm text-ink">{item.name}</span>
-        <span className="block truncate text-[11px] text-ink-3">
-          {relTime(item.deletedAt)}
-          {from !== null ? ` · 来自 ${from || "根目录"}` : ""}
-        </span>
-      </span>
+      <span className="min-w-0 flex-1 truncate">{item.name}</span>
+      {/* 常驻（手机无 hover 不能靠显隐）；md:h-5 与树行内联按钮同尺寸，不撑高行 */}
       <button
         title="恢复"
         aria-label={`恢复 ${item.name}`}
-        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-3 hover:bg-line/60 hover:text-ink md:h-6 md:w-6"
+        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-3 hover:bg-line/60 hover:text-ink md:h-5 md:w-5"
         onClick={() => onRestore(item.trashPath)}
       >
         <RotateCcw size={13} />
