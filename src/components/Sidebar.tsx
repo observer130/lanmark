@@ -168,14 +168,18 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             <SectionLabel>最近</SectionLabel>
             <MetaList items={recents} onOpen={openNoteAndClose} />
 
-            {/* 笔记本树：新建入口统一在标题右侧（交互修正，见 design/direction-approved.md）；
-                点击弹对话框（命名 + 配色 / 选位置），不再「先建默认名再内联重命名」 */}
+            {/* 笔记本树：新建入口统一在标题右侧。
+                点击弹对话框（命名 + 选位置），不再「先建默认名再内联重命名」。
+                M4i：手机上这里是**唯一**的新建入口 —— 曾加过编辑器右下角的
+                悬浮按钮（FAB），但它悬在正文上挡字，且「新建」是导航/管理动作，
+                属于侧栏而非编辑器，已移除。按钮触控尺寸 44px（硬约定 13）。 */}
             <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
               <span className="text-[11px] font-medium text-ink-3">笔记本</span>
               <span className="flex gap-0.5">
                 <button
                   title="新建笔记"
-                  className="flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink"
+                  aria-label="新建笔记"
+                  className="flex h-11 items-center gap-1 rounded-md px-2 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink md:h-7 md:px-1.5 md:py-0.5"
                   onClick={() => openCreate("note", "")}
                 >
                   <Plus size={12} />
@@ -183,7 +187,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                 </button>
                 <button
                   title="新建文件夹"
-                  className="flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink"
+                  aria-label="新建文件夹"
+                  className="flex h-11 items-center gap-1 rounded-md px-2 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink md:h-7 md:px-1.5 md:py-0.5"
                   onClick={() => openCreate("folder", "")}
                 >
                   <FolderPlus size={12} />

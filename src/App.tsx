@@ -6,7 +6,6 @@ import { useSyncStore } from "./stores/sync";
 import { useSettingsStore } from "./stores/settings";
 import { isAndroid } from "./lib/sync";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./components/WindowControls";
-import { NewEntryFab } from "./components/NewEntryFab";
 import { listenBackPress, reportBackHandler } from "./stores/back";
 import { VaultPicker } from "./components/VaultPicker";
 import { Sidebar } from "./components/Sidebar";
@@ -218,8 +217,6 @@ function App() {
             <div className="flex min-w-0 flex-1 flex-col">
               <EditorPane narrow={narrow} />
             </div>
-            {/* M4i：右下角新建 FAB（手机上原入口在标题行右侧，太小且够不到） */}
-            <NewEntryFab />
           </>
         ) : (
           <>

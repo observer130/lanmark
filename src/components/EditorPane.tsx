@@ -255,7 +255,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           <div
             onMouseDown={dragWindow}
             className={`flex items-center gap-2 py-2.5 ${
-              narrow ? "pl-14 pr-2" : "px-4"
+              narrow ? "pl-[72px] pr-2" : "px-4"
             }`}
           >
             <span className="flex-1" />
@@ -288,7 +288,9 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
       <div
         onMouseDown={isLinuxDesktop ? dragWindow : undefined}
         className={`flex items-center gap-2 py-2.5 ${
-          narrow ? "pl-14 pr-2" : "px-4"
+          // 窄屏：左侧让出悬浮汉堡按钮（left-3 + 44px = 占 12~56px），
+          // 再留 16px 间隙 —— 原先 pl-14(56px) 让面包屑正好贴在按钮右边缘
+          narrow ? "pl-[72px] pr-2" : "px-4"
         }`}
       >
         <div

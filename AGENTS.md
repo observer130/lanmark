@@ -42,7 +42,7 @@ Android 相关的非显然几条：
 
 | 位置 | 内容 |
 |---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `NewEntryFab`（移动端新建 FAB，仅窄屏渲染）· `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
+| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
 | `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量 + 回滚）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
 | `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`settings.ts`（字体栈与枚举→像素映射的**唯一来源** + `applyCssVars`）、`bridge.ts` |
 | `src/milkdown/roundtrip.test.ts` | 编辑器往返保真护栏（M1 决策门） |
@@ -96,7 +96,7 @@ Android 相关的非显然几条：
 11. **外观设置只走 CSS 变量，绝不进编辑器 `key`**（M4b 定，docs/08 §9 R2）：改字体/字号不得重建 Crepe 实例——建实例会发伪 `markdownUpdated`，等于把打开着的笔记重写一遍（硬约定 3）。`editorKey(path, mode)` 是这条的护栏函数，`settings.test.ts` 有用例钉住；`applyCssVars`（`src/lib/settings.ts`）是唯一写入点。
 12. **应用图标改一处要改全套，UI 内品牌标走 `AppMark`**：图标有 4 处独立副本——`src-tauri/icons/`（Tauri 打包位图 + SVG + 桌面 entry 图标）、`scripts/gen-icon.py`、**`src/components/AppMark.tsx`**（界面内联矢量）、`public/app-icon.svg`（favicon）、`src-tauri/gen/android/**/mipmap-*`（Android 自适应层，手工维护）。a6a5a13 换图标时只换了前两处，界面里手写的「蓝底白 L」占位块漏改（就是这个 bug），**别再手写 `bg-accent` + 文字当 logo**。投影用 `index.css` 的 `.lanmark-appmark`（`filter: drop-shadow`），不用 `shadow-*`：那是 `box-shadow`，会按 svg 矩形边界投影，圆角外的透明四角露出直角阴影。`scripts/gen-icon.py` 必须与设计源 `icon.svg` 同步更新——它是「重跑即回退」的陷阱（旧版画的是白 L）。
 
-13. **移动端（窄屏）UI 按触屏做，不做「桌面布局缩小版」**（M4i 定）：触控目标 **≥44px**（树行 / 搜索框 / 菜单项 / 图标按钮）；手机上**没有 hover**，依赖 `group-hover` 的控件等于不可达——行级操作走**长按 `contextmenu`**（真机实测 WebView 长按会派发该事件）。侧栏在窄屏是 **85vw 半屏抽屉 + 遮罩**（Gmail / Obsidian Mobile 式，此前是全屏铺满，右侧无可点遮罩区，是「像桌面端」的根因）。新建入口走右下角 **FAB**（原在分区标题右侧，手机上 ~20px 高、单手够不到）。
+13. **移动端（窄屏）UI 按触屏做，不做「桌面布局缩小版」**（M4i 定）：触控目标 **≥44px**（树行 / 搜索框 / 菜单项 / 图标按钮）；手机上**没有 hover**，依赖 `group-hover` 的控件等于不可达——行级操作走**长按 `contextmenu`**（真机实测 WebView 长按会派发该事件）。侧栏在窄屏是 **85vw 半屏抽屉 + 遮罩**（Gmail / Obsidian Mobile 式，此前是全屏铺满，右侧无可点遮罩区，是「像桌面端」的根因）。**新建入口留在侧栏「笔记本」标题右侧**（M4i：曾加过编辑器右下角 FAB，因悬在正文上挡字、且「新建」属导航/管理动作而非编辑器行为而移除——别再加回来）。
     返回手势：**有浮层先关浮层，没有就正常退出**，**不做「再划一次退出」**——两段式是把侧栏当一级菜单页的设计，半屏浮层下不成立（M4i 中途推翻）。
     `src/index.css` 的窄屏块里有三条手机端适配（去点击高亮蓝块 / `overscroll-behavior: contain` / `text-size-adjust`），别顺手删。
 14. **Android 返回键要拦两条路，且事件不走插件通道**：`generated/TauriActivity.kt` 把 `handleBackNavigation` 覆盖成 **false**，返回默认直接 finish、前端收不到任何事件。自拦时必须同时覆盖 **`OnBackPressedCallback`** 与 **`dispatchKeyEvent`**——部分 ROM（真机 2510DRK44C / Android 16 的 MIUI）把返回键转成广播 `miui.intent.KEYCODE_BACK`，**不派发给 `OnBackPressedDispatcher`**，只注册回调根本不触发。
