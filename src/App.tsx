@@ -103,10 +103,20 @@ function App() {
     // M4a：设置在启动时与 vault.init() 并行加载；拿到结果立即写 CSS 变量
     // （不能等 vault 打开——首启页也要按用户字号渲染）
     void useSettingsStore.getState().load();
-    // 窗口关闭前尽力落盘（best effort）
+    // 退出/切后台前尽力落盘（best effort）。M5-3 自动保存档位调大到最长 20s 后，
+    // 只靠 beforeunload 不够：Android 返回退出/划掉时 WebView 常不发 beforeunload，
+    // 但会先走 visibilitychange → hidden。saveNow 在非 dirty 时是幂等 no-op，
+    // 切后台多触发几次没有副作用，反而把「待保存窗口」压到最短。
     const flush = () => void useVaultStore.getState().saveNow();
+    const flushOnHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
     window.addEventListener("beforeunload", flush);
-    return () => window.removeEventListener("beforeunload", flush);
+    document.addEventListener("visibilitychange", flushOnHide);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      document.removeEventListener("visibilitychange", flushOnHide);
+    };
   }, []);
 
   // M3f：手机端是同步服务器，远端 push/delete 会改动本地 vault（Rust 侧

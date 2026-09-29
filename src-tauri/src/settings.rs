@@ -17,7 +17,8 @@ const LINE_HEIGHT_KEYS: [&str; 3] = ["compact", "normal", "relaxed"];
 const EDITOR_MODE_KEYS: [&str; 3] = ["read", "wysiwyg", "source"];
 const NEW_NOTE_LOCATION_KEYS: [&str; 2] = ["root", "last"];
 /// 自动保存延迟档位（ms）：仅改防抖时长，不改尾沿纪律（docs/08 §3.2 B2）。
-const AUTOSAVE_KEYS: [u32; 4] = [300, 700, 1500, 3000];
+/// M5-3 整体调大（原 0.3/0.7/1.5/3s）；旧值归一到最近档（见 `nearest_autosave`）。
+const AUTOSAVE_KEYS: [u32; 4] = [1500, 3000, 10_000, 20_000];
 
 // ---------- 数据结构 ----------
 
@@ -66,7 +67,8 @@ impl Default for EditorPrefs {
     fn default() -> Self {
         Self {
             default_mode: "wysiwyg".into(),
-            autosave_ms: 700,
+            // M5-3：默认 3s（原 700ms；档位整体调大，用户仍可选手动档）
+            autosave_ms: 3000,
             source_line_numbers: true,
             new_note_location: "root".into(),
         }
@@ -122,12 +124,22 @@ impl Appearance {
     }
 }
 
+/// 自动保存延迟归一到**最近档**（M5-3）：存量用户的 0.3/0.7s 档归到 1.5s，
+/// 而不是一律回默认 3s——保留「用户选了快档」的意图。并列距离取先出现的档。
+fn nearest_autosave(ms: u32) -> u32 {
+    let mut best = AUTOSAVE_KEYS[0];
+    for &k in &AUTOSAVE_KEYS {
+        if (i64::from(ms) - i64::from(k)).abs() < (i64::from(ms) - i64::from(best)).abs() {
+            best = k;
+        }
+    }
+    best
+}
+
 impl EditorPrefs {
     pub fn normalize(mut self) -> Self {
         self.default_mode = pick(&self.default_mode, &EDITOR_MODE_KEYS, "wysiwyg");
-        if !AUTOSAVE_KEYS.contains(&self.autosave_ms) {
-            self.autosave_ms = 700;
-        }
+        self.autosave_ms = nearest_autosave(self.autosave_ms);
         self.new_note_location = pick(&self.new_note_location, &NEW_NOTE_LOCATION_KEYS, "root");
         self
     }
@@ -167,7 +179,7 @@ mod tests {
         assert_eq!(a.line_height, "normal"); // 1.75
         let e = EditorPrefs::default();
         assert_eq!(e.default_mode, "wysiwyg");
-        assert_eq!(e.autosave_ms, 700); // 原 SAVE_DEBOUNCE_MS
+        assert_eq!(e.autosave_ms, 3000); // M5-3 默认档（原 SAVE_DEBOUNCE_MS 700）
         assert!(e.source_line_numbers);
         assert_eq!(e.new_note_location, "root");
         assert_eq!(StoragePrefs::default().trash_retention_days, 30);
@@ -191,8 +203,21 @@ mod tests {
         }
         .normalize();
         assert_eq!(e.default_mode, "wysiwyg");
-        assert_eq!(e.autosave_ms, 700);
+        assert_eq!(e.autosave_ms, 1500, "非法值归到最近档（不再按默认回退）");
         assert_eq!(e.new_note_location, "root");
+    }
+
+    #[test]
+    fn autosave_maps_to_nearest_gear() {
+        // M5-3：旧档位与任意值都归到最近档，保留「选了快档」的意图
+        assert_eq!(nearest_autosave(300), 1500);
+        assert_eq!(nearest_autosave(700), 1500);
+        assert_eq!(nearest_autosave(1200), 1500);
+        assert_eq!(nearest_autosave(3000), 3000, "档位值原样保留");
+        assert_eq!(nearest_autosave(4000), 3000);
+        assert_eq!(nearest_autosave(15_000), 10_000);
+        assert_eq!(nearest_autosave(25_000), 20_000);
+        assert_eq!(nearest_autosave(0), 1500);
     }
 
     #[test]
@@ -226,7 +251,7 @@ mod tests {
             editor: Some(EditorPrefs { autosave_ms: 1, ..EditorPrefs::default() }),
             ..Default::default()
         });
-        assert_eq!(patched.editor.autosave_ms, 700);
+        assert_eq!(patched.editor.autosave_ms, 1500);
     }
 
     #[test]
@@ -254,7 +279,7 @@ mod tests {
         let s: Settings = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.appearance.text_size, "lg");
         assert_eq!(s.appearance.line_height, "normal");
-        assert_eq!(s.editor.autosave_ms, 700);
+        assert_eq!(s.editor.autosave_ms, 3000);
         // 完全空对象
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());

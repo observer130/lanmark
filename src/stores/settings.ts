@@ -29,7 +29,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
 
 export const DEFAULT_EDITOR: EditorPrefs = {
   defaultMode: "wysiwyg",
-  autosaveMs: 700,
+  autosaveMs: 3000,
   sourceLineNumbers: true,
   newNoteLocation: "root",
 };

@@ -69,7 +69,7 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     useSettingsStore.setState({
       settings: {
         appearance: DEFAULT_APPEARANCE,
-        editor: { defaultMode: "wysiwyg", autosaveMs: 700, sourceLineNumbers: true, newNoteLocation: "root" },
+        editor: { defaultMode: "wysiwyg", autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" },
         storage: { trashRetentionDays: 30 },
       },
       loading: true,
@@ -197,7 +197,7 @@ describe("E4：恢复默认设置只重置设置小节", () => {
   it("reset 走 IPC 并以返回值为准", async () => {
     invoke.mockResolvedValueOnce({
       appearance: DEFAULT_APPEARANCE,
-      editor: { defaultMode: "wysiwyg", autosaveMs: 700, sourceLineNumbers: true, newNoteLocation: "root" },
+      editor: { defaultMode: "wysiwyg", autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" },
       storage: { trashRetentionDays: 30 },
     });
     useSettingsStore.setState({
@@ -211,7 +211,7 @@ describe("E4：恢复默认设置只重置设置小节", () => {
     expect(invoke.mock.calls[0][0]).toBe("settings_reset");
     const s = useSettingsStore.getState().settings;
     expect(s.appearance.textSize).toBe("md");
-    expect(s.editor.autosaveMs).toBe(700);
+    expect(s.editor.autosaveMs).toBe(3000);
     expect(s.storage.trashRetentionDays).toBe(30);
     // CSS 变量随之复位
     expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("16px");
@@ -220,7 +220,7 @@ describe("E4：恢复默认设置只重置设置小节", () => {
   it("reset 失败 → 回滚到上一版设置与变量", async () => {
     const prev = {
       appearance: { ...DEFAULT_APPEARANCE, textSize: "lg" as const },
-      editor: { defaultMode: "wysiwyg" as const, autosaveMs: 700, sourceLineNumbers: true, newNoteLocation: "root" as const },
+      editor: { defaultMode: "wysiwyg" as const, autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" as const },
       storage: { trashRetentionDays: 30 },
     };
     useSettingsStore.setState({ settings: prev });

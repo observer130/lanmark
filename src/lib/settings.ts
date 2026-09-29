@@ -79,11 +79,12 @@ export const LINE_HEIGHT_OPTIONS: { key: LineHeightKey; label: string }[] = [
   { key: "relaxed", label: "宽松" },
 ];
 
+/** 自动保存延迟档位（M5-3 整体调大：原 0.3/0.7/1.5/3s；旧值由 Rust 归一到最近档） */
 export const AUTOSAVE_OPTIONS: { key: number; label: string }[] = [
-  { key: 300, label: "0.3 秒" },
-  { key: 700, label: "0.7 秒" },
   { key: 1500, label: "1.5 秒" },
   { key: 3000, label: "3 秒" },
+  { key: 10000, label: "10 秒" },
+  { key: 20000, label: "20 秒" },
 ];
 
 export const EDITOR_MODE_OPTIONS: { key: EditorMode; label: string }[] = [

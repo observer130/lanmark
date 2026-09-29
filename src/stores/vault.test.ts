@@ -161,8 +161,11 @@ describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
       // t=700：旧「首击锚定」实现在此已落盘（句中半成品）
       await vi.advanceTimersByTimeAsync(600);
       expect(writeNote).not.toHaveBeenCalled();
-      // t=800 = 最后一次输入(100) + 700
+      // t=800：旧默认 700ms 的尾沿在此也该落盘 → M5-3 默认 3s，仍未落盘
       await vi.advanceTimersByTimeAsync(100);
+      expect(writeNote).not.toHaveBeenCalled();
+      // t=3100 = 最后一次输入(100) + 3000（M5-3 默认档）
+      await vi.advanceTimersByTimeAsync(2300);
       expect(writeNote).toHaveBeenCalledTimes(1);
       expect(writeNote).toHaveBeenCalledWith("a.md", "ab");
     } finally {
