@@ -3,9 +3,11 @@ import {
   ArrowLeft,
   Check,
   Copy,
+  Download,
   FolderOpen,
   HardDrive,
   Info,
+  Loader2,
   Monitor,
   Palette,
   Pencil,
@@ -15,7 +17,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useSettingsStore, type SectionKey } from "../stores/settings";
+import { useUpdateStore } from "../stores/update";
 import { useVaultStore } from "../stores/vault";
 import { vault, type AppInfo, type VaultStats } from "../lib/vault";
 import { isAndroid } from "../lib/sync";
@@ -441,6 +445,67 @@ function SyncSection2() {
   );
 }
 
+/** M5-4 更新组：自动检查开关 + 手动检查 + 结果（发现新版只在这里提示）。
+ *  应用内安装是 M5-5/5-6 的活；当前统一提供「打开发布页」兜底。 */
+function UpdateGroup() {
+  const info = useUpdateStore((s) => s.info);
+  const checking = useUpdateStore((s) => s.checking);
+  const error = useUpdateStore((s) => s.error);
+  const checkNow = useUpdateStore((s) => s.checkNow);
+  const autoCheck = useSettingsStore((s) => s.settings.update.autoCheck);
+  const patch = useSettingsStore((s) => s.patch);
+
+  const openReleasePage = (url: string) => {
+    void openUrl(url).catch((e) => useUpdateStore.setState({ error: String(e) }));
+  };
+  const hint = info?.checkedAtMs
+    ? `上次检查 ${new Date(info.checkedAtMs).toLocaleString()}`
+    : "从未检查";
+
+  return (
+    <Group title="更新">
+      <Row label="自动检查更新" hint="每天最多一次，启动时静默进行">
+        <Switch
+          on={autoCheck}
+          label="自动检查更新"
+          onToggle={() => void patch({ update: { autoCheck: !autoCheck } })}
+        />
+      </Row>
+      <Row label="检查更新" hint={hint}>
+        <button
+          disabled={checking}
+          onClick={() => void checkNow()}
+          className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-2 hover:bg-canvas hover:text-ink disabled:opacity-50"
+        >
+          {checking ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+          {checking ? "检查中…" : "检查更新"}
+        </button>
+      </Row>
+      {error && (
+        <Row label="检查失败">
+          <span className="max-w-[22rem] break-all text-xs text-red-500">{error}</span>
+        </Row>
+      )}
+      {info?.hasUpdate && info.latestVersion && (
+        <Row label={`发现新版本 v${info.latestVersion}`} hint={info.notes ?? undefined}>
+          <button
+            onClick={() => info.htmlUrl && openReleasePage(info.htmlUrl)}
+            className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text"
+          >
+            <Download size={13} />
+            打开发布页
+          </button>
+        </Row>
+      )}
+      {info && !info.hasUpdate && !info.skipped && (
+        <Row label="检查结果">
+          <span className="text-xs text-ink-2">已是最新</span>
+        </Row>
+      )}
+    </Group>
+  );
+}
+
 function AboutSection() {
   const reset = useSettingsStore((s) => s.reset);
   const settings = useSettingsStore((s) => s.settings);
@@ -556,11 +621,12 @@ function AboutSection() {
           </button>
         </Row>
       </Group>
+      <UpdateGroup />
       <Group title="重置">
         <Row label="恢复默认设置" hint="保留笔记库位置与已配对设备">
           <button
             onClick={() => {
-              if (window.confirm("恢复默认设置？\n\n外观与编辑器偏好将回到默认值；笔记库位置与已配对设备保留。")) {
+              if (window.confirm("恢复默认设置？\n\n外观、编辑器与更新偏好将回到默认值；笔记库位置与已配对设备保留。")) {
                 void reset();
               }
             }}

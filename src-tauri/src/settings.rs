@@ -54,6 +54,26 @@ pub struct StoragePrefs {
     pub trash_retention_days: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdatePrefs {
+    /// 启动时自动检查更新（≥24h 节流；时间戳在 AppConfig.last_update_check_ms）
+    pub auto_check: bool,
+}
+
+impl Default for UpdatePrefs {
+    fn default() -> Self {
+        Self { auto_check: true }
+    }
+}
+
+impl UpdatePrefs {
+    /// 布尔开关无非法值；归一化占位保持三小节同构
+    pub fn normalize(self) -> Self {
+        self
+    }
+}
+
 impl Default for Appearance {
     fn default() -> Self {
         Self {
@@ -90,6 +110,8 @@ pub struct Settings {
     pub appearance: Appearance,
     pub editor: EditorPrefs,
     pub storage: StoragePrefs,
+    /// M5-4：更新检测偏好（检测本体在 `update.rs`）
+    pub update: UpdatePrefs,
 }
 
 /// patch 入参：**传入即整体替换该小节**（缺省 = 该小节不动）。
@@ -100,6 +122,7 @@ pub struct SettingsPatch {
     pub appearance: Option<Appearance>,
     pub editor: Option<EditorPrefs>,
     pub storage: Option<StoragePrefs>,
+    pub update: Option<UpdatePrefs>,
 }
 
 // ---------- 归一化 ----------
@@ -163,6 +186,7 @@ impl Settings {
             appearance: patch.appearance.unwrap_or(self.appearance).normalize(),
             editor: patch.editor.unwrap_or(self.editor).normalize(),
             storage: patch.storage.unwrap_or(self.storage).normalize(),
+            update: patch.update.unwrap_or(self.update).normalize(),
         }
     }
 }

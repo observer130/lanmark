@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{Appearance, EditorPrefs, Settings, StoragePrefs};
+use crate::settings::{Appearance, EditorPrefs, Settings, StoragePrefs, UpdatePrefs};
 
 /// 运行时共享状态：当前 vault 路径 + 它的索引连接。
 /// 以 Arc 形式 manage 进 Tauri（Mutex 不可 Clone，无法直接 clone 状态结构体）。
@@ -45,6 +45,11 @@ pub struct AppConfig {
     pub editor: EditorPrefs,
     /// M4a：存储策略（回收站保留天数）
     pub storage: StoragePrefs,
+    /// M5-4：更新检测偏好（上次检查时间戳也在本结构：`last_update_check_ms`）
+    pub update: UpdatePrefs,
+    /// M5-4：上次更新检查的 unix ms（0 = 从未）；serde default 兼容旧配置
+    #[serde(default)]
+    pub last_update_check_ms: u64,
     /// M4h-4：设备代号（局域网内标识本机；设备级，换库不变）。
     /// 空串 = 未初始化（读侧 `alias::current_alias` 落默认词表代号）。
     #[serde(default)]
@@ -59,18 +64,22 @@ impl Default for AppConfig {
             appearance: Appearance::default(),
             editor: EditorPrefs::default(),
             storage: StoragePrefs::default(),
+            update: UpdatePrefs::default(),
+            // M5-4：上次更新检查的 unix ms（0 = 从未）；serde default 兼容旧配置
+            last_update_check_ms: 0,
             device_alias: String::new(),
         }
     }
 }
 
 impl AppConfig {
-    /// 取出设置三小节（供 `settings_get`）
+    /// 取出设置小节（供 `settings_get`；不含 vaultPath/syncAuto/更新时间戳）
     pub fn settings(&self) -> Settings {
         Settings {
             appearance: self.appearance.clone(),
             editor: self.editor.clone(),
             storage: self.storage.clone(),
+            update: self.update.clone(),
         }
     }
 }

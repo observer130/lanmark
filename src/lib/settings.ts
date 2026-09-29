@@ -39,10 +39,16 @@ export interface StoragePrefs {
   trashRetentionDays: number;
 }
 
+export interface UpdatePrefs {
+  /** 启动时自动检查更新（≥24h 节流；时间戳在 Rust AppConfig.last_update_check_ms） */
+  autoCheck: boolean;
+}
+
 export interface Settings {
   appearance: Appearance;
   editor: EditorPrefs;
   storage: StoragePrefs;
+  update: UpdatePrefs;
 }
 
 /** patch 入参：传入的小节**整体替换**，未传的保持原值 */
@@ -50,6 +56,7 @@ export interface SettingsPatch {
   appearance?: Appearance;
   editor?: EditorPrefs;
   storage?: StoragePrefs;
+  update?: UpdatePrefs;
 }
 
 /* ── 枚举 → 数值（四档，docs/08 §3.1） ── */

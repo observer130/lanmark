@@ -7,6 +7,7 @@ import {
   type Settings,
   type SettingsPatch,
   type StoragePrefs,
+  type UpdatePrefs,
 } from "../lib/settings";
 
 /**
@@ -36,10 +37,13 @@ export const DEFAULT_EDITOR: EditorPrefs = {
 
 export const DEFAULT_STORAGE: StoragePrefs = { trashRetentionDays: 30 };
 
+export const DEFAULT_UPDATE: UpdatePrefs = { autoCheck: true };
+
 export const DEFAULT_SETTINGS: Settings = {
   appearance: DEFAULT_APPEARANCE,
   editor: DEFAULT_EDITOR,
   storage: DEFAULT_STORAGE,
+  update: DEFAULT_UPDATE,
 };
 
 interface SettingsStore {
@@ -111,6 +115,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       appearance: patch.appearance ?? prev.appearance,
       editor: patch.editor ?? prev.editor,
       storage: patch.storage ?? prev.storage,
+      update: patch.update ?? prev.update,
     };
     set({ settings: optimistic });
     applyCssVars(optimistic.appearance);

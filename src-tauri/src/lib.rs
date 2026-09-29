@@ -13,6 +13,7 @@ mod settings_cmd;
 mod sync;
 mod sync_client;
 mod sync_server;
+mod update;
 mod vault;
 
 use std::path::PathBuf;
@@ -157,6 +158,8 @@ pub fn run() {
             mobile::vault_picker_pick_folder,
             // M4i：前端上报「当前返回该做什么」（浮层状态变化时下发）
             mobile::set_ui_back_handler,
+            // M5-4：GitHub release 更新检测（关于页）
+            update::update_check,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

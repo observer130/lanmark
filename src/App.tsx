@@ -4,6 +4,7 @@ import { Menu, TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
 import { useSyncStore } from "./stores/sync";
 import { useSettingsStore } from "./stores/settings";
+import { useUpdateStore } from "./stores/update";
 import { isAndroid } from "./lib/sync";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./components/WindowControls";
 import { listenBackPress, reportBackHandler } from "./stores/back";
@@ -101,8 +102,13 @@ function App() {
     void useVaultStore.getState().init();
     void useSyncStore.getState().loadSyncAuto();
     // M4a：设置在启动时与 vault.init() 并行加载；拿到结果立即写 CSS 变量
-    // （不能等 vault 打开——首启页也要按用户字号渲染）
-    void useSettingsStore.getState().load();
+    // （不能等 vault 打开——首启页也要按用户字号渲染）。
+    // M5-4：设置加载完成后才启动自动更新检查（autoCheck 依赖 update.autoCheck
+    // 开关的落盘值，链式保证不读默认值）
+    void useSettingsStore
+      .getState()
+      .load()
+      .then(() => useUpdateStore.getState().autoCheck());
     // 退出/切后台前尽力落盘（best effort）。M5-3 自动保存档位调大到最长 20s 后，
     // 只靠 beforeunload 不够：Android 返回退出/划掉时 WebView 常不发 beforeunload，
     // 但会先走 visibilitychange → hidden。saveNow 在非 dirty 时是幂等 no-op，

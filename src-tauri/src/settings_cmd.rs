@@ -14,13 +14,14 @@ pub fn settings_read_op(cfg: &AppConfig) -> Settings {
     cfg.settings()
 }
 
-/// 纯逻辑：应用 patch 到配置（原地改三小节，不动 vault_path / sync_auto）。
+/// 纯逻辑：应用 patch 到配置（原地改各小节，不动 vault_path / sync_auto）。
 pub fn settings_apply_op(cfg: &mut AppConfig, patch: SettingsPatch) -> Settings {
     let cur = cfg.settings();
     let next = cur.apply(patch);
     cfg.appearance = next.appearance.clone();
     cfg.editor = next.editor.clone();
     cfg.storage = next.storage.clone();
+    cfg.update = next.update.clone();
     next
 }
 
@@ -75,7 +76,7 @@ pub fn device_alias_set(app: tauri::AppHandle, alias: String) -> CmdResult<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Appearance, EditorPrefs, StoragePrefs};
+    use crate::settings::{Appearance, EditorPrefs, StoragePrefs, UpdatePrefs};
 
     #[test]
     fn patch_touches_only_target_section() {
@@ -109,12 +110,14 @@ mod tests {
                 appearance: Some(Appearance::default()),
                 editor: Some(EditorPrefs { autosave_ms: 1500, ..EditorPrefs::default() }),
                 storage: Some(StoragePrefs { trash_retention_days: 7 }),
+                update: Some(UpdatePrefs { auto_check: false }),
             },
         );
         assert_eq!(cfg.vault_path.as_deref(), Some("/home/u/notes"));
         assert!(!cfg.sync_auto);
         assert_eq!(cfg.editor.autosave_ms, 1500);
         assert_eq!(cfg.storage.trash_retention_days, 7);
+        assert!(!cfg.update.auto_check);
     }
 
     #[test]
@@ -144,12 +147,15 @@ mod tests {
             appearance: Appearance { text_size: "xl".into(), line_height: "normal".into() },
             editor: EditorPrefs { autosave_ms: 3000, ..EditorPrefs::default() },
             storage: StoragePrefs { trash_retention_days: 0 },
+            update: UpdatePrefs { auto_check: false },
+            last_update_check_ms: 12345,
         };
         let out = settings_reset_op(&mut cfg);
         assert_eq!(out, Settings::default(), "设置回到默认");
         assert_eq!(cfg.vault_path.as_deref(), Some("/home/u/notes"), "换库配置不能丢");
         assert!(!cfg.sync_auto, "同步开关是 D1 独立项，恢复默认设置不动它");
         assert_eq!(cfg.device_alias, "青柠台机", "设备代号是身份，恢复默认设置不抹掉");
+        assert_eq!(cfg.last_update_check_ms, 0, "更新检查时间戳随重置清零");
     }
 
     #[test]

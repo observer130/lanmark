@@ -71,6 +71,7 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
         appearance: DEFAULT_APPEARANCE,
         editor: { defaultMode: "wysiwyg", autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" },
         storage: { trashRetentionDays: 30 },
+        update: { autoCheck: true },
       },
       loading: true,
       error: null,
@@ -199,12 +200,14 @@ describe("E4：恢复默认设置只重置设置小节", () => {
       appearance: DEFAULT_APPEARANCE,
       editor: { defaultMode: "wysiwyg", autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" },
       storage: { trashRetentionDays: 30 },
+      update: { autoCheck: true },
     });
     useSettingsStore.setState({
       settings: {
         appearance: { ...DEFAULT_APPEARANCE, textSize: "xl", lineHeight: "relaxed" },
         editor: { defaultMode: "source", autosaveMs: 3000, sourceLineNumbers: false, newNoteLocation: "last" },
         storage: { trashRetentionDays: 7 },
+        update: { autoCheck: true },
       },
     });
     await useSettingsStore.getState().reset();
@@ -222,6 +225,7 @@ describe("E4：恢复默认设置只重置设置小节", () => {
       appearance: { ...DEFAULT_APPEARANCE, textSize: "lg" as const },
       editor: { defaultMode: "wysiwyg" as const, autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" as const },
       storage: { trashRetentionDays: 30 },
+      update: { autoCheck: true },
     };
     useSettingsStore.setState({ settings: prev });
     invoke.mockRejectedValueOnce(new Error("写盘失败"));

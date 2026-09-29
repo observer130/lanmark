@@ -15,11 +15,12 @@ const SETTINGS: Settings = {
   },
   editor: {
     defaultMode: "wysiwyg",
-    autosaveMs: 700,
+    autosaveMs: 3000,
     sourceLineNumbers: true,
     newNoteLocation: "root",
   },
   storage: { trashRetentionDays: 30 },
+  update: { autoCheck: true },
 };
 
 function input(over: Partial<DiagnosticsInput> = {}): DiagnosticsInput {
