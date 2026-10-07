@@ -27,7 +27,9 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 4. `.cache` 同理：工具链/临时目录（TMP 也指向 .cache/tmp）文件高频变动，
+      //    watcher 扫到会 EBUSY 直接崩掉 dev server（2026-09-26 实测）
+      ignored: ["**/src-tauri/**", "**/.cache/**"],
     },
   },
 }));

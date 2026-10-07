@@ -32,6 +32,33 @@ fn ping(app: tauri::AppHandle, message: String) -> Result<bridge::EchoPayload, S
     Ok(payload)
 }
 
+/// 日志目标：debug 构建落仓库 `.cache/logs`（本机安全软件拦截未签名 dev exe
+/// 写 AppData，见 run() 内注释）；release 走标准 LogDir。其余平台恒为 LogDir。
+fn log_targets() -> Vec<tauri_plugin_log::Target> {
+    if cfg!(debug_assertions) && cfg!(target_os = "windows") {
+        // 编译期仓库根：cargo 的 cwd 是 src-tauri，上级即仓库（不依赖运行时 cwd）
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.cache/logs")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.cache/logs"));
+        let _ = std::fs::create_dir_all(&dir);
+        vec![
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                path: dir,
+                file_name: Some("lanmark".to_string()),
+            }),
+        ]
+    } else {
+        vec![
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                file_name: Some("lanmark".to_string()),
+            }),
+        ]
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = Arc::new(vault::AppState::default());
@@ -55,15 +82,14 @@ pub fn run() {
         .plugin(mobile::init())
         // M4i 返回手势（独立插件名 "back"，与 vault-picker 分开注册，见 mobile.rs）
         .plugin(mobile::init_back())
-        // 日志：stdout（无头 E2E / 终端可见 WebView console）+ 日志文件
+        // 日志：stdout（无头 E2E / 终端可见 WebView console）+ 日志文件。
+        // debug 构建日志落仓库 .cache/logs：本机安全软件（勒索防护类）会拦截
+        // 未签名 dev exe 写 AppData（CreateFile 直接 os error 5，release/CI 不受
+        // 影响——安装器路径有系统安装动作背书），且 .cache 归置符合硬约定 1。
+        // release 仍是标准 LogDir（app_log_dir）。
         .plugin(
             tauri_plugin_log::Builder::new()
-                .targets([
-                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
-                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
-                        file_name: Some("lanmark".to_string()),
-                    }),
-                ])
+                .targets(log_targets())
                 .build(),
         )
         .manage(state.clone())

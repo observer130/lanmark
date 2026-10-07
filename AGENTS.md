@@ -13,6 +13,7 @@
 source scripts/env.sh            # 构建环境（Android / 交叉编译前必跑）；兼容 zsh/bash
 
 pnpm dev                         # vite 开发
+pnpm tauri:dev                   # Windows 一键 tauri dev（pwsh；自动激活 .cache 工具链）
 pnpm build                       # tsc + vite build（tsc 即类型门禁）
 pnpm test                        # vitest run
 pnpm vitest run -t "往返"         # 按用例名过滤
@@ -24,6 +25,22 @@ cd src-tauri && cargo test --lib sync_server   # 按模块过滤
 
 scripts/android-check.sh         # Android 交叉编译门禁（不跑 gradle）
 ```
+
+**Windows 本机构建**（本机无全局 Rust/MSVC 时）：工具链已按硬约定 1 落在仓库 `.cache/`——
+`.cache\cargo`、`.cache\rustup`（rustup-init `-y --profile minimal --no-modify-path` 装 stable）与
+`.cache\vs-buildtools`（VS Build Tools，VCTools 工作负载 + Windows SDK）。pwsh 下先
+`. scripts/env.ps1` 再跑 `cargo`（它会捕获 vcvars64 的 INCLUDE/LIB/PATH 并缓存到
+`.cache\vcvars64.env`）；首次 `cargo check/test` 全量编译依赖树约十几分钟，之后增量秒级。
+`.cache\vs_BuildTools.exe` / `.cache\rustup-init.exe` 是安装器留存，删了不影响已装工具链。
+
+**Windows 本机跑 dev 一律用 `pnpm tauri:dev`**（`scripts/dev.ps1`）：它除激活工具链外，
+还把 `WEBVIEW2_USER_DATA_FOLDER` 指到 `.cache\webview-profile`——本机安全软件会拦截
+**未签名 dev exe** 读写 `%LOCALAPPDATA%\com.lanmark.app`（WebView2 报 0x800700AA /
+0x8000FFFF「资源在使用中/灾难性故障」，日志写入报 os error 5；安装版有签名/信誉背书
+不受影响，CI 亦然）。dev 构建的日志同样因此落到 `.cache\logs`（lib.rs 按
+`cfg!(debug_assertions)` 分流，release 仍是标准 LogDir）。裸跑 `pnpm tauri dev` 会复现拦截。
+`vite.config.ts` 的 `watch.ignored` 必须同时忽略 `src-tauri` 与 `.cache`：TMP 指向
+`.cache/tmp` 时链接器临时文件会让 watcher 直接 EBUSY 崩掉 dev server（2026-10-07 实测）。
 
 **没有 lint / format 工具**：仓库无 ESLint / Biome / prettier / rustfmt / clippy 配置，`lint` 脚本不存在，别去找。静态门禁只有 `tsc`（strict + `noUnusedLocals`/`noUnusedParameters`/`noFallthroughCasesInSwitch`）与 `cargo check`。风格沿用既有文件：TS 双引号 + 分号 + 2 空格缩进；Rust 走 rustfmt 默认。
 
@@ -49,7 +66,7 @@ Android 相关的非显然几条：
 | `src/index.css` | 设计 token（`:root` + `@theme`，「晨窗」浅色）与**全部 Crepe / CodeMirror 主题覆盖**；改编辑器外观先来这里 |
 | `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/**vault 统计与回收站清理**）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `settings`/`settings_cmd`（M4a 设备级偏好：结构 + 归一化 + 白名单，与 vault 无关）· `alias`（M4h-4 设备代号：词表生成/归一化/AppConfig 持久化/进程内缓存，语义对标 LocalSend alias）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `lan_scan`（M4h-1 LAN 并发探测发现）· `update`（M5-4 GitHub release 更新检测：纯逻辑版本比较 + 24h 节流进 AppConfig，`update_check` 命令）· `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
 | `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
-| `scripts/` | `env.sh`（构建环境，必 source）· `android-check.sh`（交叉编译门禁）· `cdp-eval.mjs`（真机 CDP）· `make-demo-vault.sh` · `lanmark-desktop.sh` · `gen-icon.py` · `install-desktop-entry.sh` |
+| `scripts/` | `env.sh`（构建环境，必 source）· `env.ps1`（Windows 等价物：.cache 工具链 + vcvars64 捕获）· `dev.ps1`（Windows 一键 `pnpm tauri:dev`，含 WEBVIEW2_USER_DATA_FOLDER 迁移，见「Windows 本机构建」）· `android-check.sh`（交叉编译门禁）· `cdp-eval.mjs`（真机 CDP）· `make-demo-vault.sh` · `lanmark-desktop.sh` · `gen-icon.py` · `install-desktop-entry.sh` |
 | `patches/` | vendor 的依赖补丁（tauri-runtime-wry，tauri#15671），见硬约定 9 |
 | `.github/workflows` | `build.yml`（改动检查）· `release.yml`（三端发版） |
 | `.cache/` | 全部工具链与缓存（已 gitignore）：cargo/rustup、pnpm、JDK 21、Android SDK/NDK、gradle、QA 截图 |
