@@ -6,6 +6,7 @@ import { useSyncStore } from "./stores/sync";
 import { useSettingsStore } from "./stores/settings";
 import { useUpdateStore } from "./stores/update";
 import { isAndroid } from "./lib/sync";
+import { installImeAnchorGuard } from "./lib/ime-anchor";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./components/WindowControls";
 import { listenBackPress, reportBackHandler } from "./stores/back";
 import { VaultPicker } from "./components/VaultPicker";
@@ -124,6 +125,12 @@ function App() {
       document.removeEventListener("visibilitychange", flushOnHide);
     };
   }, []);
+
+  // Windows / WebView2：鼠标拖拽缩放窗口后，输入法候选框会跑到屏幕左上角（浏览器进程侧
+  // 的 TSF 文本库丢了 caret 布局）。尺寸稳定后把当前可编辑元素重锚一次
+  // （blur → 等 60ms → focus），让渲染进程重发 TextInputState 把布局喂回去。
+  // 见 src/lib/ime-anchor.ts 的实测记录。
+  useEffect(() => installImeAnchorGuard(), []);
 
   // M3f：手机端是同步服务器，远端 push/delete 会改动本地 vault（Rust 侧
   // 成功后 emit lanmark:vault-changed）。手机无客户端循环（桌面 runRound
