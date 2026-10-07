@@ -929,14 +929,23 @@ fn tmp_path_for(abs: &Path) -> PathBuf {
 /// 「服务器到达顺序」——push/pull 落地时若不保留源端保存时间，服务器侧文件
 /// mtime 会被写成落地时刻，离线早改、晚上线的设备会被晚到的旧版覆盖）。
 /// `ms <= 0` 视为无效（读不到 mtime 的退化值），跳过不覆写。best effort。
+///
+/// Windows 注意：`File::open`（只读句柄）没有 FILE_WRITE_ATTRIBUTES，
+/// `set_times` 会 PermissionDenied——必须以写权限打开（2026-09-26 修复，
+/// 此前 Windows 桌面端 mtime 保真静默失效，被 `let _` 吞掉）。
 pub fn set_file_mtime(abs: &Path, ms: i64) {
     if ms <= 0 {
         return;
     }
     let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64);
     let times = std::fs::FileTimes::new().set_modified(t);
-    if let Ok(f) = std::fs::File::open(abs) {
-        let _ = f.set_times(times);
+    match std::fs::OpenOptions::new().write(true).open(abs) {
+        Ok(f) => {
+            if let Err(e) = f.set_times(times) {
+                log::warn!("set_file_mtime 失败 {}: {e}", abs.display());
+            }
+        }
+        Err(e) => log::warn!("set_file_mtime 打开失败 {}: {e}", abs.display()),
     }
 }
 

@@ -1777,7 +1777,13 @@ mod tests {
             fs_ops::write_note(vault, "p.md", content, conn).unwrap();
             let abs = vault.join("p.md");
             let times = std::fs::FileTimes::new().set_modified(t);
-            std::fs::File::open(&abs).unwrap().set_times(times).unwrap();
+            // Windows 上只读句柄无 FILE_WRITE_ATTRIBUTES → 写权限打开（同 sync_client set_mtime）
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&abs)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
             fs_ops::content_hash(content.as_bytes())
         };
         let make_pf = |path: &str, content: &str, mtime_ms: i64| PushFile {

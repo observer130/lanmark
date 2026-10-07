@@ -1505,12 +1505,18 @@ mod tests {
     }
 
     /// 测试：显式设定文件 mtime（LWW 仲裁确定性；真实场景由保存时间自然分布）
+    /// Windows 上只读句柄无 FILE_WRITE_ATTRIBUTES，set_times 会拒绝 → 写权限打开
     fn set_mtime(state: &Arc<AppState>, rel: &str, ms: i64) {
         let vault = state.vault.lock().unwrap().clone().unwrap();
         let abs = vault.join(rel);
         let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms.max(0) as u64);
         let times = std::fs::FileTimes::new().set_modified(t);
-        std::fs::File::open(&abs).unwrap().set_times(times).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&abs)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
     }
 
     /// 测试：vault 全量快照（相对路径 → 内容 hash；跳过点目录与孤儿 tmp）
