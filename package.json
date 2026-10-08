@@ -9,7 +9,7 @@
     "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "pwsh -NoProfile -File scripts/dev.ps1"
+    "tauri:dev": "node scripts/dev.mjs"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.2",

@@ -1,7 +1,8 @@
 # Windows 一键 tauri dev：先激活 .cache 工具链（cargo + MSVC），再转发 pnpm tauri dev。
 # 用法: pnpm tauri:dev            （等价于下面两步的手工版：）
 #       . .\scripts\env.ps1 ; pnpm tauri dev
-# Linux 用户不受影响：继续 `source scripts/env.sh && pnpm tauri dev`。
+# 入口是跨平台的 scripts/dev.mjs：Windows 分发到这里，Linux/macOS 分发到
+# `source scripts/env.sh && pnpm tauri dev`（所以非 Windows 用户也能用同一个 `pnpm tauri:dev`）。
 . (Join-Path $PSScriptRoot "env.ps1")
 
 # 本机安全软件会拦截未签名 dev exe 读写 %LOCALAPPDATA%\com.lanmark.app（WebView2
