@@ -2,6 +2,18 @@
 @import "@milkdown/crepe/theme/common/style.css";
 @import "@milkdown/crepe/theme/frame-dark.css";
 
+/* ── M6d 内置字体（npm 包，随应用分发 ⇒ 三端字形一致；docs/09 §4.7）──
+   都是 unicode-range 切片 woff2：磁盘上随包全量，运行时只解码命中的切片。
+   出处与许可文本见 `licenses/fonts/`；**MiSans 需在「关于」页注明**（小米协议）。
+   版本钉死（无 ^）：字体包的结构/切片范围会随大版本变。 */
+@import "misans/lib/Normal/MiSans-Regular.min.css";
+@import "misans/lib/Normal/MiSans-Demibold.min.css";
+@import "@fontsource/noto-serif-sc/400.css";
+@import "@fontsource/noto-serif-sc/600.css";
+@import "lxgw-wenkai-screen-webfont/lxgwwenkaigbscreen.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/700.css";
+
 /* ══════════════════════════════════════════════════════════
    Lanmark 设计 token（多主题：晨窗 / 夜航 / 纸页 / 文楷）
    色板来源：design/directions/方向C-晨窗.html（用户选定基线）
@@ -61,10 +73,11 @@
   --sh-pop: 0 1px 2px rgb(15 18 30 / 0.1), 0 2px 6px rgb(15 18 30 / 0.08);
   --sh-slider: 0 1px 2px rgb(15 18 30 / 0.2), 0 2px 8px oklch(0.53 0.19 264 / 0.35);
 
-  /* ── 字体栈（M5 减法：不再可调，常驻这里）──
-     M4a 曾由设置写入（applyCssVars），移除后固定为各自的原默认值：
-     正文栈 = 原「无衬线」默认，等宽 = 原「系统默认」。 */
-  --lanmark-font-text: "Noto Sans", "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  /* ── 字体栈（M5 起不可调；M6d 起正文/等宽用内置字体）──
+     正文栈 = 内置 MiSans（三端一致），其后是系统兜底（生僻字回退）；
+     等宽 = 内置 JetBrains Mono。界面壳（--font-sans，见 @theme）仍用系统栈：
+     字体差异只作用于编辑区（docs/09 D3）。 */
+  --lanmark-font-text: "MiSans", "Noto Sans", "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --lanmark-font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, "Noto Sans Mono CJK SC", monospace;
 
   /* ── 外观变量（M5 减法后只剩字号/行距可调）──
