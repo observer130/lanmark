@@ -3,9 +3,11 @@
 @import "@milkdown/crepe/theme/frame-dark.css";
 
 /* ══════════════════════════════════════════════════════════
-   Lanmark 设计 token（方向 C · 晨窗 —— 冷白清爽生产力）
+   Lanmark 设计 token（多主题：晨窗 / 夜航 / 纸页 / 文楷）
    色板来源：design/directions/方向C-晨窗.html（用户选定基线）
-   语义变量集中在 :root，未来加暗色主题只换这一层。
+   + design/theme-font-preview.html（M6 主题/字体预览，用户确认）
+   `:root` = 晨窗（默认，M3 以来的视觉）；其余主题只覆盖这一层 token
+   与字体栈，组件 / Crepe / CodeMirror 全部经 var() 自动跟随（M6b）。
    ══════════════════════════════════════════════════════════ */
 :root {
   /* 中性色阶 */
@@ -22,11 +24,37 @@
   --c-acc: oklch(0.53 0.19 264);
   --c-acc-txt: oklch(0.47 0.16 264);
   --c-acc-08: oklch(0.53 0.19 264 / 0.08);
+  --c-acc-12: oklch(0.53 0.19 264 / 0.12);
   --c-acc-14: oklch(0.53 0.19 264 / 0.14);
+  /* 强调色「面上」的文字/图标色：浅色主题为白；深色主题反转为深色
+     （夜航把靛蓝提亮到 0.70 才能在深底上跳出来，此时白字对比反而不足） */
+  --c-on-acc: #ffffff;
 
   /* 功能色：保存态绿 / 未保存琥珀 */
   --c-ok: oklch(0.52 0.11 155);
   --c-warn: oklch(0.58 0.11 75);
+  --c-err: oklch(0.5 0.19 25);
+
+  /* ── M6b 收编：原先散落在各条规则里的字面量，收成主题可覆盖的语义槽 ──
+     以下取值 = 晨窗现状（与收编前逐项等价 ⇒ 视觉零变化），
+     夜航/纸页在下方 `:root[data-theme]` 块里各自重定义。 */
+  --c-surface: oklch(0.955 0.004 260);       /* 代码块 / 内嵌编辑器表面 */
+  --c-surface-low: oklch(0.925 0.005 260);
+  --c-surface-high: oklch(0.985 0.002 260);  /* 代码块工具按钮药丸底 */
+  --c-outline: oklch(0.8 0.008 260);
+  --c-hover: oklch(0.94 0.004 260);
+  --c-on-inverse: #ffffff;
+  --c-selection: oklch(0.53 0.19 264 / 0.18);       /* 文档选区 */
+  --c-selection-code: oklch(0.53 0.19 264 / 0.16);  /* 源码模式选区 */
+  --c-active-line: oklch(0.53 0.19 264 / 0.05);
+  --c-scrollbar: oklch(0.87 0.006 260);
+  --c-scrollbar-hover: oklch(0.78 0.01 260);
+  --c-tooltip-bg: oklch(0.24 0.015 260);
+  --c-tooltip-fg: #ffffff;
+  --c-appmark-shadow: rgb(15 18 30 / 0.12);
+
+  /* 原生控件（滚动条滑块/表单控件/自动填充）跟随主题明暗 */
+  color-scheme: light;
 
   /* 投影体系 */
   --sh-card: 0 1px 2px rgb(15 18 30 / 0.06), 0 4px 14px rgb(15 18 30 / 0.05);
@@ -47,6 +75,101 @@
   --lanmark-line-height: 1.75;
 }
 
+/* ══════════════════════════════════════════════════════════
+   M6 主题块（docs/09 §6）：只覆盖 token 与编辑区字体栈。
+   切换点 = `<html data-theme>`（applyTheme，src/lib/settings.ts）——
+   改一个 DOM 属性即换肤，Crepe / CodeMirror / 组件零改动、不重建实例。
+   ══════════════════════════════════════════════════════════ */
+
+/* ── 夜航（深色）──
+   深色下投影几乎不可见，层次改由「表面亮一档 + 发丝线」承担；
+   靛蓝提亮到 0.70（0.53 在深底上对比不足），强调面上的字色随之反转。 */
+:root[data-theme="night"] {
+  color-scheme: dark;
+  --c-canvas: oklch(0.16 0.012 260);
+  --c-content: oklch(0.19 0.012 260);
+  --c-side: oklch(0.14 0.012 260);
+  --c-card: oklch(0.22 0.014 260);
+  --c-ink: oklch(0.93 0.004 260);
+  --c-ink-2: oklch(0.72 0.008 260);
+  --c-ink-3: oklch(0.56 0.01 260);
+  --c-line: oklch(0.30 0.012 260);
+  --c-acc: oklch(0.70 0.14 264);
+  --c-acc-txt: oklch(0.78 0.11 264);
+  --c-acc-08: oklch(0.70 0.14 264 / 0.10);
+  --c-acc-12: oklch(0.70 0.14 264 / 0.16);
+  --c-acc-14: oklch(0.70 0.14 264 / 0.18);
+  --c-on-acc: oklch(0.18 0.02 264);
+  --c-ok: oklch(0.72 0.12 155);
+  --c-warn: oklch(0.78 0.12 75);
+  --c-err: oklch(0.70 0.15 25);
+  --c-surface: oklch(0.25 0.012 260);
+  --c-surface-low: oklch(0.20 0.012 260);
+  --c-surface-high: oklch(0.28 0.012 260);
+  --c-outline: oklch(0.42 0.012 260);
+  --c-hover: oklch(0.26 0.012 260);
+  --c-on-inverse: oklch(0.16 0.012 260);
+  --c-selection: oklch(0.70 0.14 264 / 0.30);
+  --c-selection-code: oklch(0.70 0.14 264 / 0.24);
+  --c-active-line: oklch(0.70 0.14 264 / 0.08);
+  --c-scrollbar: oklch(0.34 0.012 260);
+  --c-scrollbar-hover: oklch(0.44 0.012 260);
+  --c-tooltip-bg: oklch(0.32 0.012 260);
+  --c-tooltip-fg: oklch(0.95 0.004 260);
+  --c-appmark-shadow: rgb(0 0 0 / 0.5);
+  --sh-card: 0 1px 2px rgb(0 0 0 / 0.5), 0 4px 14px rgb(0 0 0 / 0.4);
+  --sh-pop: 0 1px 2px rgb(0 0 0 / 0.6), 0 2px 6px rgb(0 0 0 / 0.5);
+  --sh-slider: 0 1px 2px rgb(0 0 0 / 0.5), 0 2px 8px oklch(0.70 0.14 264 / 0.45);
+}
+
+/* ── 纸页（衬线米黄 · 暖赭强调）──
+   字体栈先用系统衬线兜底；内置思源宋体落地后 `Noto Serif SC` 生效即多端一致。 */
+:root[data-theme="paper"] {
+  --c-canvas: oklch(0.94 0.015 85);
+  --c-content: oklch(0.963 0.014 86);
+  --c-side: oklch(0.968 0.014 87);
+  --c-card: oklch(0.975 0.014 88);
+  --c-ink: oklch(0.28 0.022 70);
+  --c-ink-2: oklch(0.47 0.025 72);
+  --c-ink-3: oklch(0.58 0.02 76);
+  --c-line: oklch(0.875 0.02 85);
+  --c-acc: oklch(0.50 0.13 60);
+  --c-acc-txt: oklch(0.44 0.12 58);
+  --c-acc-08: oklch(0.50 0.13 60 / 0.08);
+  --c-acc-12: oklch(0.50 0.13 60 / 0.16);
+  --c-acc-14: oklch(0.50 0.13 60 / 0.14);
+  --c-ok: oklch(0.52 0.11 155);
+  --c-warn: oklch(0.58 0.11 75);
+  --c-err: oklch(0.50 0.19 25);
+  --c-surface: oklch(0.945 0.018 86);
+  --c-surface-low: oklch(0.915 0.02 85);
+  --c-surface-high: oklch(0.985 0.012 88);
+  --c-outline: oklch(0.80 0.02 85);
+  --c-hover: oklch(0.93 0.018 86);
+  --c-on-inverse: oklch(0.975 0.014 88);
+  --c-selection: oklch(0.50 0.13 60 / 0.20);
+  --c-selection-code: oklch(0.50 0.13 60 / 0.18);
+  --c-active-line: oklch(0.50 0.13 60 / 0.06);
+  --c-scrollbar: oklch(0.86 0.02 85);
+  --c-scrollbar-hover: oklch(0.77 0.025 85);
+  --c-tooltip-bg: oklch(0.30 0.022 70);
+  --c-tooltip-fg: oklch(0.97 0.012 88);
+  --c-appmark-shadow: rgb(70 50 20 / 0.16);
+  --sh-card: 0 1px 2px rgb(80 60 30 / 0.08), 0 4px 14px rgb(80 60 30 / 0.07);
+  --sh-pop: 0 1px 2px rgb(80 60 30 / 0.12), 0 2px 6px rgb(80 60 30 / 0.1);
+  /* 编辑区（正文 + 标题）换衬线；界面壳仍 sans（D3） */
+  --lanmark-font-text: "Noto Serif SC", "Source Han Serif SC", "Noto Serif CJK SC",
+    "Songti SC", "SimSun", Georgia, serif;
+}
+
+/* ── 文楷（霞鹜文楷）──
+   配色沿用晨窗（= 预览里确认的组合），只换编辑区字体为楷体；
+   字体文件内置后 `LXGW WenKai Screen` 生效，之前回退系统楷体/宋体。 */
+:root[data-theme="wenkai"] {
+  --lanmark-font-text: "LXGW WenKai Screen", "Kaiti SC", "KaiTi", "楷体",
+    "Noto Serif CJK SC", serif;
+}
+
 /* 把语义 token 映射成 Tailwind utility（bg-canvas / text-ink-2 / border-line …） */
 @theme inline {
   --color-canvas: var(--c-canvas);
@@ -60,6 +183,7 @@
   --color-accent: var(--c-acc);
   --color-accent-text: var(--c-acc-txt);
   --color-accent-soft: var(--c-acc-08);
+  --color-on-acc: var(--c-on-acc);
   --color-ok: var(--c-ok);
   --color-warn: var(--c-warn);
   --shadow-card: var(--sh-card);
@@ -88,7 +212,7 @@ body {
 }
 
 ::selection {
-  background: oklch(0.53 0.19 264 / 0.18);
+  background: var(--c-selection);
 }
 
 ::-webkit-scrollbar {
@@ -96,13 +220,13 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: oklch(0.87 0.006 260);
+  background: var(--c-scrollbar);
   border-radius: 99px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.78 0.01 260);
+  background: var(--c-scrollbar-hover);
   border: 3px solid transparent;
   background-clip: content-box;
 }
@@ -136,12 +260,35 @@ body {
   font-family: var(--lanmark-font-text);
 }
 
+/* 段落行距必须显式下发：crepe 给 `p` 自带 `line-height: 1.5`
+   （`.milkdown .ProseMirror p`）——它在 **p 自身**上生效，容器上的高优先级
+   规则管不到它。后果：「行距」设置对段落从不生效（M6b 验证壳实测 p=24px，
+   而设置默认 1.75 应为 28px），只有 li 这类无 crepe 规则的块跟随设置。
+   li 本就继承容器值，一并写上是防 crepe 将来补规则造成回归。 */
+.editor-host .milkdown .ProseMirror p,
+.editor-host .milkdown .ProseMirror li {
+  line-height: var(--lanmark-line-height);
+}
+
+/* ── 标题排版层级（M6a，docs/09 §5）──
+   Crepe 默认 h1=2.625em/h2=2.25em…且字重 400（大字细体），是「标题比正文大太多」
+   的根因。对齐主流 md 渲染器共识（GitHub/VS Code/Notion/Obsidian 实测调研）：
+   H1 2.0 / H2 1.5 / H3 1.25 / H4-H6 1.0（em，随字号档位整体缩放），字重 600。
+   H5/H6 不小于正文（Typora/Obsidian 的笔记向取法），H6 以次文字色区分。
+   值与 design/theme-font-preview.html 中确认的「M6a 建议」一致。 */
+.editor-host .milkdown .ProseMirror h1 { font-size: 2em;    line-height: 1.35; font-weight: 600; margin: 24px 0 8px; }
+.editor-host .milkdown .ProseMirror h2 { font-size: 1.5em;  line-height: 1.35; font-weight: 600; margin: 24px 0 8px; }
+.editor-host .milkdown .ProseMirror h3 { font-size: 1.25em; line-height: 1.35; font-weight: 600; margin: 20px 0 6px; }
+.editor-host .milkdown .ProseMirror h4 { font-size: 1em;    line-height: 1.35; font-weight: 600; margin: 16px 0 4px; }
+.editor-host .milkdown .ProseMirror h5 { font-size: 1em;    line-height: 1.35; font-weight: 600; margin: 16px 0 4px; }
+.editor-host .milkdown .ProseMirror h6 { font-size: 1em;    line-height: 1.35; font-weight: 600; margin: 16px 0 4px; color: var(--c-ink-2); }
+
 /* ── 应用品牌标（src/components/AppMark.tsx）──
    投影用 drop-shadow 而非 box-shadow：图标四角是透明的，box-shadow 会按 svg 的
    矩形边界投影，圆角外露出直角阴影。drop-shadow 按 alpha 形状投影，贴合圆角。
    尺寸由调用方用 Tailwind w-* / h-* 控制，这里只管投影与对齐。 */
 .lanmark-appmark {
-  filter: drop-shadow(0 1px 2px rgb(15 18 30 / 0.12));
+  filter: drop-shadow(0 1px 2px var(--c-appmark-shadow));
 }
 
 /* 手机窄屏（<768px，与 App.tsx useIsNarrow 阈值一致）：
@@ -173,24 +320,25 @@ body {
   }
 }
 
-/* Crepe frame 主题变量 → 晨窗浅色（frame-dark 仅是变量块，覆盖即换肤） */
+/* Crepe frame 主题变量 → Lanmark token（frame-dark 仅是变量块，覆盖即换肤；
+   这里全部经 var() 指向语义 token ⇒ 换主题自动跟随，M6b） */
 .milkdown {
   --crepe-color-background: var(--c-card);
   --crepe-color-on-background: var(--c-ink);
-  --crepe-color-surface: oklch(0.955 0.004 260);
-  --crepe-color-surface-low: oklch(0.925 0.005 260);
+  --crepe-color-surface: var(--c-surface);
+  --crepe-color-surface-low: var(--c-surface-low);
   --crepe-color-on-surface: var(--c-ink);
   --crepe-color-on-surface-variant: var(--c-ink-2);
-  --crepe-color-outline: oklch(0.8 0.008 260);
+  --crepe-color-outline: var(--c-outline);
   --crepe-color-primary: var(--c-acc);
-  --crepe-color-secondary: oklch(0.985 0.002 260); /* 代码块工具按钮：灰底上的白色药丸 */
+  --crepe-color-secondary: var(--c-surface-high); /* 代码块工具按钮：灰底上的白色药丸 */
   --crepe-color-on-secondary: var(--c-acc-txt);
   --crepe-color-inverse: var(--c-ink);
-  --crepe-color-on-inverse: #ffffff;
+  --crepe-color-on-inverse: var(--c-on-inverse);
   --crepe-color-inline-code: var(--c-acc-txt);
-  --crepe-color-inline-area: oklch(0.955 0.004 260); /* 漏覆盖会残留 frame-dark 的深灰 #2b2b2b */
-  --crepe-color-error: oklch(0.5 0.19 25);
-  --crepe-color-hover: oklch(0.94 0.004 260);
+  --crepe-color-inline-area: var(--c-surface); /* 漏覆盖会残留 frame-dark 的深灰 #2b2b2b */
+  --crepe-color-error: var(--c-err);
+  --crepe-color-hover: var(--c-hover);
   --crepe-color-selected: var(--c-acc-14);
   --crepe-base-font-size: var(--lanmark-text-size);
   --crepe-font-title: var(--lanmark-font-text);
@@ -202,7 +350,7 @@ body {
 .milkdown .ProseMirror code {
   color: var(--c-acc-txt);
   background: var(--c-acc-08);
-  border: 1px solid oklch(0.53 0.19 264 / 0.12);
+  border: 1px solid var(--c-acc-12);
   border-radius: 6px;
   padding: 1px 6px;
 }
@@ -245,8 +393,8 @@ body {
   top: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--c-ink);
-  color: #fff;
+  background: var(--c-tooltip-bg);
+  color: var(--c-tooltip-fg);
   font-size: 11px;
   line-height: 1;
   padding: 5px 8px;
@@ -304,12 +452,12 @@ body {
 
 .cm-editor .cm-activeLine,
 .cm-editor .cm-activeLineGutter {
-  background: oklch(0.53 0.19 264 / 0.05);
+  background: var(--c-active-line);
 }
 
 .cm-editor .cm-selectionBackground,
 .cm-editor.cm-focused .cm-selectionBackground {
-  background: oklch(0.53 0.19 264 / 0.16) !important;
+  background: var(--c-selection-code) !important;
 }
 
 .cm-editor .cm-cursor,

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   applyCssVars,
+  applyTheme,
   settings as settingsApi,
   type Appearance,
   type EditorPrefs,
@@ -14,16 +15,17 @@ import {
  * M4a 设置 store（与 vault / sync 同构）。
  *
  * 应用顺序（docs/08 §6.3）：
- *   UI 改动 → 乐观 set state → applyCssVars（立即可见） → settings_patch
+ *   UI 改动 → 乐观 set state → applyAppearance（立即可见） → settings_patch
  *           → 以 Rust 返回值覆盖 state（归一化结果）
- *           └→ 失败：回滚上一版 state + 复原 CSS 变量 + error 提示
+ *           └→ 失败：回滚上一版 state + 复原 CSS 变量/主题 + error 提示
  *
- * 乐观更新的意义：字号/字体点一下就要变，不能等 IPC 往返；而失败必须回滚，
+ * 乐观更新的意义：字号/字体/主题点一下就要变，不能等 IPC 往返；而失败必须回滚，
  * 否则界面显示的和盘上的不一致，重启后「设置自己变回去了」。
  */
 
 /** 与 Rust `settings::Appearance::default()` 逐字段一致的兜底默认值 */
 export const DEFAULT_APPEARANCE: Appearance = {
+  theme: "morning",
   textSize: "md",
   lineHeight: "normal",
 };
@@ -81,6 +83,16 @@ interface SettingsStore {
 
 export type SectionKey = "appearance" | "editor" | "storage" | "sync" | "about";
 
+/**
+ * 外观写入的**唯一入口**：CSS 变量（字号/行距）+ `<html data-theme>`（M6 主题）。
+ * 两者都只影响渲染、都不进编辑器 key（硬约定 11）——合成一个函数是为了
+ * 不可能出现「改了 state 却漏写主题属性」这类半应用状态。
+ */
+const applyAppearance = (a: Appearance): void => {
+  applyCssVars(a);
+  applyTheme(a.theme);
+};
+
 let loadSeq = 0;
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
@@ -98,13 +110,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const s = await settingsApi.get();
       if (seq !== loadSeq) return;
       set({ settings: s, loading: false, error: null });
-      applyCssVars(s.appearance);
+      applyAppearance(s.appearance);
     } catch (e) {
       if (seq !== loadSeq) return;
-      // 读失败也要落地 CSS 变量：否则界面停在「无变量」状态，
+      // 读失败也要落地外观：否则界面停在「无变量/无主题」状态，
       // index.css 的 var() 全部落空 → 字号/行距塌成浏览器默认
       set({ loading: false, error: String(e) });
-      applyCssVars(DEFAULT_APPEARANCE);
+      applyAppearance(DEFAULT_APPEARANCE);
     }
   },
 
@@ -118,30 +130,30 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       update: patch.update ?? prev.update,
     };
     set({ settings: optimistic });
-    applyCssVars(optimistic.appearance);
+    applyAppearance(optimistic.appearance);
     try {
       const saved = await settingsApi.patch(patch);
       set({ settings: saved, error: null });
-      // 以返回值为准再写一次：非法档位会被 Rust 归一化回默认，
+      // 以返回值为准再写一次：非法档位/主题会被 Rust 归一化回默认，
       // 乐观那一下显示的是用户输入，这里必须纠正
-      applyCssVars(saved.appearance);
+      applyAppearance(saved.appearance);
     } catch (e) {
       set({ settings: prev, error: String(e) });
-      applyCssVars(prev.appearance);
+      applyAppearance(prev.appearance);
     }
   },
 
   reset: async () => {
     const prev = get().settings;
     set({ settings: DEFAULT_SETTINGS });
-    applyCssVars(DEFAULT_APPEARANCE);
+    applyAppearance(DEFAULT_APPEARANCE);
     try {
       const saved = await settingsApi.reset();
       set({ settings: saved, error: null });
-      applyCssVars(saved.appearance);
+      applyAppearance(saved.appearance);
     } catch (e) {
       set({ settings: prev, error: String(e) });
-      applyCssVars(prev.appearance);
+      applyAppearance(prev.appearance);
     }
   },
 

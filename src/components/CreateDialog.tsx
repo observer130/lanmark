@@ -278,7 +278,7 @@ export function CreateDialog() {
           <button
             onClick={() => void submit()}
             disabled={busy || !name.trim()}
-            className="rounded-lg bg-accent px-4 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-40"
+            className="rounded-lg bg-accent px-4 py-1.5 text-xs font-medium text-on-acc shadow-slider hover:bg-accent-text disabled:opacity-40"
           >
             创建
           </button>

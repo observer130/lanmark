@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * M4b 外观设置的前端测试（M5 减法后：字号/行距 + 编辑器 + 存储链路）。
+ * M4b 外观设置的前端测试（M5 减法后：字号/行距 + 编辑器 + 存储链路；M6 增主题）。
  *
- * 覆盖两件事：
+ * 覆盖三件事：
  * 1. 枚举 → CSS 值映射（字号四档 / 行距）
- * 2. 应用与回滚链路（乐观更新、以 Rust 返回值为准、失败复原变量）
- * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号会重建 Crepe 实例，
+ * 2. 应用与回滚链路（乐观更新、以 Rust 返回值为准、失败复原变量与主题）
+ * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号/主题会重建 Crepe 实例，
  *    触发伪 markdownUpdated → 打开笔记被重写，硬约定 3）
  */
 
@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import {
   applyCssVars,
+  applyTheme,
   lineHeightValue,
   textSizePx,
   type Appearance,
@@ -62,10 +63,35 @@ describe("applyCssVars：变量写入", () => {
   });
 });
 
+describe("applyTheme：主题属性写入（M6）", () => {
+  beforeEach(() => {
+    document.documentElement.removeAttribute("data-theme");
+  });
+
+  it("把主题 key 写成 <html data-theme>（换肤靠 CSS 变量传导，不碰编辑器）", () => {
+    applyTheme("night");
+    expect(document.documentElement.dataset.theme).toBe("night");
+    applyTheme("paper");
+    expect(document.documentElement.dataset.theme).toBe("paper");
+  });
+
+  it("morning 也写属性——`:root` 即晨窗，无主题块匹配时天然等价", () => {
+    applyTheme("morning");
+    expect(document.documentElement.dataset.theme).toBe("morning");
+  });
+
+  it("非法 key 不写属性（回落 :root 晨窗，避免未知主题打空全部变量）", () => {
+    applyTheme("night");
+    applyTheme("neon" as never);
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+});
+
 describe("settings store：加载 / 乐观更新 / 回滚", () => {
   beforeEach(() => {
     invoke.mockReset();
     document.documentElement.removeAttribute("style");
+    document.documentElement.removeAttribute("data-theme");
     useSettingsStore.setState({
       settings: {
         appearance: DEFAULT_APPEARANCE,
@@ -94,6 +120,25 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     await useSettingsStore.getState().load();
     expect(useSettingsStore.getState().error).toContain("boom");
     expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("16px");
+  });
+
+  it("load → 主题属性同步落地（M6）", async () => {
+    invoke.mockResolvedValueOnce({
+      appearance: { ...DEFAULT_APPEARANCE, theme: "night" },
+      editor: useSettingsStore.getState().settings.editor,
+      storage: useSettingsStore.getState().settings.storage,
+      update: useSettingsStore.getState().settings.update,
+    });
+    await useSettingsStore.getState().load();
+    expect(document.documentElement.dataset.theme).toBe("night");
+  });
+
+  it("patch 失败 → 主题属性与 state 一并回滚", async () => {
+    const a = DEFAULT_APPEARANCE;
+    invoke.mockRejectedValueOnce(new Error("写盘失败"));
+    await useSettingsStore.getState().patch({ appearance: { ...a, theme: "night" } });
+    expect(useSettingsStore.getState().settings.appearance.theme).toBe("morning");
+    expect(document.documentElement.dataset.theme).toBe("morning");
   });
 
   it("patch 乐观更新：一次点击 = 一次落库（无防抖/无 IPC 风暴）", async () => {
@@ -159,9 +204,10 @@ describe("editorKey：外观不得进入编辑器 key（硬约定 3 护栏）", 
 
   it("同一路径同一模式恒等——外观变化不得改变它", () => {
     const k1 = editorKey("n.md", "wysiwyg");
-    // 模拟改字号/行距后重新渲染：key 必须逐字节相同，否则 React 会重建
+    // 模拟改字号/行距/主题后重新渲染：key 必须逐字节相同，否则 React 会重建
     // MilkdownHost → Crepe 建实例发伪 markdownUpdated → 笔记被重写
     applyCssVars(app({ textSize: "xl", lineHeight: "relaxed" }));
+    applyTheme("night");
     const k2 = editorKey("n.md", "wysiwyg");
     expect(k2).toBe(k1);
   });

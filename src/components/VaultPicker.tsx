@@ -91,7 +91,7 @@ export function VaultPicker() {
                   clearError();
                   void pickAppDir("create");
                 }}
-                className="flex w-full items-center justify-center gap-2 rounded-[10px] bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-slider hover:bg-accent-text"
+                className="flex w-full items-center justify-center gap-2 rounded-[10px] bg-accent px-4 py-2.5 text-sm font-medium text-on-acc shadow-slider hover:bg-accent-text"
               >
                 <Home size={16} />
                 使用应用目录（推荐）
@@ -122,7 +122,7 @@ export function VaultPicker() {
                         clearError();
                         void pickCustomAndroidDir(customPath.trim(), "open");
                       }}
-                      className="flex-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+                      className="flex-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-on-acc disabled:opacity-40"
                     >
                       打开此目录
                     </button>
@@ -156,7 +156,7 @@ export function VaultPicker() {
                   clearError();
                   void pickVault("create");
                 }}
-                className="flex w-full items-center justify-center gap-2 rounded-[10px] bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-slider hover:bg-accent-text"
+                className="flex w-full items-center justify-center gap-2 rounded-[10px] bg-accent px-4 py-2.5 text-sm font-medium text-on-acc shadow-slider hover:bg-accent-text"
               >
                 <FolderPlus size={16} />
                 创建新笔记库…

@@ -13,6 +13,10 @@ import { invoke } from "@tauri-apps/api/core";
  * M5 减法：字体（界面/正文/等宽/自定义）、源码字号、正文宽度、界面缩放已移除，
  * 字体栈常驻 `index.css`（`--font-sans` / `--lanmark-font-text` / `--lanmark-font-mono`）；
  * 旧 config.json 里的相关字段由 serde 静默忽略、下次保存自然清除，无需迁移。
+ *
+ * M6 主题：新增 `theme` 枚举（晨窗/夜航/纸页/文楷）。色值与主题字体栈全在
+ * `index.css` 的 `:root[data-theme=…]` 块里，本文件只负责把 key 写成
+ * `<html data-theme>` 属性（`applyTheme`）——JS 对「主题长什么样」零知识。
  */
 
 /* ── 枚举 ── */
@@ -21,8 +25,11 @@ export type SizeKey = "sm" | "md" | "lg" | "xl";
 export type LineHeightKey = "compact" | "normal" | "relaxed";
 export type EditorMode = "read" | "wysiwyg" | "source";
 export type NewNoteLocation = "root" | "last";
+/** M6 主题 key（与 Rust `THEME_KEYS` 同序同值，docs/09 §6） */
+export type ThemeKey = "morning" | "night" | "paper" | "wenkai";
 
 export interface Appearance {
+  theme: ThemeKey;
   textSize: SizeKey;
   lineHeight: LineHeightKey;
 }
@@ -80,6 +87,14 @@ export const SIZE_OPTIONS: { key: SizeKey; label: string }[] = [
   { key: "xl", label: "特大" },
 ];
 
+/** 主题清单（设置页分段按钮用）；配色/字体在 index.css 的 `[data-theme]` 块 */
+export const THEME_OPTIONS: { key: ThemeKey; label: string }[] = [
+  { key: "morning", label: "晨窗" },
+  { key: "night", label: "夜航" },
+  { key: "paper", label: "纸页" },
+  { key: "wenkai", label: "文楷" },
+];
+
 export const LINE_HEIGHT_OPTIONS: { key: LineHeightKey; label: string }[] = [
   { key: "compact", label: "紧凑" },
   { key: "normal", label: "标准" },
@@ -113,7 +128,7 @@ export const TRASH_RETENTION_OPTIONS: { key: number; label: string }[] = [
   { key: 0, label: "从不" },
 ];
 
-/* ── CSS 变量写入（applyCssVars 是唯一写入点） ── */
+/* ── 外观写入（applyCssVars / applyTheme 是仅有的两个写入点） ── */
 
 /**
  * 把外观设置写进 `:root` 的 CSS 变量（M5 减法后只剩字号/行距两项）。
@@ -127,6 +142,25 @@ export function applyCssVars(a: Appearance, root?: HTMLElement): void {
   const set = (k: string, v: string) => el.style.setProperty(k, v);
   set("--lanmark-text-size", `${textSizePx(a.textSize)}px`);
   set("--lanmark-line-height", String(lineHeightValue(a.lineHeight)));
+}
+
+/**
+ * M6 主题：把 key 写成 `<html data-theme="…">`，其余全交给 `index.css` 的
+ * `:root[data-theme=…]` 变量块（配色 + 编辑区字体栈）传导。
+ *
+ * **为什么不用 style.setProperty 逐个写色值**：那等于把设计 token 复制进 JS，
+ * 与「色值只在 CSS、枚举映射只在 TS」的分工相悖（docs/09 §4.1）；改主题是一个
+ * DOM 属性写入，同样不重建编辑器实例（硬约定 11）。
+ * 非法 key 的兜底在 Rust 归一化（`settings_patch` 返回值为准）+ TS 类型约束。
+ */
+export function applyTheme(theme: ThemeKey, root?: HTMLElement): void {
+  const el = root ?? document.documentElement;
+  if (THEME_OPTIONS.some((o) => o.key === theme)) {
+    el.dataset.theme = theme;
+  } else {
+    // 运行时脏值（手改 config / 未来版本回退）不写属性 ⇒ 落在 :root 晨窗默认
+    delete el.dataset.theme;
+  }
 }
 
 /* ── IPC ── */

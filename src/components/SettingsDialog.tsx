@@ -31,6 +31,7 @@ import {
   LINE_HEIGHT_OPTIONS,
   NEW_NOTE_LOCATION_OPTIONS,
   SIZE_OPTIONS,
+  THEME_OPTIONS,
   TRASH_RETENTION_OPTIONS,
   type EditorMode,
 } from "../lib/settings";
@@ -141,7 +142,7 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
 
 /* ── 分组内容 ── */
 
-/** 外观（M5 减法后只剩排版两项；字体栈常驻 index.css，不再可调） */
+/** 外观（M6：主题 + 排版两项；主题字体栈随主题，界面字体常驻 index.css） */
 function AppearanceSection() {
   const a = useSettingsStore((s) => s.settings.appearance);
   const patch = useSettingsStore((s) => s.patch);
@@ -150,6 +151,11 @@ function AppearanceSection() {
 
   return (
     <>
+      <Group title="主题">
+        <Row label="主题" hint="配色与编辑区字体（界面字体不变）">
+          <Segmented value={a.theme} options={THEME_OPTIONS} onChange={(k) => set({ theme: k })} />
+        </Row>
+      </Group>
       <Group title="排版">
         <Row label="正文字号">
           <Segmented value={a.textSize} options={SIZE_OPTIONS} onChange={(k) => set({ textSize: k })} />
@@ -569,7 +575,7 @@ function UpdateGroup({ platform }: { platform?: string }) {
             <button
               disabled={installing}
               onClick={() => void installInApp()}
-              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-50"
+              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-on-acc shadow-slider hover:bg-accent-text disabled:opacity-50"
             >
               {installing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
               {installing ? "更新中…" : "立即更新"}
@@ -578,7 +584,7 @@ function UpdateGroup({ platform }: { platform?: string }) {
             <button
               disabled={installing}
               onClick={() => void installLinux()}
-              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-50"
+              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-on-acc shadow-slider hover:bg-accent-text disabled:opacity-50"
             >
               {installing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
               {installing ? "更新中…" : "立即更新"}
@@ -586,7 +592,7 @@ function UpdateGroup({ platform }: { platform?: string }) {
           ) : (
             <button
               onClick={() => info.htmlUrl && openReleasePage(info.htmlUrl)}
-              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text"
+              className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-on-acc shadow-slider hover:bg-accent-text"
             >
               <Download size={13} />
               打开发布页
@@ -918,7 +924,7 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
       : "规模: 未知",
     `回收站: ${i.stats ? `${i.stats.trashEntries} 项 · ${fmtBytes(i.stats.trashBytes)}` : "未知"}`,
     ...syncLines,
-    `外观: 字号=${a.textSize} 行距=${a.lineHeight}`,
+    `外观: 主题=${a.theme} 字号=${a.textSize} 行距=${a.lineHeight}`,
     `编辑器: 默认模式=${i.settings.editor.defaultMode} 自动保存=${i.settings.editor.autosaveMs}ms`,
     `配置目录: ${i.info?.configDir ?? "?"}`,
     `日志目录: ${i.info?.logDir ?? "?"}`,

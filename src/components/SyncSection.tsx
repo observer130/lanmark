@@ -175,7 +175,7 @@ function ServerPanel() {
           <div className="mt-2 flex gap-2">
             <button
               onClick={() => void pairApprove(p.nonce)}
-              className="flex-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text"
+              className="flex-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-on-acc shadow-slider hover:bg-accent-text"
             >
               允许
             </button>
@@ -346,7 +346,7 @@ function ClientPanel() {
           <button
             disabled={syncing}
             onClick={() => void syncNow(s.id)}
-            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-50"
+            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-on-acc shadow-slider hover:bg-accent-text disabled:opacity-50"
           >
             {syncing ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             {syncing ? "同步中…" : "立即同步"}
@@ -495,7 +495,7 @@ function ClientPanel() {
             <button
               disabled={!url.trim().startsWith("http") || connecting != null || syncing}
               onClick={() => void connectDevice(url.trim())}
-              className="w-full rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-40"
+              className="w-full rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-on-acc shadow-slider hover:bg-accent-text disabled:opacity-40"
             >
               连接（等待手机确认）
             </button>

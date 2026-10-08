@@ -11,6 +11,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// M6 主题 key（docs/09 §6）：晨窗 / 夜航 / 纸页 / 文楷。
+/// `morning` 即 M3 以来的硬编码视觉 ⇒ 作默认值，升级用户界面不突变。
+const THEME_KEYS: [&str; 4] = ["morning", "night", "paper", "wenkai"];
 /// 字号 / 行距的合法枚举。
 const SIZE_KEYS: [&str; 4] = ["sm", "md", "lg", "xl"];
 const LINE_HEIGHT_KEYS: [&str; 3] = ["compact", "normal", "relaxed"];
@@ -28,6 +31,8 @@ const AUTOSAVE_KEYS: [u32; 4] = [1500, 3000, 10_000, 20_000];
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Appearance {
+    /// M6 主题 key；前端据此写 `<html data-theme>`（配色 + 编辑区字体，docs/09 §6）
+    pub theme: String,
     /// 正文字号档位；`md` = 16px（与既往硬编码一致 ⇒ 默认视觉不变）
     pub text_size: String,
     /// 行距档位；`normal` = 1.75
@@ -77,6 +82,7 @@ impl UpdatePrefs {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
+            theme: "morning".into(),
             text_size: "md".into(),
             line_height: "normal".into(),
         }
@@ -141,6 +147,7 @@ impl Appearance {
     /// 字体相关的白名单校验（`sanitize_font_stack`）随字体设置一并移除：
     /// 字体栈现在常驻 index.css，用户输入不再进入 CSS 变量。
     pub fn normalize(mut self) -> Self {
+        self.theme = pick(&self.theme, &THEME_KEYS, "morning");
         self.text_size = pick(&self.text_size, &SIZE_KEYS, "md");
         self.line_height = pick(&self.line_height, &LINE_HEIGHT_KEYS, "normal");
         self
@@ -199,6 +206,7 @@ mod tests {
     fn defaults_match_previous_hardcoded_visuals() {
         // 默认值必须与 M3 的硬编码等价，否则升级用户界面会突变（docs/08 §3 表头）
         let a = Appearance::default();
+        assert_eq!(a.theme, "morning", "M6：默认主题 = 现状晨窗，升级不突变");
         assert_eq!(a.text_size, "md"); // 16px
         assert_eq!(a.line_height, "normal"); // 1.75
         let e = EditorPrefs::default();
@@ -212,10 +220,12 @@ mod tests {
     #[test]
     fn normalize_falls_back_on_illegal_enums() {
         let a = Appearance {
+            theme: "neon".into(),
             text_size: "huge".into(),
             line_height: "loose".into(),
         }
         .normalize();
+        assert_eq!(a.theme, "morning", "非法主题回退默认");
         assert_eq!(a.text_size, "md");
         assert_eq!(a.line_height, "normal");
 
@@ -246,6 +256,9 @@ mod tests {
 
     #[test]
     fn normalize_keeps_legal_enums() {
+        for k in THEME_KEYS {
+            assert_eq!(pick(k, &THEME_KEYS, "morning"), k);
+        }
         for k in SIZE_KEYS {
             assert_eq!(pick(k, &SIZE_KEYS, "md"), k);
         }
@@ -290,6 +303,7 @@ mod tests {
     fn settings_serde_roundtrip_is_camel_case() {
         let s = Settings::default();
         let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"theme\""), "M6 主题字段进 JSON: {json}");
         assert!(json.contains("\"textSize\""), "前端按 camelCase 读: {json}");
         assert!(json.contains("\"trashRetentionDays\""));
         let back: Settings = serde_json::from_str(&json).unwrap();
@@ -302,6 +316,7 @@ mod tests {
         let legacy = r#"{"appearance":{"textSize":"lg"}}"#;
         let s: Settings = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.appearance.text_size, "lg");
+        assert_eq!(s.appearance.theme, "morning", "M6：老配置无 theme 字段 ⇒ 默认晨窗");
         assert_eq!(s.appearance.line_height, "normal");
         assert_eq!(s.editor.autosave_ms, 3000);
         // 完全空对象
@@ -314,6 +329,6 @@ mod tests {
         let s: Settings = serde_json::from_str(m5_legacy).unwrap();
         assert_eq!(s.appearance.text_size, "lg", "仍可识别的字段照常读取");
         assert_eq!(s.appearance.line_height, "normal");
-        assert_eq!(s, Settings { appearance: Appearance { text_size: "lg".into(), line_height: "normal".into() }, ..Settings::default() });
+        assert_eq!(s, Settings { appearance: Appearance { theme: "morning".into(), text_size: "lg".into(), line_height: "normal".into() }, ..Settings::default() });
     }
 }
