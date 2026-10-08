@@ -90,6 +90,17 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets(log_targets())
+                // 级别策略：**默认安静，只让本仓库的 crate 说话**。
+                // 插件默认是 Trace，于是所有依赖的 TRACE/DEBUG 都灌进 stdout：
+                // `mdns_sd` 为每个 mDNS 报文打 TRACE（实测一次 dev 会话 200KB+），
+                // `reqwest`/`hyper_util` 每次更新检查都刷 DEBUG——真正的应用日志被淹没。
+                // 全局收到 Info（依赖的 warn/error 仍保留），再把本仓库 lib/bin 提到
+                // Debug，保住 `log::debug!` 的 vault 协议等排查信息。
+                // level_for 是层级前缀匹配（`lanmark_lib::protocol` 命中 `lanmark_lib`）。
+                // 需要看依赖细节时，临时把下面这行改成 Debug/Trace 即可。
+                .level(log::LevelFilter::Info)
+                .level_for("lanmark_lib", log::LevelFilter::Debug)
+                .level_for("lanmark", log::LevelFilter::Debug)
                 .build(),
         )
         .manage(state.clone())
