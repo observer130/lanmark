@@ -1,6 +1,20 @@
 <!doctype html>
 <html lang="zh-CN">
   <head>
+    <script>
+      // M6c 首帧防闪白：主题真源是 AppConfig（设备偏好，异步 IPC 读取），赶不上
+      // 首帧 —— 这里同步读 applyTheme() 写下的启动缓存副本，先把 <html data-theme>
+      // 落位（深色用户冷启动不再闪一帧白）。未知值不匹配任何
+      // `:root[data-theme=…]` 块 ⇒ 自动落回晨窗默认，安全；缓存被清只退化为一帧
+      // 闪白，设置不丢（真源仍是 AppConfig）。
+      // 这段必须内联在 <head>：任何模块脚本/外链都晚于首帧。
+      try {
+        var t = localStorage.getItem("lanmark-theme");
+        if (t) document.documentElement.dataset.theme = t;
+      } catch (e) {
+        /* localStorage 不可用（隐私模式等）：忽略 */
+      }
+    </script>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/app-icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

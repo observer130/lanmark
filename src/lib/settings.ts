@@ -157,9 +157,31 @@ export function applyTheme(theme: ThemeKey, root?: HTMLElement): void {
   const el = root ?? document.documentElement;
   if (THEME_OPTIONS.some((o) => o.key === theme)) {
     el.dataset.theme = theme;
+    writeThemeCache(theme);
   } else {
     // 运行时脏值（手改 config / 未来版本回退）不写属性 ⇒ 落在 :root 晨窗默认
     delete el.dataset.theme;
+    writeThemeCache(null);
+  }
+}
+
+/** 首帧启动缓存的 key（`index.html` 内联脚本按此读取，两处必须一致） */
+export const THEME_CACHE_KEY = "lanmark-theme";
+
+/**
+ * M6c：把主题 key 写进 localStorage 作为**启动缓存**。
+ *
+ * 为什么需要它：`settings_get` 是异步 IPC，赶不上首帧——深色用户每次启动都会
+ * 先闪一帧浅色。`index.html` 的 <head> 内联脚本同步读这个缓存，先把
+ * `data-theme` 落位。**真源仍是 AppConfig**（硬约定 10）：缓存被清只退化为一帧
+ * 闪白，不丢设置；隐私模式/配额满时静默忽略。
+ */
+function writeThemeCache(theme: ThemeKey | null): void {
+  try {
+    if (theme) localStorage.setItem(THEME_CACHE_KEY, theme);
+    else localStorage.removeItem(THEME_CACHE_KEY);
+  } catch {
+    /* 忽略：退化为一帧闪白，不影响功能 */
   }
 }
 

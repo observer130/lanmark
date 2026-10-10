@@ -113,10 +113,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       applyAppearance(s.appearance);
     } catch (e) {
       if (seq !== loadSeq) return;
-      // 读失败也要落地外观：否则界面停在「无变量/无主题」状态，
-      // index.css 的 var() 全部落空 → 字号/行距塌成浏览器默认
+      // 读失败也要落地 CSS 变量：否则界面停在「无变量」状态，index.css 的
+      // var() 全部落空 → 字号/行距塌成浏览器默认。
+      // **主题故意不动**（M6c）：读失败是暂时的（IPC/磁盘），此时把主题重置成
+      // 默认会顺手覆盖首帧启动缓存 —— 等于把用户选的主题降级掉，且下次启动又闪白。
       set({ loading: false, error: String(e) });
-      applyAppearance(DEFAULT_APPEARANCE);
+      applyCssVars(DEFAULT_APPEARANCE);
     }
   },
 

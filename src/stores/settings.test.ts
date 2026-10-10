@@ -18,6 +18,7 @@ import {
   applyTheme,
   lineHeightValue,
   textSizePx,
+  THEME_CACHE_KEY,
   type Appearance,
 } from "../lib/settings";
 import { editorKey } from "../components/EditorPane";
@@ -66,6 +67,7 @@ describe("applyCssVars：变量写入", () => {
 describe("applyTheme：主题属性写入（M6）", () => {
   beforeEach(() => {
     document.documentElement.removeAttribute("data-theme");
+    localStorage.removeItem(THEME_CACHE_KEY);
   });
 
   it("把主题 key 写成 <html data-theme>（换肤靠 CSS 变量传导，不碰编辑器）", () => {
@@ -85,6 +87,17 @@ describe("applyTheme：主题属性写入（M6）", () => {
     applyTheme("neon" as never);
     expect(document.documentElement.dataset.theme).toBeUndefined();
   });
+
+  /** M6c：首帧防闪白靠 index.html 内联脚本读这个缓存，写入点必须与属性同步 */
+  it("同步维护首帧启动缓存（index.html 内联脚本读它）", () => {
+    applyTheme("night");
+    expect(localStorage.getItem(THEME_CACHE_KEY)).toBe("night");
+    applyTheme("wenkai");
+    expect(localStorage.getItem(THEME_CACHE_KEY)).toBe("wenkai");
+    // 脏值：属性清掉、缓存也要清（否则下次启动会应用一个未知主题）
+    applyTheme("neon" as never);
+    expect(localStorage.getItem(THEME_CACHE_KEY)).toBeNull();
+  });
 });
 
 describe("settings store：加载 / 乐观更新 / 回滚", () => {
@@ -92,6 +105,7 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     invoke.mockReset();
     document.documentElement.removeAttribute("style");
     document.documentElement.removeAttribute("data-theme");
+    localStorage.removeItem(THEME_CACHE_KEY);
     useSettingsStore.setState({
       settings: {
         appearance: DEFAULT_APPEARANCE,
@@ -120,6 +134,18 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     await useSettingsStore.getState().load();
     expect(useSettingsStore.getState().error).toContain("boom");
     expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("16px");
+  });
+
+  /** M6c：读失败是暂时的，不能顺手把主题重置成默认——那会覆盖首帧启动缓存，
+   *  等于把用户选的主题降级掉，且下次启动又闪白。 */
+  it("load 失败不覆盖主题（保住启动缓存）", async () => {
+    // 模拟「首帧内联脚本已按缓存落位」的状态
+    localStorage.setItem(THEME_CACHE_KEY, "night");
+    document.documentElement.dataset.theme = "night";
+    invoke.mockRejectedValueOnce(new Error("boom"));
+    await useSettingsStore.getState().load();
+    expect(document.documentElement.dataset.theme).toBe("night");
+    expect(localStorage.getItem(THEME_CACHE_KEY)).toBe("night");
   });
 
   it("load → 主题属性同步落地（M6）", async () => {
