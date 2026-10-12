@@ -49,7 +49,7 @@
 
   /* ── M6b 收编：原先散落在各条规则里的字面量，收成主题可覆盖的语义槽 ──
      以下取值 = 晨窗现状（与收编前逐项等价 ⇒ 视觉零变化），
-     夜航/纸页在下方 `:root[data-theme]` 块里各自重定义。 */
+     深色/纸页在下方 `:root[data-scheme]` 块里各自重定义。 */
   --c-surface: oklch(0.955 0.004 260);       /* 代码块 / 内嵌编辑器表面 */
   --c-surface-low: oklch(0.925 0.005 260);
   --c-surface-high: oklch(0.985 0.002 260);  /* 代码块工具按钮药丸底 */
@@ -73,8 +73,8 @@
   --sh-pop: 0 1px 2px rgb(15 18 30 / 0.1), 0 2px 6px rgb(15 18 30 / 0.08);
   --sh-slider: 0 1px 2px rgb(15 18 30 / 0.2), 0 2px 8px oklch(0.53 0.19 264 / 0.35);
 
-  /* ── 字体栈（M5 起不可调；M6d 起正文/等宽用内置字体）──
-     正文栈 = 内置 MiSans（三端一致），其后是系统兜底（生僻字回退）；
+  /* ── 字体栈（M7：编辑区字体可调，走 `<html data-font>`；界面壳固定）──
+     正文默认栈 = 内置 MiSans（三端一致），其后是系统兜底（生僻字回退）；
      等宽 = 内置 JetBrains Mono。界面壳（--font-sans，见 @theme）仍用系统栈：
      字体差异只作用于编辑区（docs/09 D3）。 */
   --lanmark-font-text: "MiSans", "Noto Sans", "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
@@ -89,15 +89,20 @@
 }
 
 /* ══════════════════════════════════════════════════════════
-   M6 主题块（docs/09 §6）：只覆盖 token 与编辑区字体栈。
-   切换点 = `<html data-theme>`（applyTheme，src/lib/settings.ts）——
-   改一个 DOM 属性即换肤，Crepe / CodeMirror / 组件零改动、不重建实例。
+   外观：配色与字体**解耦**（M7，拆自 M6 的捆绑主题）。
+   两个独立切换点，各是 <html> 上的一个属性：
+     data-scheme = light | dark | paper  → 只覆盖颜色 token（applyScheme）
+     data-font   = sans  | serif | kai   → 只覆盖 --lanmark-font-text（applyFont）
+   两者覆盖的属性不相交 ⇒ 任意 3×3 组合都成立；改一个 DOM 属性即换肤/换字，
+   Crepe / CodeMirror / 组件零改动、不重建实例（硬约定 11）。
+   `light` / `sans` 故意不写块：`:root` 就是它们——属性缺失或运行时脏值
+   自然落在默认视觉上，不会「未知主题打空全部变量」。
    ══════════════════════════════════════════════════════════ */
 
-/* ── 夜航（深色）──
+/* ── 深色（原「夜航」）──
    深色下投影几乎不可见，层次改由「表面亮一档 + 发丝线」承担；
    靛蓝提亮到 0.70（0.53 在深底上对比不足），强调面上的字色随之反转。 */
-:root[data-theme="night"] {
+:root[data-scheme="dark"] {
   color-scheme: dark;
   --c-canvas: oklch(0.16 0.012 260);
   --c-content: oklch(0.19 0.012 260);
@@ -135,9 +140,9 @@
   --sh-slider: 0 1px 2px rgb(0 0 0 / 0.5), 0 2px 8px oklch(0.70 0.14 264 / 0.45);
 }
 
-/* ── 纸页（衬线米黄 · 暖赭强调）──
-   字体栈先用系统衬线兜底；内置思源宋体落地后 `Noto Serif SC` 生效即多端一致。 */
-:root[data-theme="paper"] {
+/* ── 纸页（米黄底 · 暖赭强调）──
+   只给颜色；经典的「纸页 + 宋体」由用户自行组合（M7 解耦后不再捆绑）。 */
+:root[data-scheme="paper"] {
   --c-canvas: oklch(0.94 0.015 85);
   --c-content: oklch(0.963 0.014 86);
   --c-side: oklch(0.968 0.014 87);
@@ -170,15 +175,17 @@
   --c-appmark-shadow: rgb(70 50 20 / 0.16);
   --sh-card: 0 1px 2px rgb(80 60 30 / 0.08), 0 4px 14px rgb(80 60 30 / 0.07);
   --sh-pop: 0 1px 2px rgb(80 60 30 / 0.12), 0 2px 6px rgb(80 60 30 / 0.1);
-  /* 编辑区（正文 + 标题）换衬线；界面壳仍 sans（D3） */
+}
+
+/* ── 编辑区字体块（只覆盖 --lanmark-font-text；界面壳 --font-sans 不随动，D3）──
+   `sans` 无块 = `:root` 的内置 MiSans 栈。栈尾保留系统兜底：
+   内置字体缺字时逐级回退，不出现豆腐块。 */
+:root[data-font="serif"] {
   --lanmark-font-text: "Noto Serif SC", "Source Han Serif SC", "Noto Serif CJK SC",
     "Songti SC", "SimSun", Georgia, serif;
 }
 
-/* ── 文楷（霞鹜文楷）──
-   配色沿用晨窗（= 预览里确认的组合），只换编辑区字体为楷体；
-   字体文件内置后 `LXGW WenKai Screen` 生效，之前回退系统楷体/宋体。 */
-:root[data-theme="wenkai"] {
+:root[data-font="kai"] {
   --lanmark-font-text: "LXGW WenKai Screen", "Kaiti SC", "KaiTi", "楷体",
     "Noto Serif CJK SC", serif;
 }
@@ -202,7 +209,7 @@
   --shadow-card: var(--sh-card);
   --shadow-pop: var(--sh-pop);
   --shadow-slider: var(--sh-slider);
-  /* M5：字体不可调，直接给定常驻栈（此前经 --lanmark-font-* 间接、由设置写入）。
+  /* 界面壳字体栈常驻，**不随 data-font 变**（字体只作用于编辑区，M7 定）。
      --font-sans = M4a「系统默认」界面字体栈；等宽沿用上面的常驻变量。 */
   --font-sans: "Noto Sans", "Segoe UI", system-ui, "Noto Sans CJK SC", "Source Han Sans SC",
     "PingFang SC", "Microsoft YaHei", sans-serif;

@@ -10,7 +10,8 @@ import type { Settings } from "../lib/settings";
 
 const SETTINGS: Settings = {
   appearance: {
-    theme: "morning",
+    scheme: "light",
+    font: "sans",
     textSize: "md",
     lineHeight: "normal",
   },
@@ -156,12 +157,18 @@ describe("E3 诊断信息", () => {
       input({
         settings: {
           ...SETTINGS,
-          appearance: { ...SETTINGS.appearance, theme: "night", textSize: "xl", lineHeight: "relaxed" },
+          appearance: {
+            ...SETTINGS.appearance,
+            scheme: "dark",
+            font: "kai",
+            textSize: "xl",
+            lineHeight: "relaxed",
+          },
           editor: { ...SETTINGS.editor, defaultMode: "source", autosaveMs: 3000 },
         },
       }),
     );
-    expect(t).toContain("主题=night");
+    expect(t).toContain("配色=dark 字体=kai");
     expect(t).toContain("字号=xl");
     expect(t).toContain("行距=relaxed");
     expect(t).toContain("默认模式=source 自动保存=3000ms");

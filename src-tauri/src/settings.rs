@@ -11,9 +11,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// M6 主题 key（docs/09 §6）：晨窗 / 夜航 / 纸页 / 文楷。
-/// `morning` 即 M3 以来的硬编码视觉 ⇒ 作默认值，升级用户界面不突变。
-const THEME_KEYS: [&str; 4] = ["morning", "night", "paper", "wenkai"];
+/// M7 配色 key（与前端 `ColorSchemeKey` 同序同值）：浅色 / 深色 / 纸页。
+/// `light` 即 M3 以来的硬编码视觉 ⇒ 作默认值，升级用户界面不突变。
+const SCHEME_KEYS: [&str; 3] = ["light", "dark", "paper"];
+/// M7 编辑区字体 key（与前端 `FontKey` 同序同值）：默认 MiSans / 思源宋体 / 霞鹜文楷。
+/// 字体栈只在 index.css，这里只认 key（不接受用户输入串）。
+const FONT_KEYS: [&str; 3] = ["sans", "serif", "kai"];
 /// 字号 / 行距的合法枚举。
 const SIZE_KEYS: [&str; 4] = ["sm", "md", "lg", "xl"];
 const LINE_HEIGHT_KEYS: [&str; 3] = ["compact", "normal", "relaxed"];
@@ -31,8 +34,20 @@ const AUTOSAVE_KEYS: [u32; 4] = [1500, 3000, 10_000, 20_000];
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Appearance {
-    /// M6 主题 key；前端据此写 `<html data-theme>`（配色 + 编辑区字体，docs/09 §6）
-    pub theme: String,
+    /// M7 配色 key；前端据此写 `<html data-scheme>`（**只含颜色 token**）
+    ///
+    /// `alias = "theme"` 是旧配置的**迁移入口**：M6 把配色与字体捆在一个 `theme`
+    /// 字段里（morning/night/paper/wenkai），这里让旧值直接落到 `scheme`，
+    /// 再由 `normalize()` 拆出配套的 `font`（见 `legacy_font`）。
+    #[serde(alias = "theme")]
+    pub scheme: String,
+    /// M7 编辑区字体 key；前端据此写 `<html data-font>`（界面壳字体不随动）
+    ///
+    /// 字段级 `default`（空串）覆盖容器级的 `Appearance::default()`：容器级默认会用
+    /// `font = "sans"` 填缺字段，那样就分不清「旧配置没这个字段」与「用户选了默认」，
+    /// M6 → M7 的字体推导会失效（见 `normalize`）。
+    #[serde(default)]
+    pub font: String,
     /// 正文字号档位；`md` = 16px（与既往硬编码一致 ⇒ 默认视觉不变）
     pub text_size: String,
     /// 行距档位；`normal` = 1.75
@@ -82,7 +97,9 @@ impl UpdatePrefs {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            theme: "morning".into(),
+            // M7：默认 = 浅色 + 默认字体 = M6 的 morning，升级用户视觉零变化
+            scheme: "light".into(),
+            font: "sans".into(),
             text_size: "md".into(),
             line_height: "normal".into(),
         }
@@ -142,12 +159,35 @@ fn pick(key: &str, allowed: &[&str], fallback: &str) -> String {
     }
 }
 
+/// M6 捆绑主题 → 配套字体：旧配置只写了 `theme`、没写 `font` 时用它补齐。
+/// 返回 `None` = 不是旧主题值（新枚举值或脏值），交给 `pick` 兜底。
+fn legacy_font(scheme: &str) -> Option<&'static str> {
+    match scheme {
+        "paper" => Some("serif"),
+        "wenkai" => Some("kai"),
+        "morning" | "night" => Some("sans"),
+        _ => None,
+    }
+}
+
 impl Appearance {
     /// 逐字段归一化；返回值即前端应采用的最终值。
-    /// 字体相关的白名单校验（`sanitize_font_stack`）随字体设置一并移除：
-    /// 字体栈现在常驻 index.css，用户输入不再进入 CSS 变量。
+    ///
+    /// **顺序有讲究**：先按原始 `scheme`（可能是 M6 的 theme 值）补出缺省字体，
+    /// 再把 scheme 归一化到新枚举——反过来的话 `wenkai`/`paper` 的字体信息就丢了。
+    /// 字体相关的自定义串校验（`sanitize_font_stack`）自 M5 起已移除：字体栈常驻
+    /// index.css，用户输入不再进入 CSS 变量，这里只认三档 key。
     pub fn normalize(mut self) -> Self {
-        self.theme = pick(&self.theme, &THEME_KEYS, "morning");
+        if self.font.is_empty() {
+            self.font = legacy_font(&self.scheme).unwrap_or("sans").to_string();
+        }
+        self.scheme = match self.scheme.as_str() {
+            // M6 → M7 迁移：morning/wenkai 都是晨窗配色，night→dark，paper 不变
+            "morning" | "wenkai" => "light".to_string(),
+            "night" => "dark".to_string(),
+            other => pick(other, &SCHEME_KEYS, "light"),
+        };
+        self.font = pick(&self.font, &FONT_KEYS, "sans");
         self.text_size = pick(&self.text_size, &SIZE_KEYS, "md");
         self.line_height = pick(&self.line_height, &LINE_HEIGHT_KEYS, "normal");
         self
@@ -206,7 +246,8 @@ mod tests {
     fn defaults_match_previous_hardcoded_visuals() {
         // 默认值必须与 M3 的硬编码等价，否则升级用户界面会突变（docs/08 §3 表头）
         let a = Appearance::default();
-        assert_eq!(a.theme, "morning", "M6：默认主题 = 现状晨窗，升级不突变");
+        assert_eq!(a.scheme, "light", "M7：默认配色 = 现状晨窗，升级不突变");
+        assert_eq!(a.font, "sans", "M7：默认字体 = 内置 MiSans");
         assert_eq!(a.text_size, "md"); // 16px
         assert_eq!(a.line_height, "normal"); // 1.75
         let e = EditorPrefs::default();
@@ -220,12 +261,14 @@ mod tests {
     #[test]
     fn normalize_falls_back_on_illegal_enums() {
         let a = Appearance {
-            theme: "neon".into(),
+            scheme: "neon".into(),
+            font: "comic".into(),
             text_size: "huge".into(),
             line_height: "loose".into(),
         }
         .normalize();
-        assert_eq!(a.theme, "morning", "非法主题回退默认");
+        assert_eq!(a.scheme, "light", "非法配色回退默认");
+        assert_eq!(a.font, "sans", "非法字体回退默认");
         assert_eq!(a.text_size, "md");
         assert_eq!(a.line_height, "normal");
 
@@ -256,8 +299,11 @@ mod tests {
 
     #[test]
     fn normalize_keeps_legal_enums() {
-        for k in THEME_KEYS {
-            assert_eq!(pick(k, &THEME_KEYS, "morning"), k);
+        for k in SCHEME_KEYS {
+            assert_eq!(pick(k, &SCHEME_KEYS, "light"), k);
+        }
+        for k in FONT_KEYS {
+            assert_eq!(pick(k, &FONT_KEYS, "sans"), k);
         }
         for k in SIZE_KEYS {
             assert_eq!(pick(k, &SIZE_KEYS, "md"), k);
@@ -303,11 +349,43 @@ mod tests {
     fn settings_serde_roundtrip_is_camel_case() {
         let s = Settings::default();
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains("\"theme\""), "M6 主题字段进 JSON: {json}");
+        assert!(json.contains("\"scheme\""), "M7 配色字段进 JSON: {json}");
+        assert!(json.contains("\"font\""), "M7 字体字段进 JSON: {json}");
+        assert!(!json.contains("\"theme\""), "M6 的捆绑 theme 字段不再写回: {json}");
         assert!(json.contains("\"textSize\""), "前端按 camelCase 读: {json}");
         assert!(json.contains("\"trashRetentionDays\""));
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
+    }
+
+    /// M6 → M7 迁移：旧配置只有一个 `theme`，必须拆成配色 + 配套字体，
+    /// 且四套旧主题的视觉都不能变（morning/night/paper/wenkai）。
+    #[test]
+    fn m6_theme_migrates_to_scheme_and_font() {
+        let cases = [
+            ("morning", "light", "sans"),
+            ("night", "dark", "sans"),
+            ("paper", "paper", "serif"),
+            ("wenkai", "light", "kai"),
+        ];
+        for (theme, scheme, font) in cases {
+            let a = serde_json::from_str::<Appearance>(&format!(
+                r#"{{"theme":"{theme}"}}"#
+            ))
+            .unwrap()
+            .normalize();
+            assert_eq!(a.scheme, scheme, "旧主题 {theme} 的配色");
+            assert_eq!(a.font, font, "旧主题 {theme} 的配套字体");
+            assert_eq!(a.text_size, "md");
+            assert_eq!(a.line_height, "normal");
+        }
+
+        // 新配置显式给了 font 时，不再按旧值推导（解耦后任意组合都要保住）
+        let a = serde_json::from_str::<Appearance>(r#"{"theme":"paper","font":"sans"}"#)
+            .unwrap()
+            .normalize();
+        assert_eq!(a.scheme, "paper");
+        assert_eq!(a.font, "sans", "用户显式选的字体优先于旧主题推导");
     }
 
     #[test]
@@ -316,7 +394,11 @@ mod tests {
         let legacy = r#"{"appearance":{"textSize":"lg"}}"#;
         let s: Settings = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.appearance.text_size, "lg");
-        assert_eq!(s.appearance.theme, "morning", "M6：老配置无 theme 字段 ⇒ 默认晨窗");
+        assert_eq!(s.appearance.scheme, "light", "M7：老配置无配色字段 ⇒ 容器默认浅色");
+        // 字体是字段级 default（空串）——留出「缺字段」与「用户选了默认」的区别，
+        // 由 normalize 补成 sans（读路径 settings_read_op 也会归一化）
+        assert_eq!(s.appearance.font, "", "M7：老配置无字体字段 ⇒ 空串待归一化");
+        assert_eq!(s.appearance.clone().normalize().font, "sans");
         assert_eq!(s.appearance.line_height, "normal");
         assert_eq!(s.editor.autosave_ms, 3000);
         // 完全空对象
@@ -329,6 +411,15 @@ mod tests {
         let s: Settings = serde_json::from_str(m5_legacy).unwrap();
         assert_eq!(s.appearance.text_size, "lg", "仍可识别的字段照常读取");
         assert_eq!(s.appearance.line_height, "normal");
-        assert_eq!(s, Settings { appearance: Appearance { theme: "morning".into(), text_size: "lg".into(), line_height: "normal".into() }, ..Settings::default() });
+        // 归一化后（= 应用实际看到的值）其余字段落到 M7 默认
+        assert_eq!(
+            s.appearance.normalize(),
+            Appearance {
+                scheme: "light".into(),
+                font: "sans".into(),
+                text_size: "lg".into(),
+                line_height: "normal".into()
+            }
+        );
     }
 }

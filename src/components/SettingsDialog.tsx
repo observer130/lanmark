@@ -28,10 +28,11 @@ import { useSyncStore } from "../stores/sync";
 import {
   AUTOSAVE_OPTIONS,
   EDITOR_MODE_OPTIONS,
+  FONT_OPTIONS,
   LINE_HEIGHT_OPTIONS,
   NEW_NOTE_LOCATION_OPTIONS,
+  SCHEME_OPTIONS,
   SIZE_OPTIONS,
-  THEME_OPTIONS,
   TRASH_RETENTION_OPTIONS,
   type EditorMode,
 } from "../lib/settings";
@@ -142,7 +143,7 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
 
 /* ── 分组内容 ── */
 
-/** 外观（M6：主题 + 排版两项；主题字体栈随主题，界面字体常驻 index.css） */
+/** 外观（M7：配色与字体**两个独立按钮**；界面字体不随动，仍常驻 index.css） */
 function AppearanceSection() {
   const a = useSettingsStore((s) => s.settings.appearance);
   const patch = useSettingsStore((s) => s.patch);
@@ -152,8 +153,15 @@ function AppearanceSection() {
   return (
     <>
       <Group title="主题">
-        <Row label="主题" hint="配色与编辑区字体（界面字体不变）">
-          <Segmented value={a.theme} options={THEME_OPTIONS} onChange={(k) => set({ theme: k })} />
+        <Row label="配色" hint="界面与正文的颜色方案">
+          <Segmented
+            value={a.scheme}
+            options={SCHEME_OPTIONS}
+            onChange={(k) => set({ scheme: k })}
+          />
+        </Row>
+        <Row label="字体" hint="正文与标题的字面">
+          <Segmented value={a.font} options={FONT_OPTIONS} onChange={(k) => set({ font: k })} />
         </Row>
       </Group>
       <Group title="排版">
@@ -934,7 +942,7 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
       : "规模: 未知",
     `回收站: ${i.stats ? `${i.stats.trashEntries} 项 · ${fmtBytes(i.stats.trashBytes)}` : "未知"}`,
     ...syncLines,
-    `外观: 主题=${a.theme} 字号=${a.textSize} 行距=${a.lineHeight}`,
+    `外观: 配色=${a.scheme} 字体=${a.font} 字号=${a.textSize} 行距=${a.lineHeight}`,
     `编辑器: 默认模式=${i.settings.editor.defaultMode} 自动保存=${i.settings.editor.autosaveMs}ms`,
     `配置目录: ${i.info?.configDir ?? "?"}`,
     `日志目录: ${i.info?.logDir ?? "?"}`,

@@ -8,10 +8,15 @@ use crate::commands::CmdResult;
 use crate::settings::{Settings, SettingsPatch};
 use crate::vault::{self, AppConfig};
 
-/// 纯逻辑：读设置（不做归一化——落盘值已由 patch 归一化；此处保留原样，
-/// 归一化只在写入路径发生，保证「读到的 = 盘上的」）。
+/// 纯逻辑：读设置。**读侧也要归一化外观**（M7）：M6 的捆绑 `theme` 只在写入路径迁移
+/// 不够——升级用户第一次 `settings_get` 拿到的会是 `scheme:"night"` / `font:""` 这种
+/// 半成品，前端按新枚举校验后会把配色丢掉（静默回落浅色）。归一化幂等，新配置读出来
+/// 与盘上完全一致；只有旧配置会在这里被「翻译」成新枚举。
 pub fn settings_read_op(cfg: &AppConfig) -> Settings {
-    cfg.settings()
+    Settings {
+        appearance: cfg.appearance.clone().normalize(),
+        ..cfg.settings()
+    }
 }
 
 /// 纯逻辑：应用 patch 到配置（原地改各小节，不动 vault_path / sync_auto）。
@@ -48,7 +53,7 @@ pub fn settings_get(app: tauri::AppHandle) -> CmdResult<Settings> {
 }
 
 /// 改设置：传入的小节整体替换，逐字段归一化后落盘，**返回归一化结果**
-/// （前端以返回值为准——非法字体串会被这里回退成 `system`）。
+/// （前端以返回值为准——非法配色/字体 key 会被这里回退成 `light` / `sans`）。
 #[tauri::command]
 pub fn settings_patch(app: tauri::AppHandle, patch: SettingsPatch) -> CmdResult<Settings> {
     let mut cfg = vault::load_config(&app);
@@ -165,29 +170,57 @@ mod tests {
         assert_eq!(settings_read_op(&cfg), Settings::default());
     }
 
-    /// M6：主题经命令层落盘，非法值同样被归一化（前端以返回值为准）。
+    /// M7 读侧迁移：M6 老配置经 serde alias 变成 `scheme:"night"` + `font:""`，
+    /// 读出来必须已是新枚举——否则前端按新白名单校验会静默丢掉用户选的深色。
     #[test]
-    fn patch_persists_theme_and_normalizes() {
+    fn read_migrates_legacy_theme() {
+        let cfg = AppConfig {
+            appearance: Appearance {
+                scheme: "night".into(), // = 旧 theme 值经 alias 落位
+                font: String::new(),    // 旧配置没有这个字段
+                ..Appearance::default()
+            },
+            ..AppConfig::default()
+        };
+        let out = settings_read_op(&cfg);
+        assert_eq!(out.appearance.scheme, "dark");
+        assert_eq!(out.appearance.font, "sans");
+    }
+
+    /// M7：配色与字体经命令层落盘，非法值同样被归一化（前端以返回值为准）。
+    #[test]
+    fn patch_persists_scheme_and_font_and_normalizes() {
         let mut cfg = AppConfig::default();
         let out = settings_apply_op(
             &mut cfg,
             SettingsPatch {
-                appearance: Some(Appearance { theme: "night".into(), ..Appearance::default() }),
+                appearance: Some(Appearance {
+                    scheme: "dark".into(),
+                    font: "kai".into(),
+                    ..Appearance::default()
+                }),
                 ..Default::default()
             },
         );
-        assert_eq!(out.appearance.theme, "night");
-        assert_eq!(cfg.appearance.theme, "night", "落进了配置");
+        assert_eq!(out.appearance.scheme, "dark");
+        assert_eq!(out.appearance.font, "kai");
+        assert_eq!(cfg.appearance.scheme, "dark", "落进了配置");
+        assert_eq!(cfg.appearance.font, "kai");
         assert_eq!(out.appearance.text_size, "md", "同小节其余字段保持默认");
 
         let out = settings_apply_op(
             &mut cfg,
             SettingsPatch {
-                appearance: Some(Appearance { theme: "neon".into(), ..Appearance::default() }),
+                appearance: Some(Appearance {
+                    scheme: "neon".into(),
+                    font: "comic".into(),
+                    ..Appearance::default()
+                }),
                 ..Default::default()
             },
         );
-        assert_eq!(out.appearance.theme, "morning", "非法主题回退晨窗");
-        assert_eq!(cfg.appearance.theme, "morning", "落盘也是归一化后的值");
+        assert_eq!(out.appearance.scheme, "light", "非法配色回退浅色");
+        assert_eq!(out.appearance.font, "sans", "非法字体回退默认");
+        assert_eq!(cfg.appearance.scheme, "light", "落盘也是归一化后的值");
     }
 }

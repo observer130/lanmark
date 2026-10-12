@@ -10,13 +10,14 @@ import { invoke } from "@tauri-apps/api/core";
  * 与 Rust 的对应关系：Rust 只存枚举 key，**枚举→像素值全在本文件**（单一来源），
  * Rust 侧不重复一份 CSS 知识。
  *
- * M5 减法：字体（界面/正文/等宽/自定义）、源码字号、正文宽度、界面缩放已移除，
- * 字体栈常驻 `index.css`（`--font-sans` / `--lanmark-font-text` / `--lanmark-font-mono`）；
- * 旧 config.json 里的相关字段由 serde 静默忽略、下次保存自然清除，无需迁移。
+ * M5 减法：界面字体、自定义字体串、源码字号、正文宽度、界面缩放已移除；
+ * 界面壳字体栈常驻 `index.css` 的 `--font-sans`。**M7 只恢复「编辑区正文/标题字体」
+ * 三档**（`--lanmark-font-text` 的固定栈，不接受用户输入串），自定义字体仍不做。
  *
- * M6 主题：新增 `theme` 枚举（晨窗/夜航/纸页/文楷）。色值与主题字体栈全在
- * `index.css` 的 `:root[data-theme=…]` 块里，本文件只负责把 key 写成
- * `<html data-theme>` 属性（`applyTheme`）——JS 对「主题长什么样」零知识。
+ * M6 主题 → M7 解耦：外观拆成 `scheme`（浅色/深色/纸页）与 `font`（默认/宋体/楷体）
+ * 两个独立枚举，分别写成 `<html data-scheme>` / `<html data-font>`。色值与字体栈全在
+ * `index.css` 的 `:root[data-scheme=…]` / `:root[data-font=…]` 块里（`applyScheme` /
+ * `applyFont`）——JS 对「长什么样」零知识，只负责搬 key。
  */
 
 /* ── 枚举 ── */
@@ -25,11 +26,14 @@ export type SizeKey = "sm" | "md" | "lg" | "xl";
 export type LineHeightKey = "compact" | "normal" | "relaxed";
 export type EditorMode = "read" | "wysiwyg" | "source";
 export type NewNoteLocation = "root" | "last";
-/** M6 主题 key（与 Rust `THEME_KEYS` 同序同值，docs/09 §6） */
-export type ThemeKey = "morning" | "night" | "paper" | "wenkai";
+/** M7 配色 key（与 Rust `SCHEME_KEYS` 同序同值）——只决定颜色 token */
+export type ColorSchemeKey = "light" | "dark" | "paper";
+/** M7 编辑区字体 key（与 Rust `FONT_KEYS` 同序同值）——只决定 `--lanmark-font-text` */
+export type FontKey = "sans" | "serif" | "kai";
 
 export interface Appearance {
-  theme: ThemeKey;
+  scheme: ColorSchemeKey;
+  font: FontKey;
   textSize: SizeKey;
   lineHeight: LineHeightKey;
 }
@@ -87,12 +91,18 @@ export const SIZE_OPTIONS: { key: SizeKey; label: string }[] = [
   { key: "xl", label: "特大" },
 ];
 
-/** 主题清单（设置页分段按钮用）；配色/字体在 index.css 的 `[data-theme]` 块 */
-export const THEME_OPTIONS: { key: ThemeKey; label: string }[] = [
-  { key: "morning", label: "晨窗" },
-  { key: "night", label: "夜航" },
+/** 配色清单（设置页分段按钮用）；色值只在 index.css 的 `[data-scheme]` 块 */
+export const SCHEME_OPTIONS: { key: ColorSchemeKey; label: string }[] = [
+  { key: "light", label: "浅色" },
+  { key: "dark", label: "深色" },
   { key: "paper", label: "纸页" },
-  { key: "wenkai", label: "文楷" },
+];
+
+/** 编辑区字体清单；字体栈只在 index.css 的 `[data-font]` 块（界面壳不随动，D3） */
+export const FONT_OPTIONS: { key: FontKey; label: string }[] = [
+  { key: "sans", label: "默认" },
+  { key: "serif", label: "宋体" },
+  { key: "kai", label: "楷体" },
 ];
 
 export const LINE_HEIGHT_OPTIONS: { key: LineHeightKey; label: string }[] = [
@@ -128,7 +138,7 @@ export const TRASH_RETENTION_OPTIONS: { key: number; label: string }[] = [
   { key: 0, label: "从不" },
 ];
 
-/* ── 外观写入（applyCssVars / applyTheme 是仅有的两个写入点） ── */
+/* ── 外观写入（applyCssVars / applyScheme / applyFont 是仅有的三个写入点） ── */
 
 /**
  * 把外观设置写进 `:root` 的 CSS 变量（M5 减法后只剩字号/行距两项）。
@@ -145,41 +155,60 @@ export function applyCssVars(a: Appearance, root?: HTMLElement): void {
 }
 
 /**
- * M6 主题：把 key 写成 `<html data-theme="…">`，其余全交给 `index.css` 的
- * `:root[data-theme=…]` 变量块（配色 + 编辑区字体栈）传导。
+ * M7 配色：把 key 写成 `<html data-scheme="…">`，其余全交给 `index.css` 的
+ * `:root[data-scheme=…]` 变量块传导。
  *
  * **为什么不用 style.setProperty 逐个写色值**：那等于把设计 token 复制进 JS，
- * 与「色值只在 CSS、枚举映射只在 TS」的分工相悖（docs/09 §4.1）；改主题是一个
+ * 与「色值只在 CSS、枚举映射只在 TS」的分工相悖（docs/09 §4.1）；改配色是一个
  * DOM 属性写入，同样不重建编辑器实例（硬约定 11）。
  * 非法 key 的兜底在 Rust 归一化（`settings_patch` 返回值为准）+ TS 类型约束。
  */
-export function applyTheme(theme: ThemeKey, root?: HTMLElement): void {
+export function applyScheme(scheme: ColorSchemeKey, root?: HTMLElement): void {
   const el = root ?? document.documentElement;
-  if (THEME_OPTIONS.some((o) => o.key === theme)) {
-    el.dataset.theme = theme;
-    writeThemeCache(theme);
+  if (SCHEME_OPTIONS.some((o) => o.key === scheme)) {
+    el.dataset.scheme = scheme;
+    writeAppearanceCache(SCHEME_CACHE_KEY, scheme);
   } else {
-    // 运行时脏值（手改 config / 未来版本回退）不写属性 ⇒ 落在 :root 晨窗默认
-    delete el.dataset.theme;
-    writeThemeCache(null);
+    // 运行时脏值（手改 config / 未来版本回退）不写属性 ⇒ 落在 :root 浅色默认
+    delete el.dataset.scheme;
+    writeAppearanceCache(SCHEME_CACHE_KEY, null);
+  }
+}
+
+/**
+ * M7 编辑区字体：把 key 写成 `<html data-font="…">`，字体栈由 `index.css` 的
+ * `:root[data-font=…]` 块给出（`sans` 无块 = `:root` 的内置 MiSans）。
+ *
+ * 与配色同理：只写属性不写字体串，也不重建编辑器实例（硬约定 11）；
+ * 界面壳 `--font-sans` 不随这个属性变（字体只作用于编辑区，M5 D3 边界）。
+ */
+export function applyFont(font: FontKey, root?: HTMLElement): void {
+  const el = root ?? document.documentElement;
+  if (FONT_OPTIONS.some((o) => o.key === font)) {
+    el.dataset.font = font;
+    writeAppearanceCache(FONT_CACHE_KEY, font);
+  } else {
+    delete el.dataset.font;
+    writeAppearanceCache(FONT_CACHE_KEY, null);
   }
 }
 
 /** 首帧启动缓存的 key（`index.html` 内联脚本按此读取，两处必须一致） */
-export const THEME_CACHE_KEY = "lanmark-theme";
+export const SCHEME_CACHE_KEY = "lanmark-scheme";
+export const FONT_CACHE_KEY = "lanmark-font";
 
 /**
- * M6c：把主题 key 写进 localStorage 作为**启动缓存**。
+ * M6c：把外观 key 写进 localStorage 作为**启动缓存**。
  *
  * 为什么需要它：`settings_get` 是异步 IPC，赶不上首帧——深色用户每次启动都会
- * 先闪一帧浅色。`index.html` 的 <head> 内联脚本同步读这个缓存，先把
- * `data-theme` 落位。**真源仍是 AppConfig**（硬约定 10）：缓存被清只退化为一帧
- * 闪白，不丢设置；隐私模式/配额满时静默忽略。
+ * 先闪一帧浅色（换字体同理）。`index.html` 的 <head> 内联脚本同步读这两个缓存，
+ * 先把 `data-scheme` / `data-font` 落位。**真源仍是 AppConfig**（硬约定 10）：
+ * 缓存被清只退化为一帧闪白，不丢设置；隐私模式/配额满时静默忽略。
  */
-function writeThemeCache(theme: ThemeKey | null): void {
+function writeAppearanceCache(key: string, value: string | null): void {
   try {
-    if (theme) localStorage.setItem(THEME_CACHE_KEY, theme);
-    else localStorage.removeItem(THEME_CACHE_KEY);
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
   } catch {
     /* 忽略：退化为一帧闪白，不影响功能 */
   }

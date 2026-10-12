@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import {
   applyCssVars,
-  applyTheme,
+  applyFont,
+  applyScheme,
   settings as settingsApi,
   type Appearance,
   type EditorPrefs,
@@ -25,7 +26,8 @@ import {
 
 /** 与 Rust `settings::Appearance::default()` 逐字段一致的兜底默认值 */
 export const DEFAULT_APPEARANCE: Appearance = {
-  theme: "morning",
+  scheme: "light",
+  font: "sans",
   textSize: "md",
   lineHeight: "normal",
 };
@@ -84,13 +86,15 @@ interface SettingsStore {
 export type SectionKey = "appearance" | "editor" | "storage" | "sync" | "about";
 
 /**
- * 外观写入的**唯一入口**：CSS 变量（字号/行距）+ `<html data-theme>`（M6 主题）。
- * 两者都只影响渲染、都不进编辑器 key（硬约定 11）——合成一个函数是为了
- * 不可能出现「改了 state 却漏写主题属性」这类半应用状态。
+ * 外观写入的**唯一入口**：CSS 变量（字号/行距）+ `<html data-scheme>`（配色）
+ * + `<html data-font>`（编辑区字体）。三者都只影响渲染、都不进编辑器 key
+ * （硬约定 11）——合成一个函数是为了不可能出现「改了 state 却漏写某个属性」
+ * 这类半应用状态。
  */
 const applyAppearance = (a: Appearance): void => {
   applyCssVars(a);
-  applyTheme(a.theme);
+  applyScheme(a.scheme);
+  applyFont(a.font);
 };
 
 let loadSeq = 0;
@@ -115,8 +119,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (seq !== loadSeq) return;
       // 读失败也要落地 CSS 变量：否则界面停在「无变量」状态，index.css 的
       // var() 全部落空 → 字号/行距塌成浏览器默认。
-      // **主题故意不动**（M6c）：读失败是暂时的（IPC/磁盘），此时把主题重置成
-      // 默认会顺手覆盖首帧启动缓存 —— 等于把用户选的主题降级掉，且下次启动又闪白。
+      // **配色/字体故意不动**（M6c）：读失败是暂时的（IPC/磁盘），此时把它们
+      // 重置成默认会顺手覆盖首帧启动缓存 —— 等于把用户选的配色降级掉，
+      // 且下次启动又闪白。
       set({ loading: false, error: String(e) });
       applyCssVars(DEFAULT_APPEARANCE);
     }

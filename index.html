@@ -2,15 +2,19 @@
 <html lang="zh-CN">
   <head>
     <script>
-      // M6c 首帧防闪白：主题真源是 AppConfig（设备偏好，异步 IPC 读取），赶不上
-      // 首帧 —— 这里同步读 applyTheme() 写下的启动缓存副本，先把 <html data-theme>
-      // 落位（深色用户冷启动不再闪一帧白）。未知值不匹配任何
-      // `:root[data-theme=…]` 块 ⇒ 自动落回晨窗默认，安全；缓存被清只退化为一帧
-      // 闪白，设置不丢（真源仍是 AppConfig）。
+      // M6c 首帧防闪白：外观真源是 AppConfig（设备偏好，异步 IPC 读取），赶不上
+      // 首帧 —— 这里同步读 applyScheme/applyFont 写下的启动缓存副本，先把
+      // <html data-scheme> / <html data-font> 落位（深色用户冷启动不再闪一帧白，
+      // 换字体也不再先闪一帧默认字）。M7 起配色与字体是两个独立 key。
+      // 未知值不匹配任何 `:root[data-scheme=…]` / `:root[data-font=…]` 块
+      // ⇒ 自动落回浅色 + 默认字体，安全；缓存被清只退化为一帧闪白，
+      // 设置不丢（真源仍是 AppConfig）。
       // 这段必须内联在 <head>：任何模块脚本/外链都晚于首帧。
       try {
-        var t = localStorage.getItem("lanmark-theme");
-        if (t) document.documentElement.dataset.theme = t;
+        var s = localStorage.getItem("lanmark-scheme");
+        if (s) document.documentElement.dataset.scheme = s;
+        var f = localStorage.getItem("lanmark-font");
+        if (f) document.documentElement.dataset.font = f;
       } catch (e) {
         /* localStorage 不可用（隐私模式等）：忽略 */
       }

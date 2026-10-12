@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * M4b 外观设置的前端测试（M5 减法后：字号/行距 + 编辑器 + 存储链路；M6 增主题）。
+ * M4b 外观设置的前端测试（M5 减法后：字号/行距 + 编辑器 + 存储链路；M6 增主题；
+ * M7 主题拆成配色/字体两个独立设置）。
  *
  * 覆盖三件事：
  * 1. 枚举 → CSS 值映射（字号四档 / 行距）
- * 2. 应用与回滚链路（乐观更新、以 Rust 返回值为准、失败复原变量与主题）
- * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号/主题会重建 Crepe 实例，
- *    触发伪 markdownUpdated → 打开笔记被重写，硬约定 3）
+ * 2. 应用与回滚链路（乐观更新、以 Rust 返回值为准、失败复原变量与外观属性）
+ * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号/配色/字体会重建 Crepe
+ *    实例，触发伪 markdownUpdated → 打开笔记被重写，硬约定 3）
  */
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -15,10 +16,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import {
   applyCssVars,
-  applyTheme,
+  applyFont,
+  applyScheme,
+  FONT_CACHE_KEY,
   lineHeightValue,
+  SCHEME_CACHE_KEY,
   textSizePx,
-  THEME_CACHE_KEY,
   type Appearance,
 } from "../lib/settings";
 import { editorKey } from "../components/EditorPane";
@@ -64,39 +67,58 @@ describe("applyCssVars：变量写入", () => {
   });
 });
 
-describe("applyTheme：主题属性写入（M6）", () => {
+describe("applyScheme / applyFont：外观属性写入（M7 解耦）", () => {
   beforeEach(() => {
-    document.documentElement.removeAttribute("data-theme");
-    localStorage.removeItem(THEME_CACHE_KEY);
+    document.documentElement.removeAttribute("data-scheme");
+    document.documentElement.removeAttribute("data-font");
+    localStorage.removeItem(SCHEME_CACHE_KEY);
+    localStorage.removeItem(FONT_CACHE_KEY);
   });
 
-  it("把主题 key 写成 <html data-theme>（换肤靠 CSS 变量传导，不碰编辑器）", () => {
-    applyTheme("night");
-    expect(document.documentElement.dataset.theme).toBe("night");
-    applyTheme("paper");
-    expect(document.documentElement.dataset.theme).toBe("paper");
+  it("配色与字体各写一个属性、互不干扰（换肤靠 CSS 变量传导，不碰编辑器）", () => {
+    applyScheme("dark");
+    expect(document.documentElement.dataset.scheme).toBe("dark");
+    expect(document.documentElement.dataset.font).toBeUndefined();
+    applyFont("kai");
+    expect(document.documentElement.dataset.font).toBe("kai");
+    expect(document.documentElement.dataset.scheme).toBe("dark");
+    applyScheme("paper");
+    expect(document.documentElement.dataset.scheme).toBe("paper");
+    // 换配色不得动字体
+    expect(document.documentElement.dataset.font).toBe("kai");
   });
 
-  it("morning 也写属性——`:root` 即晨窗，无主题块匹配时天然等价", () => {
-    applyTheme("morning");
-    expect(document.documentElement.dataset.theme).toBe("morning");
+  it("light / sans 也写属性——`:root` 即默认，无块匹配时天然等价", () => {
+    applyScheme("light");
+    applyFont("sans");
+    expect(document.documentElement.dataset.scheme).toBe("light");
+    expect(document.documentElement.dataset.font).toBe("sans");
   });
 
-  it("非法 key 不写属性（回落 :root 晨窗，避免未知主题打空全部变量）", () => {
-    applyTheme("night");
-    applyTheme("neon" as never);
-    expect(document.documentElement.dataset.theme).toBeUndefined();
+  it("非法 key 不写属性（回落 :root 默认，避免未知值打空全部变量）", () => {
+    applyScheme("dark");
+    applyFont("kai");
+    applyScheme("neon" as never);
+    applyFont("comic" as never);
+    expect(document.documentElement.dataset.scheme).toBeUndefined();
+    expect(document.documentElement.dataset.font).toBeUndefined();
   });
 
-  /** M6c：首帧防闪白靠 index.html 内联脚本读这个缓存，写入点必须与属性同步 */
-  it("同步维护首帧启动缓存（index.html 内联脚本读它）", () => {
-    applyTheme("night");
-    expect(localStorage.getItem(THEME_CACHE_KEY)).toBe("night");
-    applyTheme("wenkai");
-    expect(localStorage.getItem(THEME_CACHE_KEY)).toBe("wenkai");
-    // 脏值：属性清掉、缓存也要清（否则下次启动会应用一个未知主题）
-    applyTheme("neon" as never);
-    expect(localStorage.getItem(THEME_CACHE_KEY)).toBeNull();
+  /** M6c：首帧防闪白靠 index.html 内联脚本读这两个缓存，写入点必须与属性同步 */
+  it("同步维护首帧启动缓存（index.html 内联脚本读它们）", () => {
+    applyScheme("dark");
+    applyFont("kai");
+    expect(localStorage.getItem(SCHEME_CACHE_KEY)).toBe("dark");
+    expect(localStorage.getItem(FONT_CACHE_KEY)).toBe("kai");
+    applyScheme("paper");
+    applyFont("serif");
+    expect(localStorage.getItem(SCHEME_CACHE_KEY)).toBe("paper");
+    expect(localStorage.getItem(FONT_CACHE_KEY)).toBe("serif");
+    // 脏值：属性清掉、缓存也要清（否则下次启动会应用一个未知值）
+    applyScheme("neon" as never);
+    applyFont("comic" as never);
+    expect(localStorage.getItem(SCHEME_CACHE_KEY)).toBeNull();
+    expect(localStorage.getItem(FONT_CACHE_KEY)).toBeNull();
   });
 });
 
@@ -104,8 +126,10 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
   beforeEach(() => {
     invoke.mockReset();
     document.documentElement.removeAttribute("style");
-    document.documentElement.removeAttribute("data-theme");
-    localStorage.removeItem(THEME_CACHE_KEY);
+    document.documentElement.removeAttribute("data-scheme");
+    document.documentElement.removeAttribute("data-font");
+    localStorage.removeItem(SCHEME_CACHE_KEY);
+    localStorage.removeItem(FONT_CACHE_KEY);
     useSettingsStore.setState({
       settings: {
         appearance: DEFAULT_APPEARANCE,
@@ -136,35 +160,42 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("16px");
   });
 
-  /** M6c：读失败是暂时的，不能顺手把主题重置成默认——那会覆盖首帧启动缓存，
-   *  等于把用户选的主题降级掉，且下次启动又闪白。 */
-  it("load 失败不覆盖主题（保住启动缓存）", async () => {
+  /** M6c：读失败是暂时的，不能顺手把配色/字体重置成默认——那会覆盖首帧启动缓存，
+   *  等于把用户选的外观降级掉，且下次启动又闪白。 */
+  it("load 失败不覆盖配色/字体（保住启动缓存）", async () => {
     // 模拟「首帧内联脚本已按缓存落位」的状态
-    localStorage.setItem(THEME_CACHE_KEY, "night");
-    document.documentElement.dataset.theme = "night";
+    localStorage.setItem(SCHEME_CACHE_KEY, "dark");
+    localStorage.setItem(FONT_CACHE_KEY, "kai");
+    document.documentElement.dataset.scheme = "dark";
+    document.documentElement.dataset.font = "kai";
     invoke.mockRejectedValueOnce(new Error("boom"));
     await useSettingsStore.getState().load();
-    expect(document.documentElement.dataset.theme).toBe("night");
-    expect(localStorage.getItem(THEME_CACHE_KEY)).toBe("night");
+    expect(document.documentElement.dataset.scheme).toBe("dark");
+    expect(document.documentElement.dataset.font).toBe("kai");
+    expect(localStorage.getItem(SCHEME_CACHE_KEY)).toBe("dark");
+    expect(localStorage.getItem(FONT_CACHE_KEY)).toBe("kai");
   });
 
-  it("load → 主题属性同步落地（M6）", async () => {
+  it("load → 配色/字体属性同步落地（M7）", async () => {
     invoke.mockResolvedValueOnce({
-      appearance: { ...DEFAULT_APPEARANCE, theme: "night" },
+      appearance: { ...DEFAULT_APPEARANCE, scheme: "dark", font: "kai" },
       editor: useSettingsStore.getState().settings.editor,
       storage: useSettingsStore.getState().settings.storage,
       update: useSettingsStore.getState().settings.update,
     });
     await useSettingsStore.getState().load();
-    expect(document.documentElement.dataset.theme).toBe("night");
+    expect(document.documentElement.dataset.scheme).toBe("dark");
+    expect(document.documentElement.dataset.font).toBe("kai");
   });
 
-  it("patch 失败 → 主题属性与 state 一并回滚", async () => {
+  it("patch 失败 → 外观属性与 state 一并回滚", async () => {
     const a = DEFAULT_APPEARANCE;
     invoke.mockRejectedValueOnce(new Error("写盘失败"));
-    await useSettingsStore.getState().patch({ appearance: { ...a, theme: "night" } });
-    expect(useSettingsStore.getState().settings.appearance.theme).toBe("morning");
-    expect(document.documentElement.dataset.theme).toBe("morning");
+    await useSettingsStore.getState().patch({ appearance: { ...a, scheme: "dark", font: "kai" } });
+    expect(useSettingsStore.getState().settings.appearance.scheme).toBe("light");
+    expect(useSettingsStore.getState().settings.appearance.font).toBe("sans");
+    expect(document.documentElement.dataset.scheme).toBe("light");
+    expect(document.documentElement.dataset.font).toBe("sans");
   });
 
   it("patch 乐观更新：一次点击 = 一次落库（无防抖/无 IPC 风暴）", async () => {
@@ -230,10 +261,11 @@ describe("editorKey：外观不得进入编辑器 key（硬约定 3 护栏）", 
 
   it("同一路径同一模式恒等——外观变化不得改变它", () => {
     const k1 = editorKey("n.md", "wysiwyg");
-    // 模拟改字号/行距/主题后重新渲染：key 必须逐字节相同，否则 React 会重建
+    // 模拟改字号/行距/配色/字体后重新渲染：key 必须逐字节相同，否则 React 会重建
     // MilkdownHost → Crepe 建实例发伪 markdownUpdated → 笔记被重写
     applyCssVars(app({ textSize: "xl", lineHeight: "relaxed" }));
-    applyTheme("night");
+    applyScheme("dark");
+    applyFont("kai");
     const k2 = editorKey("n.md", "wysiwyg");
     expect(k2).toBe(k1);
   });
