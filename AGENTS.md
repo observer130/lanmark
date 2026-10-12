@@ -138,7 +138,8 @@ Android 相关的非显然几条：
 ## 发版（v0.1 起）
 
 - **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`.github/workflows/release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis` 对应这个约定
-- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）→ 提交推送 → **先** `gh release create vX.Y.Z --title … --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
+- **release 标题只写版本号**（`vX.Y.Z`，notes 正文首行标题同此），**不加「— 描述」后缀**：releases 列表里只展示版本号，功能说明一律写进 notes 正文。此前是 `v0.6.0 — 外观系统 · 四套主题 · 内置字体`，自 v0.6.1 起改掉
+- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`，`Cargo.lock` 里的 `lanmark` 版本随之更新）→ 提交推送 → **先** `gh release create vX.Y.Z --title vX.Y.Z --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
 - 坑：仓库默认 GITHUB_TOKEN 只读，`release.yml` 的 `permissions: contents: write` 不能删（缺了上传 403）
 - **Android release 资产走固定 release 签名（M4g，2026-09-24 起）**：`release.yml` 的 android job 解码 `RELEASE_KEYSTORE` secret → 真实 release 构建（**不再是 `--debug`**）→ `apksigner` 校验指纹后才上传；产物路径 `outputs/apk/universal/release/`。keystore 永不入库，4 个值来自 repo secrets，**缺失时 job 直接 fail**（不再静默产出 debug 签名的「release」）。
   - 本地构建（无环境变量）**回退 debug 签名**，`build.gradle.kts` 里 `hasReleaseSigning=false` 时 `release` build type 用 debug signingConfig——所以本地 `--apk` 产物仍是 debuggable、CDP 可用；**看到 CDP 可用先确认产物路径是 `debug/` 还是本地回退，别误判 CI 配置**
