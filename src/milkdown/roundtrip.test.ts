@@ -10,25 +10,15 @@
  * 跑法：pnpm test
  */
 import { describe, it, expect } from "vitest";
-import { Crepe, CrepeFeature } from "@milkdown/crepe";
+import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
 import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
-
-/** 与 EditorPane 一致的产品 feature 配置 */
-const PRODUCT_FEATURES = {
-  [CrepeFeature.AI]: false,
-  [CrepeFeature.Cursor]: false,
-  [CrepeFeature.TopBar]: false,
-  [CrepeFeature.ImageBlock]: false, // 关闭：其序列化会破坏 alt（见 EditorPane 注释）
-  [CrepeFeature.Latex]: true,
-  [CrepeFeature.Table]: true,
-  [CrepeFeature.CodeMirror]: true,
-  [CrepeFeature.Toolbar]: true,
-  [CrepeFeature.BlockEdit]: true,
-  [CrepeFeature.ListItem]: true,
-  [CrepeFeature.LinkTooltip]: true,
-  [CrepeFeature.Placeholder]: true,
-} as const;
+import { createProductCrepe } from "./product";
+import {
+  currentTopBlockIndex,
+  moveBlockCommand,
+  topBlockIndexAtPos,
+} from "./block-move";
 
 function normalize(md: string): string {
   return md.replace(/\r\n/g, "\n").replace(/\n{2,}/g, "\n").trim();
@@ -59,16 +49,37 @@ function semantic(md: string): string {
 async function roundtrip(input: string): Promise<string> {
   const root = document.createElement("div");
   document.body.appendChild(root);
-  const crepe = new Crepe({
-    root,
-    defaultValue: input,
-    features: PRODUCT_FEATURES,
-  });
+  // 必须走 createProductCrepe：`EditorPane` 用的就是它。测试自抄一份 feature 表
+  // 曾是漂移风险（两边不一致时护栏会失效），M8 收敛到 product.ts 唯一来源。
+  const crepe = createProductCrepe({ root, defaultValue: input });
   await crepe.create();
   const out = crepe.getMarkdown();
   await crepe.destroy();
   root.remove();
   return out;
+}
+
+/**
+ * 建一个编辑器并把光标放进第 index 个顶层块，返回可操作句柄。
+ * 块级命令都按「选区所在的顶层块」定位（见 block-move.ts），所以测试也必须先落选区。
+ */
+async function mountWithCaret(input: string, index = 0) {
+  const root = document.createElement("div");
+  document.body.appendChild(root);
+  const crepe = createProductCrepe({ root, defaultValue: input });
+  await crepe.create();
+  const view = await crepe.editor.action((ctx) => ctx.get(editorViewCtx));
+  let from = 0;
+  for (let i = 0; i < index; i += 1) from += view.state.doc.child(i).nodeSize;
+  const { TextSelection } = await import("@milkdown/kit/prose/state");
+  view.dispatch(
+    view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(from + 1))),
+  );
+  const runMove = (dir: -1 | 1) =>
+    crepe.editor.action((ctx) => ctx.get(commandsCtx).call(moveBlockCommand.key, dir));
+  const caretIndex = () => currentTopBlockIndex(view.state);
+  const doc = () => view.state.doc;
+  return { crepe, root, runMove, caretIndex, doc };
 }
 
 describe("Milkdown 往返保真（M1 决策门）", () => {
@@ -205,10 +216,9 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
   it("insertImageCommand 插入可序列化（粘贴链最后一段：命令 → 文档 → md）", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    const crepe = new Crepe({
+    const crepe = createProductCrepe({
       root,
       defaultValue: "# 标题\n\n正文。",
-      features: PRODUCT_FEATURES,
     });
     await crepe.create();
     const { insertImageCommand } = await import("@milkdown/kit/preset/commonmark");
@@ -216,6 +226,108 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
     const md = crepe.getMarkdown();
     expect(md).toContain("![测试图](vault://localhost/assets/x.png)"); // alt 原样保留
     expect(md).not.toContain("1.00"); // ImageBlock 已关闭：不得出现比例伪 alt
+    await crepe.destroy();
+    root.remove();
+  });
+});
+
+/**
+ * M8 G3：块上移/下移（不依赖拖拽的第二条路）。
+ * 这三条是「六个点拖不动」的兜底路径的核心逻辑，必须有护栏——它同时也是
+ * 长按/右键菜单与 `Alt-↑/↓` 快捷键共用的实现。
+ */
+describe("块移动命令（M8 G3）", () => {
+  it("下移：与下一块交换，其余顺序不变", async () => {
+    const { crepe, root, runMove, caretIndex } = await mountWithCaret("甲\n\n乙\n\n丙\n", 0);
+    expect(runMove(1)).toBe(true);
+    expect(crepe.getMarkdown().trim()).toBe("乙\n\n甲\n\n丙");
+    expect(caretIndex()).toBe(1); // 光标跟着被移动的块走
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("上移：与上一块交换，其余顺序不变", async () => {
+    const { crepe, root, runMove, caretIndex } = await mountWithCaret("甲\n\n乙\n\n丙\n", 2);
+    expect(runMove(-1)).toBe(true);
+    expect(crepe.getMarkdown().trim()).toBe("甲\n\n丙\n\n乙");
+    expect(caretIndex()).toBe(1);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("首块上移 / 末块下移：返回 false 且文档不动（菜单置灰的依据）", async () => {
+    const first = await mountWithCaret("甲\n\n乙\n", 0);
+    expect(first.runMove(-1)).toBe(false);
+    expect(first.crepe.getMarkdown().trim()).toBe("甲\n\n乙");
+    await first.crepe.destroy();
+    first.root.remove();
+
+    const last = await mountWithCaret("甲\n\n乙\n", 1);
+    expect(last.runMove(1)).toBe(false);
+    expect(last.crepe.getMarkdown().trim()).toBe("甲\n\n乙");
+    await last.crepe.destroy();
+    last.root.remove();
+  });
+
+  it("移动标题/代码块等异质块：结构与内容都不丢", async () => {
+    const md = ["# 标题", "", "```rust", "fn main() {}", "```", "", "尾段。"].join("\n") + "\n";
+    const { crepe, root, runMove } = await mountWithCaret(md, 0);
+    expect(runMove(1)).toBe(true);
+    const out = crepe.getMarkdown();
+    expect(out).toContain("# 标题");
+    expect(out).toContain("```rust");
+    expect(out).toContain("fn main() {}");
+    expect(out).toContain("尾段。");
+    // 代码块现在排在标题之前
+    expect(out.indexOf("```rust")).toBeLessThan(out.indexOf("# 标题"));
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("移动列表块（整体作为顶层块移动，不破坏内部结构）", async () => {
+    const md = ["- 一", "- 二", "  - 嵌套", "", "尾段。"].join("\n") + "\n";
+    const { crepe, root, runMove } = await mountWithCaret(md, 0);
+    expect(runMove(1)).toBe(true);
+    // 用 semantic 归一化再比位置：Crepe 序列化无序列表用 `*`（见文件头「允许的风格归一化」）
+    const out = semantic(crepe.getMarkdown());
+    expect(out).toContain("嵌套"); // 嵌套项没被拆散
+    expect(out.indexOf("尾段。")).toBeLessThan(out.indexOf("- 一")); // 列表整体移到尾段之后
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("移动不产生伪 markdownUpdated 之外的改写（往返仍保真）", async () => {
+    // 移动两次再移回来，应回到原样——钉住「移动是可逆的、不引入额外归一化」
+    const md = "甲\n\n乙\n\n丙\n";
+    const { crepe, root, runMove } = await mountWithCaret(md, 0);
+    runMove(1);
+    runMove(1);
+    runMove(-1);
+    runMove(-1);
+    expect(crepe.getMarkdown()).toBe(md);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("位置 → 顶层块：块内 / 块间空隙 / 越界都归到合理的块", async () => {
+    // 右键与长按的探测点常落在段落 margin、容器 padding 上，`doc.resolve(pos).depth`
+    // 会是 0——不兜这一层，「正文最上方一行右键」就没反应（实测，见 EditorPane 注释）。
+    const { crepe, root, doc } = await mountWithCaret("甲\n\n乙\n\n丙\n", 0);
+    const d = doc();
+    expect(d.childCount).toBe(3);
+    expect(topBlockIndexAtPos(d, 0)).toBe(0); // 文档最前
+    expect(topBlockIndexAtPos(d, 1)).toBe(0); // 第一块内部
+    expect(topBlockIndexAtPos(d, d.child(0).nodeSize)).toBe(1); // 块间边界 → 归下一块
+    expect(topBlockIndexAtPos(d, 1_000_000)).toBe(2); // 文档末尾之后 → 最后一块
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("块菜单的置灰依据：首块无上移、末块无下移", async () => {
+    const { crepe, root, doc, caretIndex } = await mountWithCaret("甲\n\n乙\n", 0);
+    expect(caretIndex()).toBe(0);
+    expect(topBlockIndexAtPos(doc(), 0)).toBe(0); // canMoveUp = index > 0 → false
+    expect(topBlockIndexAtPos(doc(), 1_000_000)).toBe(1); // canMoveDown = index < count-1 → false
     await crepe.destroy();
     root.remove();
   });

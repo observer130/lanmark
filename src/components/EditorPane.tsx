@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BookOpen, Check, Code, Folder, NotebookText, PenLine, Star } from "lucide-react";
-import { Crepe, CrepeFeature } from "@milkdown/crepe";
+import type { Crepe } from "@milkdown/crepe";
 import { editorViewCtx } from "@milkdown/kit/core";
+import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
 import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
@@ -19,6 +20,14 @@ import {
 } from "../lib/vault-url";
 import { parentDir } from "../lib/vault";
 import { useSettingsStore } from "../stores/settings";
+import { createProductCrepe } from "../milkdown/product";
+import {
+  currentTopBlockIndex,
+  moveBlockCommand,
+  topBlockAt,
+  topBlockIndexAtPos,
+} from "../milkdown/block-move";
+import { BlockMenu, type BlockMenuTarget } from "./BlockMenu";
 
 /** 从 Crepe 取 ProseMirror EditorView（类型走推断，避免直接依赖 prosemirror 包） */
 async function getEditorView(crepe: Crepe) {
@@ -39,6 +48,39 @@ export function editorKey(path: string, mode: string): string {
   return `${path}|${mode}`;
 }
 
+/**
+ * 暴露给 `EditorPane` 的编辑器操作面——**只谈「顶层块」，不外泄 ProseMirror 类型**。
+ * 存在的理由：块菜单要能在 Crepe 实例之外（React 组件里）执行动作，而实例是在
+ * `MilkdownHost` 的 effect 里建的（effect 依赖必须保持 `[]`，不能把实例提到 state）。
+ * 由 `onReady` 交给父组件，父组件存进 ref——**不要放进 state**，那会触发重渲染。
+ */
+export interface EditorApi {
+  /** 屏幕坐标 → 顶层块序号，并顺带把选区落到该块；命中不了返回 null */
+  indexFromPoint: (x: number, y: number) => number | null;
+  /** 当前选区所在的顶层块序号（六个点手柄点击时 Crepe 已在 mousedown 里选中该块） */
+  indexFromSelection: () => number | null;
+  /** 顶层块总数（菜单置灰用） */
+  blockCount: () => number;
+  moveBlock: (index: number, dir: -1 | 1) => void;
+  deleteBlock: (index: number) => void;
+}
+
+/**
+ * 把选区落到第 index 个顶层块上，使块级命令（移动/删除/插入）都作用在同一目标。
+ * 分两种：文本块用光标落到块首（`TextSelection`），原子块（分割线、图片）用
+ * `NodeSelection`——两者都能让 `currentTopBlockIndex` 解出同一个序号。
+ * 只改选区、不改文档 ⇒ 不会触发 `markdownUpdated`（硬约定 3）。
+ */
+function selectTopBlock(view: LMView, index: number): boolean {
+  const block = topBlockAt(view.state.doc, index);
+  if (!block) return false;
+  const sel = block.node.isTextblock
+    ? TextSelection.near(view.state.doc.resolve(block.from + 1))
+    : NodeSelection.create(view.state.doc, block.from);
+  view.dispatch(view.state.tr.setSelection(sel));
+  return true;
+}
+
 /** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留。
  *  readOnly=true 时为「阅读模式」：关掉斜杠菜单/块手柄/链接浮层等交互特性，
  *  并将 ProseMirror 设为不可编辑（粘贴/拖入监听也一并跳过）。 */
@@ -47,13 +89,28 @@ function MilkdownHost({
   notePath,
   onChange,
   readOnly = false,
+  narrow = false,
+  onReady,
+  onBlockMenu,
 }: {
   content: string;
   notePath: string;
   onChange: (md: string) => void;
   readOnly?: boolean;
+  narrow?: boolean;
+  onReady?: (api: EditorApi | null) => void;
+  onBlockMenu?: (index: number, x: number, y: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+
+  // 「最新值 ref」：effect 依赖必须保持 `[]`（重建 Crepe = 重写笔记，硬约定 3），
+  // 所以回调与 narrow 都经 ref 读取，不进依赖数组。
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+  const onBlockMenuRef = useRef(onBlockMenu);
+  onBlockMenuRef.current = onBlockMenu;
+  const narrowRef = useRef(narrow);
+  narrowRef.current = narrow;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -77,27 +134,7 @@ function MilkdownHost({
     //  补尾行——若放行就会「打开笔记=重写文件」；见 docs/04 §9c）
     let lastKnownDoc: LMDoc | null = null;
     (async () => {
-      crepe = new Crepe({
-        root: inner,
-        defaultValue: editorBody,
-        features: {
-          // 精简：关掉 AI 光标 / 顶栏；阅读模式再关掉全部交互特性
-          [CrepeFeature.AI]: false,
-          [CrepeFeature.Cursor]: false,
-          [CrepeFeature.TopBar]: false,
-          // ImageBlock 关闭：其序列化会把缩放比例写进 alt（![1.00](…)），
-          // 破坏原始 markdown。图片走 commonmark 原生节点：粘贴（insertImageCommand）或手写 ![](...)
-          [CrepeFeature.ImageBlock]: false,
-          [CrepeFeature.Latex]: true,
-          [CrepeFeature.Table]: true,
-          [CrepeFeature.CodeMirror]: true,
-          [CrepeFeature.Toolbar]: !readOnly, // 斜杠菜单
-          [CrepeFeature.BlockEdit]: !readOnly, // 左侧 +/拖拽手柄
-          [CrepeFeature.ListItem]: true,
-          [CrepeFeature.LinkTooltip]: !readOnly,
-          [CrepeFeature.Placeholder]: true,
-        },
-      });
+      crepe = createProductCrepe({ root: inner, defaultValue: editorBody, readOnly });
       crepe.on((listener) => {
         listener.markdownUpdated((_ctx, md) => {
           if (!view || !lastKnownDoc) return; // 基线未建立（create/改写期间）：一律抑制
@@ -160,6 +197,113 @@ function MilkdownHost({
         void insertFiles(files);
       };
 
+      // ── 块级操作面（M8 G3：不依赖拖拽的第二条路）─────────────────────────
+      const api: EditorApi = {
+        blockCount: () => view?.state.doc.childCount ?? 0,
+        indexFromSelection: () => (view ? currentTopBlockIndex(view.state) : null),
+        indexFromPoint: (x, y) => {
+          if (!view) return null;
+          // 触发点常落在正文之外：左侧槽位（手柄所在的留白）、卡片 padding，手机上还有
+          // 手指偏出文本列。这些位置 `posAtCoords` **直接返回 null**，所以不能原样交给它。
+          // 横向在内容列外时只按纵向位置定位、横向取内容列中线——留白处的语义本来就是
+          // 「这一行对应的块」。实测（.cache/probe-blockmenu.mjs，1100px）。
+          const col = contentColumn();
+          const rect = view.dom.getBoundingClientRect();
+          const outsideX = x < col.left || x > col.right;
+          const coords = view.posAtCoords({
+            left: outsideX ? (col.left + col.right) / 2 : x,
+            top: Math.min(Math.max(y, rect.top + 1), rect.bottom - 1),
+          });
+          if (!coords) return null;
+          let index: number | null;
+          try {
+            // 落在块间空隙时 depth 会是 0，用容错版按位置归块（见 block-move.ts）
+            index = topBlockIndexAtPos(view.state.doc, coords.pos);
+          } catch {
+            return null;
+          }
+          if (index === null) return null;
+          return selectTopBlock(view, index) ? index : null;
+        },
+        moveBlock: (index, dir) => {
+          if (!view) return;
+          if (!selectTopBlock(view, index)) return;
+          // 用命令的 run 而非 commandsCtx：run 在插件初始化时就绑好了 ctx，
+          // 调用方（React 组件）不必持有 ctx。
+          moveBlockCommand.run(dir);
+        },
+        deleteBlock: (index) => {
+          if (!view) return;
+          // doc 必须至少留一个块（schema 要求 block+）；只剩一块时由菜单置灰兜住
+          if (view.state.doc.childCount <= 1) return;
+          const block = topBlockAt(view.state.doc, index);
+          if (!block) return;
+          view.dispatch(view.state.tr.delete(block.from, block.to).scrollIntoView());
+        },
+      };
+      onReadyRef.current?.(api);
+
+      /**
+       * 正文**内容列**（去掉 `.ProseMirror` 自身 padding 后的左右边界）。
+       * 留白判定与坐标定位必须用同一个口径，否则会出现「判定通过但定位失败 → 点了没反应」。
+       * 用 padding 而不是 rect 内缘：crepe 给 `.ProseMirror` 几十 px 的左右 padding，
+       * rect 内缘仍在 padding 里，`posAtCoords` 照样返 null。
+       */
+      const contentColumn = () => {
+        const rect = view!.dom.getBoundingClientRect();
+        const cs = getComputedStyle(view!.dom);
+        return {
+          left: rect.left + (parseFloat(cs.paddingLeft) || 0),
+          right: rect.right - (parseFloat(cs.paddingRight) || 0),
+        };
+      };
+
+      /**
+       * 块菜单的触发判定。
+       *  - 窄屏（长按）：**任意位置**都开——移动端 WebView 没有可用的原生右键菜单，
+       *    而长按正文是这里唯一的块级入口（硬约定 13）。
+       *  - 桌面：只认「正文内容列左侧的留白」与「六个点手柄」两处，**不抢正文右键**——
+       *    正文右键要留给 WebView 原生的复制/粘贴/查词菜单，全局抢占是实打实的回退。
+       */
+      const shouldOpenBlockMenu = (e: MouseEvent) => {
+        if (narrowRef.current) return true;
+        const target = e.target as HTMLElement | null;
+        if (target?.closest?.(".milkdown-block-handle")) return true;
+        if (!view) return false;
+        return e.clientX < contentColumn().left;
+      };
+
+      const onBlockContextMenu = (e: MouseEvent) => {
+        if (!shouldOpenBlockMenu(e)) return;
+        const index = api.indexFromPoint(e.clientX, e.clientY);
+        if (index === null) return;
+        e.preventDefault();
+        onBlockMenuRef.current?.(index, e.clientX, e.clientY);
+      };
+
+      /**
+       * 「六个点」手柄点击 → 块菜单。
+       *
+       * 走 DOM 代理而不是给 Crepe 打补丁：`BlockEdit` 的 feature 配置只有
+       * `handleAddIcon` / `handleDragIcon`（图标字符串）与定位钩子，**没有任何点击回调**，
+       * 无法在配置层接。手柄 DOM（`.milkdown-block-handle` + 两个 `.operation-item`，
+       * 后一个才是拖拽点）因此是硬编码依赖——Crepe 改结构时这里会静默失效，
+       * 但**不会**让功能不可用：右键留白与 `Alt-↑/↓` 仍在。改动 Crepe 版本后请复核。
+       */
+      const onBlockHandleClick = (e: MouseEvent) => {
+        const target = e.target as HTMLElement | null;
+        const handle = target?.closest?.(".milkdown-block-handle");
+        if (!handle) return;
+        const items = handle.querySelectorAll(".operation-item");
+        // items[0] = 「+ 插入」（Crepe 自己的行为，别抢）；items[1] = 六个点
+        if (items.length < 2 || !items[1].contains(target)) return;
+        const index = api.indexFromSelection();
+        if (index === null) return;
+        const rect = items[1].getBoundingClientRect();
+        e.preventDefault();
+        onBlockMenuRef.current?.(index, rect.left, rect.bottom);
+      };
+
       // 文件拖入（仅拦截图片文件，文本拖拽仍走 ProseMirror 默认行为）
       const onDragOver = (e: DragEvent) => {
         if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
@@ -177,16 +321,21 @@ function MilkdownHost({
         host.addEventListener("paste", onPaste);
         host.addEventListener("dragover", onDragOver);
         host.addEventListener("drop", onDrop);
+        host.addEventListener("contextmenu", onBlockContextMenu);
+        host.addEventListener("click", onBlockHandleClick);
         (host as HTMLDivElement & { __lanmarkCleanup?: () => void }).__lanmarkCleanup = () => {
           host.removeEventListener("paste", onPaste);
           host.removeEventListener("dragover", onDragOver);
           host.removeEventListener("drop", onDrop);
+          host.removeEventListener("contextmenu", onBlockContextMenu);
+          host.removeEventListener("click", onBlockHandleClick);
         };
       }
     })();
 
     return () => {
       cancelled = true;
+      onReadyRef.current?.(null);
       const h = host as HTMLDivElement & { __lanmarkCleanup?: () => void };
       h.__lanmarkCleanup?.();
       try {
@@ -245,6 +394,57 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   // M4c B3：源码模式行号开关。用订阅而非 getState()：改设置要立刻反映到
   // 已打开的编辑器上（CodeMirror 的 basicSetup 变化会触发 reconfigure）
   const sourceLineNumbers = useSettingsStore((s) => s.settings.editor.sourceLineNumbers);
+
+  // 编辑器操作面：ref 而非 state——`onReady` 在 effect 里回调，进 state 会触发重渲染
+  const editorApiRef = useRef<EditorApi | null>(null);
+  const [blockMenu, setBlockMenu] = useState<BlockMenuTarget | null>(null);
+
+  const openBlockMenu = useCallback((index: number, x: number, y: number) => {
+    const api = editorApiRef.current;
+    if (!api) return;
+    const count = api.blockCount();
+    if (index < 0 || index >= count) return;
+    setBlockMenu({
+      index,
+      canMoveUp: index > 0,
+      canMoveDown: index < count - 1,
+      canDelete: count > 1, // doc 至少留一个块（schema block+）
+      x,
+      y,
+    });
+  }, []);
+
+  const closeBlockMenu = useCallback(() => setBlockMenu(null), []);
+
+  // 移动后**保持菜单打开**并刷新置灰状态：连续微调位置是「移动块」最常见的用法
+  const handleBlockMove = useCallback((dir: -1 | 1) => {
+    const api = editorApiRef.current;
+    setBlockMenu((cur) => {
+      if (!api || !cur) return cur;
+      api.moveBlock(cur.index, dir);
+      const next = cur.index + dir;
+      const count = api.blockCount();
+      return {
+        ...cur,
+        index: next,
+        canMoveUp: next > 0,
+        canMoveDown: next < count - 1,
+      };
+    });
+  }, []);
+
+  const handleBlockDelete = useCallback(() => {
+    const api = editorApiRef.current;
+    if (!api || !blockMenu) return;
+    api.deleteBlock(blockMenu.index);
+    setBlockMenu(null);
+  }, [blockMenu]);
+
+  // 切笔记 / 切模式会重建编辑器实例，旧实例的 ref 随即失效——菜单必须一起关，
+  // 否则会对着已经销毁的编辑器执行命令（静默无反应）。
+  useEffect(() => {
+    setBlockMenu(null);
+  }, [activePath, editorMode]);
 
   if (!activePath) {
     return (
@@ -384,6 +584,11 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
               key={editorKey(activePath, "wysiwyg")}
               content={content}
               notePath={activePath}
+              narrow={narrow}
+              onReady={(api) => {
+                editorApiRef.current = api;
+              }}
+              onBlockMenu={openBlockMenu}
               onChange={(md) => {
                 setContent(md);
                 scheduleSave();
@@ -405,6 +610,15 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           )}
         </div>
       </div>
+
+      {/* 块菜单：上移 / 下移 / 删除（M8 G3）。三条触发路径见 BlockMenu 注释 */}
+      <BlockMenu
+        target={blockMenu}
+        narrow={narrow}
+        onMove={handleBlockMove}
+        onDelete={handleBlockDelete}
+        onClose={closeBlockMenu}
+      />
     </main>
   );
 }
