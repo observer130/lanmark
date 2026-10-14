@@ -155,23 +155,33 @@ function shiftHeadingLevels(fragment: Fragment, delta: number): Fragment {
 }
 
 /**
- * 把标题单元的落点**吸附到安全边界**。
+ * 某个**行间隙**的天然层级。`gap` 是「插到第 gap 块之前」的块序号（0..childCount）。
  *
- * 插入一个标题必然重划节边界（markdown 的节由「最近的上层标题」决定），所以只有在
- * **紧跟其后的块是「层级 ≤ 目标层级」的标题**（或文末）时才不会吞掉原有内容——此时新节的
- * 范围到那个标题为止，原有一块不动。否则后面的正文会被划进新节，就是「拖一次结构就变了」。
+ * 这是「每一行之间都能插入」的关键：间隙决定**位置**，间隙决定**层级**，两者都不折叠到节末。
+ * 规则只有两条：
+ *  - 间隙后面紧跟着标题 M → 与该标题**同级**（M）。这就是「插到两个同级节之间」。
+ *  - 间隙后面是正文（或文末）→ 成为**所属节**的子节（P+1）。P = 最近的上层标题。
  *
- * 不安全时**向后**找最近的这类位置 = 该节末尾，也就是「放进这一节」的语义。
- * 这个不变量放在纯逻辑层而不是拖放层：**任何调用方都不该有能力违反它**（菜单/快捷键用不到，
- * 但拖放的落点计算需要它兜底）。
+ * 为什么 P+1 是「吞得最少」的层级：L 层标题的节到「下一个层级 ≤ L 的标题」为止。取 P+1 时，
+ * 该节会在下一个比 P 更深的标题处就结束；取 P（同级）则会一直吞到 P 这一节的末尾。
+ * **吞并本身无法避免**——把标题插进正文中间，markdown 只能让后面的正文归它管，手打一个
+ * 标题在那里也是同样结果。
  */
-export function snapSlotForHeading(doc: PMNode, insertBefore: number, level: number): number {
-  const from = Math.max(0, Math.min(insertBefore, doc.childCount));
-  for (let j = from; j < doc.childCount; j += 1) {
-    const node = doc.child(j);
-    if (node.type.name === "heading" && headingLevelOf(node) <= level) return j;
+export function naturalLevelAtGap(doc: PMNode, gap: number): number {
+  if (doc.childCount === 0) return 1;
+  if (gap >= doc.childCount) return documentEndSlot(doc).level;
+  const next = doc.child(Math.max(0, gap));
+  if (next.type.name === "heading") return headingLevelOf(next);
+  if (gap <= 0) {
+    // 文首正文：与后面第一个标题同级
+    for (let i = 0; i < doc.childCount; i += 1) {
+      const lv = headingLevelOf(doc.child(i));
+      if (lv > 0) return lv;
+    }
+    return 1;
   }
-  return doc.childCount;
+  const owner = enclosingHeadingIndex(doc, gap);
+  return owner === null ? 1 : Math.min(6, headingLevelOf(doc.child(owner)) + 1);
 }
 
 export interface UnitMovePlan {
@@ -206,10 +216,10 @@ export function planUnitMove(
   const headLevel = headingLevelOf(head.node);
   const targetLevel = level != null ? Math.min(6, Math.max(1, level)) : headLevel;
   const levelDelta = headLevel > 0 && level != null ? targetLevel - headLevel : null;
-  // 标题单元只能落在安全边界（否则会吞掉后面的内容）；非标题单元原样
-  const slot =
-    headLevel > 0 ? snapSlotForHeading(doc, insertBefore, targetLevel) : insertBefore;
-  // 落点在源单元自身范围内（含紧邻两端）→ 位置不变
+  // 落点在源单元自身范围内（含紧邻两端）→ 位置不变。
+  // 这里**不做安全边界吸附**：吸附会把「两行之间」折回该节末尾，等于让整节内容区共用一个
+  // 落点（2026-10-13 走查：用户只能拖到标题上方或文末，判定为不可用）。
+  const slot = insertBefore;
   const inPlace = slot >= srcIndex && slot <= srcIndex + length;
   if (inPlace) {
     if (levelDelta === null || levelDelta === 0) return null;

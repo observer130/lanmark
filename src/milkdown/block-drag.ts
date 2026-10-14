@@ -5,13 +5,11 @@ import { $prose } from "@milkdown/kit/utils";
 
 import {
   contentColumn,
-  documentEndSlot,
-  enclosingHeadingIndex,
   headingLevelOf,
   intoHeadingSlot,
   moveUnitTo,
+  naturalLevelAtGap,
   planUnitMove,
-  siblingSlotLevel,
   topBlockIndexAtPos,
   topBlockIndexFromPoint,
   unitLengthAt,
@@ -20,24 +18,21 @@ import {
 /**
  * 接管「六个点手柄」的拖放：**落点判定（含层级）+ 落点指示线 + 执行移动与升降级**。
  *
- * ## 语义：markdown 的标题是**显式层级**，不是容器
- * `##` / `###` 是写在文本里的，节的边界由「最近的上层标题」决定。因此把标题插到**段落中间**
- * 必然把后面的段落划进新节——这就是「拖一次结构就变了」的根因。所以**标题单元只能落在节边界**
- * （某个标题之前，或文末）。落点手势因此采用树形拖拽（文件管理器 / IDE / Notion）的三区约定：
+ * ## 落点 = 行间隙；层级 = 该间隙的天然层级
+ * 标题单元（拖一个标题会带走整节）的落点就是**两个顶层块之间的间隙**，上半区插到该行之前、
+ * 下半区插到该行之后——**每一行之间都能插入**，绝不折叠到节末。
  *
- * | 指针位置 | 结果 | 层级 |
- * |---|---|---|
- * | **标题上半区** | 插到该标题**之前** | = 该标题级别（同级 → 纯换位） |
- * | **标题下半区** | 放进该节**末尾**（**高亮该标题**） | = 该标题级别 + 1（降一级，下属标题整体降） |
- * | 非标题块（任意半区） | 放进**所属节**末尾（高亮该节标题） | = 所属标题级别 + 1 |
- * | 正文下方空白 | 追加到文末 | = 最后一个标题的级别 |
+ * ⚠️ 早期版本把「非标题块」的落点折叠到所属节末尾（理由是「插入标题必然把后面内容划进新节」），
+ * 结果整节内容区共用一个落点：一篇「H1 + 两个 H2」的文档里，除标题行外全部指向文末，用户只能
+ * 拖到两处（2026-10-13 走查判定不可用）。**吞并是 markdown 的固有语义**（手打一个标题在那里
+ * 也一样），不该用牺牲落点精度来回避；层级取 `naturalLevelAtGap` = 该间隙下**吞得最少**的层级。
  *
- * 于是三种常见操作都有明确手势：同级重排（落同级标题上沿）、降级并入某节（落该标题下沿）、
- * 升级拖出（落到更高级标题的上沿）。**不需要横向拖动**——避免了「文档不缩进就没有横向参照」
- * 的问题（本编辑器标题不缩进，横向映射只能是武断的像素阶梯）。
+ * **主动作**：落在标题**下半区** = 放进该节**末尾**、成为它的最后一个子节（降一级，**整块高亮
+ * 该标题**）。落在节末而不是紧跟标题之后，是为了不把该节原有正文挤到新区块之下。
  *
- * `computeDropSlot` 里「放进某节」一律落在**节末**而不是紧跟标题之后：后者会把该节原有正文
- * 挤到新区块之下、改归新区块管（markdown 的节按「最近的上层标题」划分）。
+ * 于是三种常见操作各有明确手势：同级重排 / 插到两行之间（落间隙）、降级并入某节（落标题下沿）、
+ * 升级拖出（落到更高级标题所在的行间隙）。**不做横向拖动映射层级**——本编辑器标题不缩进，
+ * 横向只能是武断的像素阶梯，且手柄在左侧、指针自然落在右侧，会导致「永远最深层级」。
  *
  * ## 为什么不让 ProseMirror 内建路径处理
  * ① 内建路径靠 `view.dragging` 决定「移动还是复制」，这条链在部分 WebView 上会断，断掉后它
@@ -102,135 +97,53 @@ function computeDropSlot(
     return el instanceof HTMLElement ? el.getBoundingClientRect() : null;
   };
   const inset = (level: number) => col.left + (level - 1) * INDENT_PX;
-  const lastIndex = doc.childCount - 1;
-  const lastRect = rectOf(lastIndex);
-  // 拖到正文下方空白处 = 追加到文末
-  const belowLast = lastRect !== null && clientY > lastRect.bottom;
-
   const index = topBlockIndexFromPoint(view, clientX, clientY);
   if (index === null) return null;
   const targetRect = rectOf(index);
   if (!targetRect) return null;
+  /**
+   * 落点指示线的纵向位置：画在**它将要插入的那一块的顶边**上（`gap === childCount` 时取末块底边）。
+   * 不用「上一块的底边」——标题自带 24px 下边距，那条线会浮在空白区上方约一行，指不准。
+   */
+  const gapY = (gap: number) =>
+    gap < doc.childCount
+      ? (rectOf(gap) ?? targetRect).top
+      : (rectOf(doc.childCount - 1) ?? targetRect).bottom;
+  const lowerHalf = clientY > targetRect.top + targetRect.height / 2;
+  const target = doc.child(index);
+  const unitLength = unitLengthAt(doc, srcIndex);
   const isHeadingUnit = headingLevelOf(doc.child(srcIndex)) > 0;
 
-  // 落点在自己身上（自己的标题或自己的正文）→ 一律不动。
-  // 否则「拖歪一点、松手落在自己正文上」就会被降级——而 Notion 里那是「往右拖缩进」的
-  // 刻意手势，我们没有横向轴，误触代价不对称。降级本身仍可用「落在上一节标题下沿」完成。
-  if (isHeadingUnit) {
-    const unitEnd = srcIndex + unitLengthAt(doc, srcIndex);
-    if (index >= srcIndex && index < unitEnd) return null;
-    if (belowLast && unitEnd >= doc.childCount) return null; // 自己是末节 + 拖到正文下方
-  }
-
+  // 非标题单元：逐块移动，不涉及层级（它自己不含标题，插到哪都不会改结构）
   if (!isHeadingUnit) {
-    // 非标题单元：逐块移动，不涉及层级（它自己不含标题，插到哪都不会改结构）
-    if (belowLast) {
-      return {
-        insertBefore: doc.childCount,
-        level: null,
-        parentIndex: null,
-        y: lastRect.bottom,
-        left: col.left,
-        right: col.right,
-      };
-    }
-    if (clientY <= targetRect.top + targetRect.height / 2) {
-      return {
-        insertBefore: index,
-        level: null,
-        parentIndex: null,
-        y: targetRect.top,
-        left: col.left,
-        right: col.right,
-      };
-    }
-    const endIndex = index + unitLengthAt(doc, index) - 1;
-    const endRect = rectOf(endIndex) ?? targetRect;
-    return {
-      insertBefore: index + unitLengthAt(doc, index),
-      level: null,
-      parentIndex: null,
-      y: endRect.bottom,
-      left: col.left,
-      right: col.right,
-    };
+    const gap = lowerHalf ? index + unitLengthAt(doc, index) : index;
+    const y = gapY(gap);
+    return { insertBefore: gap, level: null, parentIndex: null, y, left: col.left, right: col.right };
   }
 
-  // ── 标题单元：只能落在节边界上 ──
-  if (belowLast) {
-    const slot = documentEndSlot(doc);
-    return {
-      ...slot,
-      parentIndex: null,
-      y: lastRect.bottom,
-      left: inset(slot.level),
-      right: col.right,
-    };
-  }
-
-  if (doc.child(index).type.name === "heading") {
-    if (clientY <= targetRect.top + targetRect.height / 2) {
-      // 上半区 → 插到它之前，与它同级（纯换位 / 升级拖出都走这里）
-      const level = siblingSlotLevel(doc, index);
-      return {
-        insertBefore: index,
-        level,
-        parentIndex: null,
-        y: targetRect.top,
-        left: inset(level),
-        right: col.right,
-      };
-    }
-    // 下半区 → 放进这一节的末尾，成为它的子节
+  // ── 标题单元 ──
+  // 主动作：落在标题**下半区** = 放进这一节的**末尾**，成为它的最后一个子节。
+  // 落在节末而不是紧跟标题之后，是为了不把该节原有正文挤到新区块之下（那才是真的改结构）。
+  if (target.type.name === "heading" && lowerHalf) {
     const slot = intoHeadingSlot(doc, index);
     if (!slot) return null;
-    const endRect = rectOf(slot.insertBefore - 1) ?? targetRect;
     return {
       ...slot,
       parentIndex: index,
-      y: endRect.bottom,
+      y: gapY(slot.insertBefore),
       left: inset(slot.level),
       right: col.right,
     };
   }
 
-  // 落在非标题块上 → 放进它**所属节**的末尾
-  const enclosing = enclosingHeadingIndex(doc, index);
-  if (enclosing !== null) {
-    const slot = intoHeadingSlot(doc, enclosing);
-    if (!slot) return null;
-    const endRect = rectOf(slot.insertBefore - 1) ?? targetRect;
-    return {
-      ...slot,
-      parentIndex: enclosing,
-      y: endRect.bottom,
-      left: inset(slot.level),
-      right: col.right,
-    };
-  }
-
-  // 文首没有标题（内容排在第一个标题之前）：落到第一个标题之前，与它同级
-  let first = index;
-  while (first < doc.childCount && doc.child(first).type.name !== "heading") first += 1;
-  if (first >= doc.childCount) {
-    const slot = documentEndSlot(doc);
-    return {
-      ...slot,
-      parentIndex: null,
-      y: (rectOf(doc.childCount - 1) ?? targetRect).bottom,
-      left: inset(slot.level),
-      right: col.right,
-    };
-  }
-  const level = siblingSlotLevel(doc, first);
-  return {
-    insertBefore: first,
-    level,
-    parentIndex: null,
-    y: (rectOf(first) ?? targetRect).top,
-    left: inset(level),
-    right: col.right,
-  };
+  // 其余情况 = 落在某个**行间隙**上：上半区插到该行之前、下半区插到该行之后。
+  // 「每一行之间都能插入」就是这一条——不折叠到节末。层级取该间隙的天然层级。
+  const gap = lowerHalf ? index + 1 : index;
+  // 落在自己身上（自己这一节的范围之内）→ 不动，避免拖歪一点就被降级
+  if (gap >= srcIndex && gap <= srcIndex + unitLength) return null;
+  const level = naturalLevelAtGap(doc, gap);
+  const y = gapY(gap);
+  return { insertBefore: gap, level, parentIndex: null, y, left: inset(level), right: col.right };
 }
 
 export const blockDragPlugin = $prose((ctx) => {

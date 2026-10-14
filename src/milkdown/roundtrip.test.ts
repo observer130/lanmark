@@ -21,6 +21,7 @@ import {
   headingLevelOf,
   intoHeadingSlot,
   moveBlockCommand,
+  naturalLevelAtGap,
   moveUnitTo,
   planUnitMove,
   siblingSlotLevel,
@@ -509,24 +510,28 @@ describe("块单元：标题连同整节（M8）", () => {
     root.remove();
   });
 
-  it("标题单元落在非标题块上 → 吸附到安全边界，**不吞掉后面的内容**", async () => {
+  it("行间隙自然层级：后面是标题 → 同级；后面是正文 → 所属节 +1；文末 → 末节同级", async () => {
     // SECTION: 0 h1甲 1 正文一 2 h2乙 3 列表 4 h3丙 5 更深的正文 6 h2丁 7 尾段
-    // 把 ## 二级丁 放到「### 三级丙」上（块 4，非标题块），目标层级 3。
-    // 不安全（H3 之后紧跟 H3丙 是同级的 → 其实安全），这里验的是不变量本身。
-    const { crepe, root, doc, moveUnit, outline } = await mountWithCaret(SECTION, 0);
-    moveUnit(6, 4, 3);
+    const { crepe, root, doc } = await mountWithCaret(SECTION, 0);
     const d = doc();
+    expect(naturalLevelAtGap(d, 0)).toBe(1); // 文首 → 与第一个标题同级
+    expect(naturalLevelAtGap(d, 2)).toBe(2); // 间隙后是 h2乙 → 与它同级
+    expect(naturalLevelAtGap(d, 3)).toBe(3); // 间隙后是正文（属 h2乙）→ h3
+    expect(naturalLevelAtGap(d, 6)).toBe(2); // 间隙后是 h2丁 → 与它同级
+    expect(naturalLevelAtGap(d, 8)).toBe(2); // 文末 → 与最后一个标题同级
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("**每一行之间**都可插入：位置精确落到该间隙，不折回节末", async () => {
+    // 回归护栏：曾把整节内容区折到节末 → 用户只能拖到「标题上方 / 文末」两处（2026-10-13 走查）
+    const { crepe, root, doc, moveUnit, outline } = await mountWithCaret(SECTION, 0);
+    // 把 ## 二级丁 插到「### 三级丙」之前（块 4 = 行间隙 4，层级 3）
+    expect(moveUnit(6, 4, naturalLevelAtGap(doc(), 4))).not.toBeNull();
     const o = outline();
-    const at = o.findIndex((x) => x === "h3:二级丁");
-    expect(at).toBeGreaterThan(-1);
-    // 不变量：紧随被插入单元（长度 2）之后的块，必须是层级 ≤ 本单元层级的标题，或文末
-    const after = d.child(at + 2);
-    const safe =
-      after === undefined ||
-      (after.type.name === "heading" && headingLevelOf(after) <= 3);
-    expect(safe).toBe(true);
-    // 「更深的正文」仍归 ## 三级丙（没被二级丁抢走）
-    expect(o[o.indexOf("h3:三级丙") + 1]).toBe("paragraph:更深的正文。");
+    const at = o.indexOf("h3:二级丁");
+    expect(at).toBe(4); // 真的落在第 4 行，不是被折到文末
+    expect(o[at + 1]).toContain("尾段");
     await crepe.destroy();
     root.remove();
   });
