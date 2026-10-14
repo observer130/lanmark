@@ -155,6 +155,31 @@ function shiftHeadingLevels(fragment: Fragment, delta: number): Fragment {
 }
 
 /**
+ * **大纲刻度起点**：拖拽层级刻度（指示线圆点的左端缩进）以哪一级为第 0 格。
+ *
+ * 笔记里的 `#` 通常是**文档标题**——全篇只有一个，并不参与分节；真正分节的最高级别是 `##`。
+ * 所以判据是：**全篇恰好一个 `#`、且存在更深的标题** → 它按文档标题处理，刻度从 `##` 起算。
+ * 有多个 `#` 时说明 `#` 也在当分节用，刻度就从 `#` 起算。
+ *
+ * 不这么做的话，`##` 会被推到第 2 格（2026-10-13 走查：横线与圆点「太靠右，视觉上误导」）。
+ */
+export function outlineBaseline(doc: PMNode): number {
+  let min = 0;
+  let h1 = 0;
+  let deeperThan1 = false;
+  for (let i = 0; i < doc.childCount; i += 1) {
+    const level = headingLevelOf(doc.child(i));
+    if (level === 0) continue;
+    if (min === 0 || level < min) min = level;
+    if (level === 1) h1 += 1;
+    if (level >= 2) deeperThan1 = true;
+  }
+  if (min === 0) return 1; // 全篇没有标题
+  if (min === 1 && h1 === 1 && deeperThan1) return 2; // 唯一的 # = 文档标题
+  return min;
+}
+
+/**
  * 某个**行间隙**的天然层级。`gap` 是「插到第 gap 块之前」的块序号（0..childCount）。
  *
  * 这是「每一行之间都能插入」的关键：间隙决定**位置**，间隙决定**层级**，两者都不折叠到节末。
@@ -169,6 +194,13 @@ function shiftHeadingLevels(fragment: Fragment, delta: number): Fragment {
  */
 export function naturalLevelAtGap(doc: PMNode, gap: number): number {
   if (doc.childCount === 0) return 1;
+  const floor = outlineBaseline(doc);
+  // 落点层级不浅于刻度起点：刻度起点的意义就是「大纲里最外层的分节级别」，
+  // 再浅就超出了大纲（例如给「唯一的 # 文档标题」再加一个同级标题）。
+  return Math.max(floor, rawLevelAtGap(doc, gap));
+}
+
+function rawLevelAtGap(doc: PMNode, gap: number): number {
   if (gap >= doc.childCount) return documentEndSlot(doc).level;
   const next = doc.child(Math.max(0, gap));
   if (next.type.name === "heading") return headingLevelOf(next);

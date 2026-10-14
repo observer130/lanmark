@@ -9,6 +9,7 @@ import {
   intoHeadingSlot,
   moveUnitTo,
   naturalLevelAtGap,
+  outlineBaseline,
   planUnitMove,
   topBlockIndexAtPos,
   topBlockIndexFromPoint,
@@ -41,7 +42,8 @@ import {
  * （含「不动」），**绝不能 return false 交回去**——交回去就是「拖标题只搬标题」。
  *
  * ## 落点指示线
- * 线的位置 = 真正的插入点；**左端缩进 + 圆点横向位置 = 落点层级**（层级越深越靠右）；
+ * 线的位置 = 真正的插入点；**左端缩进 + 圆点横向位置 = 落点层级**（以 `outlineBaseline` 为第 0 格，
+ * 层级越深越靠右）；
  * 「放进某节」时该节标题整块高亮。线与落位共用同一个 `computeDropSlot`：**线画在哪就必须落在哪**。
  * 算出来是「不动」时不画线，让「这里放不下」也有反馈。
  */
@@ -96,7 +98,9 @@ function computeDropSlot(
     const el = kids.item(i);
     return el instanceof HTMLElement ? el.getBoundingClientRect() : null;
   };
-  const inset = (level: number) => col.left + (level - 1) * INDENT_PX;
+  // 刻度起点 = 大纲最外层分节级别（`#` 是文档标题时从 `##` 起算），见 outlineBaseline
+  const baseline = outlineBaseline(doc);
+  const inset = (level: number) => col.left + Math.max(0, level - baseline) * INDENT_PX;
   const index = topBlockIndexFromPoint(view, clientX, clientY);
   if (index === null) return null;
   const targetRect = rectOf(index);
