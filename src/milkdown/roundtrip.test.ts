@@ -17,6 +17,7 @@ import { createProductCrepe } from "./product";
 import {
   currentTopBlockIndex,
   moveBlockCommand,
+  planUnitMove,
   topBlockIndexAtPos,
   unitLengthAt,
 } from "./block-move";
@@ -411,6 +412,24 @@ describe("块单元：标题连同整节（M8）", () => {
     // ## 二级乙 是 # 一级甲 下的第一节：上移会变成 h2 在 h1 之前 = 提升，禁止
     const { crepe, root, runMove } = await mountWithCaret(SECTION, 2);
     expect(runMove(-1)).toBe(false);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("落点在源单元内部/紧邻 → 无操作（拖放必须由我们给结论）", async () => {
+    // 回归护栏：这一条曾是「拖标题只搬标题」的根因——算出来无操作时，块拖放插件
+    // 曾 return false 把 drop 交回 prosemirror-view 的内建路径，而它只搬**单个节点**。
+    // 现在插件一律返回 true，所以这里必须钉住「无操作」的判定范围。
+    const { crepe, root, doc } = await mountWithCaret(SECTION, 2); // ## 二级乙，单元 [2, 6)
+    const d = doc();
+    const len = unitLengthAt(d, 2);
+    expect(len).toBe(4);
+    for (const insertBefore of [2, 3, 4, 5, 6]) {
+      expect(planUnitMove(d, 2, len, insertBefore)).toBeNull();
+    }
+    // 单元范围之外才有落点
+    expect(planUnitMove(d, 2, len, 0)?.target).toBe(0);
+    expect(planUnitMove(d, 2, len, 8)?.target).toBe(4);
     await crepe.destroy();
     root.remove();
   });

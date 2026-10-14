@@ -488,3 +488,30 @@ body {
 .cm-editor.cm-focused {
   outline: none;
 }
+
+/* ── 块拖拽落点指示线（M8，src/milkdown/block-drag.ts）──
+   拖「六个点」时显示精确落点：一条实线 + 左端圆点（Notion / Google Docs 式）。
+   挂 body + position: fixed（编辑器是可滚动的 .editor-host，fixed 省掉容器换算）。
+   **pointer-events: none 不能删**：否则这条线自己会成为 drop 的命中目标，把落点判定带偏。
+   颜色走 token，跟随配色；线想压过 crepe 的浮层（z-index 10 上下）所以给到 60。 */
+.lanmark-drop-line {
+  position: fixed;
+  z-index: 60;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--c-acc);
+  box-shadow: 0 0 0 1px var(--c-card);
+  pointer-events: none;
+}
+
+.lanmark-drop-line::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--c-acc);
+  transform: translateY(-50%);
+}
