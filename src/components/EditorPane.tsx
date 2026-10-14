@@ -23,9 +23,10 @@ import { useSettingsStore } from "../stores/settings";
 import { createProductCrepe } from "../milkdown/product";
 import {
   currentTopBlockIndex,
-  moveBlockCommand,
+  moveUnitTo,
   topBlockAt,
-  topBlockIndexAtPos,
+  topBlockIndexFromPoint,
+  unitInsertBefore,
 } from "../milkdown/block-move";
 import { BlockMenu, type BlockMenuTarget } from "./BlockMenu";
 
@@ -61,7 +62,10 @@ export interface EditorApi {
   indexFromSelection: () => number | null;
   /** 顶层块总数（菜单置灰用） */
   blockCount: () => number;
-  moveBlock: (index: number, dir: -1 | 1) => void;
+  /** 预演移动：能移返回移动后的新序号，不能返回 null（菜单置灰用，不改文档） */
+  planMove: (index: number, dir: -1 | 1) => number | null;
+  /** 执行移动（标题搬的是整节），返回移动后的新序号；无操作返回 null */
+  moveBlock: (index: number, dir: -1 | 1) => number | null;
   deleteBlock: (index: number) => void;
 }
 
@@ -197,40 +201,32 @@ function MilkdownHost({
         void insertFiles(files);
       };
 
-      // ── 块级操作面（M8 G3：不依赖拖拽的第二条路）─────────────────────────
+      // ── 块级操作面（M8：不依赖拖拽的通路，拖放落点也走同一个原语）──────────
       const api: EditorApi = {
         blockCount: () => view?.state.doc.childCount ?? 0,
         indexFromSelection: () => (view ? currentTopBlockIndex(view.state) : null),
         indexFromPoint: (x, y) => {
           if (!view) return null;
-          // 触发点常落在正文之外：左侧槽位（手柄所在的留白）、卡片 padding，手机上还有
-          // 手指偏出文本列。这些位置 `posAtCoords` **直接返回 null**，所以不能原样交给它。
-          // 横向在内容列外时只按纵向位置定位、横向取内容列中线——留白处的语义本来就是
-          // 「这一行对应的块」。实测（.cache/probe-blockmenu.mjs，1100px）。
-          const col = contentColumn();
-          const rect = view.dom.getBoundingClientRect();
-          const outsideX = x < col.left || x > col.right;
-          const coords = view.posAtCoords({
-            left: outsideX ? (col.left + col.right) / 2 : x,
-            top: Math.min(Math.max(y, rect.top + 1), rect.bottom - 1),
-          });
-          if (!coords) return null;
-          let index: number | null;
-          try {
-            // 落在块间空隙时 depth 会是 0，用容错版按位置归块（见 block-move.ts）
-            index = topBlockIndexAtPos(view.state.doc, coords.pos);
-          } catch {
-            return null;
-          }
+          // 命中判定与定位共用同一口径（都在 block-move.ts 里），避免「判定通过但定位失败」
+          const index = topBlockIndexFromPoint(view, x, y);
           if (index === null) return null;
           return selectTopBlock(view, index) ? index : null;
         },
+        planMove: (index, dir) => {
+          const v = view;
+          if (!v) return null;
+          const insertBefore = unitInsertBefore(v.state.doc, index, dir);
+          if (insertBefore === null) return null;
+          // dispatch 传 undefined = 只预演不落盘（moveUnitTo 会返回落点序号）
+          return moveUnitTo(v.state, undefined, index, insertBefore);
+        },
         moveBlock: (index, dir) => {
-          if (!view) return;
-          if (!selectTopBlock(view, index)) return;
-          // 用命令的 run 而非 commandsCtx：run 在插件初始化时就绑好了 ctx，
-          // 调用方（React 组件）不必持有 ctx。
-          moveBlockCommand.run(dir);
+          const v = view;
+          if (!v) return null;
+          const insertBefore = unitInsertBefore(v.state.doc, index, dir);
+          if (insertBefore === null) return null;
+          // 直接调原语而不走命令：命令只回 boolean，这里要把**新序号**回传给菜单刷新置灰
+          return moveUnitTo(v.state, (tr) => v.dispatch(tr), index, insertBefore);
         },
         deleteBlock: (index) => {
           if (!view) return;
@@ -245,9 +241,8 @@ function MilkdownHost({
 
       /**
        * 正文**内容列**（去掉 `.ProseMirror` 自身 padding 后的左右边界）。
-       * 留白判定与坐标定位必须用同一个口径，否则会出现「判定通过但定位失败 → 点了没反应」。
-       * 用 padding 而不是 rect 内缘：crepe 给 `.ProseMirror` 几十 px 的左右 padding，
-       * rect 内缘仍在 padding 里，`posAtCoords` 照样返 null。
+       * 只用于「左侧留白」的命中判定；坐标定位走 `block-move.ts` 的
+       * `topBlockIndexFromPoint`，两者是同一个口径（见那里的注释）。
        */
       const contentColumn = () => {
         const rect = view!.dom.getBoundingClientRect();
@@ -399,39 +394,45 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   const editorApiRef = useRef<EditorApi | null>(null);
   const [blockMenu, setBlockMenu] = useState<BlockMenuTarget | null>(null);
 
-  const openBlockMenu = useCallback((index: number, x: number, y: number) => {
-    const api = editorApiRef.current;
-    if (!api) return;
-    const count = api.blockCount();
-    if (index < 0 || index >= count) return;
-    setBlockMenu({
-      index,
-      canMoveUp: index > 0,
-      canMoveDown: index < count - 1,
-      canDelete: count > 1, // doc 至少留一个块（schema block+）
-      x,
-      y,
-    });
+  /**
+   * 菜单的置灰状态。用 `planMove` **预演**而不是自己算索引：标题搬的是整节，
+   * 而且「同级上一节」的判据（跳过更深标题、遇更高级就停）只有 block-move 知道——
+   * 这里再推一遍必然漂移，最后表现成「按钮能点但没反应」。
+   */
+  const menuStateAt = useCallback((api: EditorApi, index: number) => {
+    return {
+      canMoveUp: api.planMove(index, -1) !== null,
+      canMoveDown: api.planMove(index, 1) !== null,
+      canDelete: api.blockCount() > 1, // doc 至少留一个块（schema block+）
+    };
   }, []);
+
+  const openBlockMenu = useCallback(
+    (index: number, x: number, y: number) => {
+      const api = editorApiRef.current;
+      if (!api) return;
+      if (index < 0 || index >= api.blockCount()) return;
+      setBlockMenu({ index, x, y, ...menuStateAt(api, index) });
+    },
+    [menuStateAt],
+  );
 
   const closeBlockMenu = useCallback(() => setBlockMenu(null), []);
 
-  // 移动后**保持菜单打开**并刷新置灰状态：连续微调位置是「移动块」最常见的用法
-  const handleBlockMove = useCallback((dir: -1 | 1) => {
-    const api = editorApiRef.current;
-    setBlockMenu((cur) => {
-      if (!api || !cur) return cur;
-      api.moveBlock(cur.index, dir);
-      const next = cur.index + dir;
-      const count = api.blockCount();
-      return {
-        ...cur,
-        index: next,
-        canMoveUp: next > 0,
-        canMoveDown: next < count - 1,
-      };
-    });
-  }, []);
+  // 移动后**保持菜单打开**并刷新置灰状态：连续微调位置是「移动块」最常见的用法。
+  // 新序号必须用 moveBlock 的返回值：标题搬的是整节，新序号不一定是 index±1。
+  const handleBlockMove = useCallback(
+    (dir: -1 | 1) => {
+      const api = editorApiRef.current;
+      setBlockMenu((cur) => {
+        if (!api || !cur) return cur;
+        const next = api.moveBlock(cur.index, dir);
+        if (next === null) return cur; // 到头了：不动，也不刷新
+        return { ...cur, index: next, ...menuStateAt(api, next) };
+      });
+    },
+    [menuStateAt],
+  );
 
   const handleBlockDelete = useCallback(() => {
     const api = editorApiRef.current;

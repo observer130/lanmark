@@ -18,6 +18,7 @@ import {
   currentTopBlockIndex,
   moveBlockCommand,
   topBlockIndexAtPos,
+  unitLengthAt,
 } from "./block-move";
 
 function normalize(md: string): string {
@@ -269,17 +270,17 @@ describe("块移动命令（M8 G3）", () => {
     last.root.remove();
   });
 
-  it("移动标题/代码块等异质块：结构与内容都不丢", async () => {
-    const md = ["# 标题", "", "```rust", "fn main() {}", "```", "", "尾段。"].join("\n") + "\n";
+  it("异质块跟着所属标题一起走（代码块不被落下）", async () => {
+    // 块：0 #甲  1 代码块  2 #乙  3 乙的正文。甲这一节 = [0,2)，含代码块
+    const md = ["# 甲", "", "```rust", "fn main() {}", "```", "", "# 乙", "", "乙的正文。", ""].join("\n") + "\n";
     const { crepe, root, runMove } = await mountWithCaret(md, 0);
     expect(runMove(1)).toBe(true);
     const out = crepe.getMarkdown();
-    expect(out).toContain("# 标题");
     expect(out).toContain("```rust");
     expect(out).toContain("fn main() {}");
-    expect(out).toContain("尾段。");
-    // 代码块现在排在标题之前
-    expect(out.indexOf("```rust")).toBeLessThan(out.indexOf("# 标题"));
+    // 甲整节（标题 + 代码块）落到乙那节之后，且代码块仍在甲标题之下
+    expect(out.indexOf("# 乙")).toBeLessThan(out.indexOf("# 甲"));
+    expect(out.indexOf("# 甲")).toBeLessThan(out.indexOf("```rust"));
     await crepe.destroy();
     root.remove();
   });
@@ -328,6 +329,128 @@ describe("块移动命令（M8 G3）", () => {
     expect(caretIndex()).toBe(0);
     expect(topBlockIndexAtPos(doc(), 0)).toBe(0); // canMoveUp = index > 0 → false
     expect(topBlockIndexAtPos(doc(), 1_000_000)).toBe(1); // canMoveDown = index < count-1 → false
+    await crepe.destroy();
+    root.remove();
+  });
+});
+
+/**
+ * M8：「标题 = 一节」的单元语义。
+ * 拖一个 h2 应当带走它下面的段落/列表/更深的 h3，直到下一个**同级或更高级**标题为止
+ * （Notion / Obsidian 的通行行为，用户明确要求），且移动时**只与同级节交换**——插进别的
+ * 节中间会让那段内容改归它管，等于偷偷改结构。
+ */
+describe("块单元：标题连同整节（M8）", () => {
+  // 顶层块（空行只是分隔符，不占块）：
+  // 0 #一级甲  1 正文一  2 ##二级乙  3 列表  4 ###三级丙  5 更深的正文  6 ##二级丁  7 尾段
+  const SECTION = [
+    "# 一级甲",
+    "",
+    "正文一。",
+    "",
+    "## 二级乙",
+    "",
+    "- 列表项",
+    "",
+    "### 三级丙",
+    "",
+    "更深的正文。",
+    "",
+    "## 二级丁",
+    "",
+    "尾段。",
+    "",
+  ].join("\n");
+
+  it("单元长度：标题吃到下一个同级/更高级标题为止，其余块恒为 1", async () => {
+    const { crepe, root, doc } = await mountWithCaret(SECTION, 0);
+    const d = doc();
+    expect(d.childCount).toBe(8);
+    expect(d.child(0).textContent).toBe("一级甲");
+    expect(unitLengthAt(d, 2)).toBe(4); // ## 二级乙 → 含 h3 与列表，到 ## 二级丁 之前
+    expect(unitLengthAt(d, 0)).toBe(8); // # 一级甲 → 到文末（没有更高级标题）
+    expect(unitLengthAt(d, 4)).toBe(2); // ### 三级丙 → 自己 + 正文
+    expect(unitLengthAt(d, 6)).toBe(2); // ## 二级丁 → 自己 + 尾段
+    expect(unitLengthAt(d, 1)).toBe(1); // 普通段落
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("下移标题：整节与同级下一节交换，节内内容不拆散", async () => {
+    const { crepe, root, runMove, doc } = await mountWithCaret(SECTION, 2); // ## 二级乙
+    expect(runMove(1)).toBe(true);
+    const d = doc();
+    expect(d.child(0).textContent).toBe("一级甲"); // 更高级的不动
+    expect(d.child(2).textContent).toBe("二级丁"); // 二级丁整节顶上来
+    expect(d.child(4).textContent).toBe("二级乙"); // 二级乙整节落到它后面
+    expect(d.child(5).textContent).toContain("列表项");
+    expect(d.child(6).textContent).toBe("三级丙"); // 子节跟着走
+    const md = crepe.getMarkdown();
+    expect(md).toContain("更深的正文。");
+    expect(md).toContain("尾段。");
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("上移标题：整节与同级上一节交换（不是插进别的节中间）", async () => {
+    const { crepe, root, runMove, doc } = await mountWithCaret(SECTION, 6); // ## 二级丁
+    expect(runMove(-1)).toBe(true);
+    const d = doc();
+    expect(d.child(0).textContent).toBe("一级甲");
+    expect(d.child(1).textContent).toBe("正文一。");
+    expect(d.child(2).textContent).toBe("二级丁"); // 与同级上一节（二级乙）交换
+    expect(d.child(3).textContent).toBe("尾段。");
+    expect(d.child(4).textContent).toBe("二级乙");
+    expect(d.child(5).textContent).toContain("列表项");
+    expect(d.child(6).textContent).toBe("三级丙"); // 三级丙仍归二级乙
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("父节里的第一节不能上移（否则会被提升出父节）", async () => {
+    // ## 二级乙 是 # 一级甲 下的第一节：上移会变成 h2 在 h1 之前 = 提升，禁止
+    const { crepe, root, runMove } = await mountWithCaret(SECTION, 2);
+    expect(runMove(-1)).toBe(false);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("末节下移是空操作（菜单据此置灰）", async () => {
+    const { crepe, root, runMove } = await mountWithCaret(SECTION, 6); // ## 二级丁 是最后一节
+    expect(runMove(1)).toBe(false);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("标准读书笔记结构：拖 h2 带走标题、段落、列表与更深的 h3", async () => {
+    const md = [
+      "## 甲",
+      "",
+      "甲的正文。",
+      "",
+      "- 甲的要点",
+      "",
+      "### 甲的子节",
+      "",
+      "子节正文。",
+      "",
+      "## 乙",
+      "",
+      "乙的正文。",
+      "",
+    ].join("\n");
+    const { crepe, root, runMove, doc } = await mountWithCaret(md, 0); // ## 甲
+    expect(doc().childCount).toBe(7);
+    expect(runMove(1)).toBe(true);
+    const out = crepe.getMarkdown();
+    // 乙整节顶到最前，甲整节（含 h3 子节与列表）跟在其后
+    expect(out.indexOf("乙的正文。")).toBeLessThan(out.indexOf("甲的正文。"));
+    expect(out).toContain("### 甲的子节");
+    expect(out).toContain("子节正文。");
+    // Crepe 序列化无序列表用 `*`（见文件头「允许的风格归一化」），所以只断言内容
+    expect(out).toContain("甲的要点");
+    // 关键：甲的子节不能改归乙
+    expect(out.indexOf("乙的正文。")).toBeLessThan(out.indexOf("### 甲的子节"));
     await crepe.destroy();
     root.remove();
   });

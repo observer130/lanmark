@@ -1,6 +1,7 @@
 import { Crepe, CrepeFeature } from "@milkdown/crepe";
 import type { MilkdownPlugin } from "@milkdown/kit/ctx";
 
+import { blockDragPlugins } from "./block-drag";
 import { blockMovePlugins } from "./block-move";
 
 /**
@@ -47,7 +48,7 @@ export function productFeatures(readOnly = false): Partial<Record<CrepeFeature, 
  * 顺序无所谓（Milkdown 内部按 timer 阶段装配），但必须都经过这里——`EditorPane` 与
  * 往返护栏测试都走 `createProductCrepe`，否则「测试绿」不代表「产品对」。
  */
-export const PRODUCT_PLUGINS: MilkdownPlugin[] = [...blockMovePlugins];
+export const PRODUCT_PLUGINS: MilkdownPlugin[] = [...blockMovePlugins, ...blockDragPlugins];
 
 export interface ProductCrepeOptions {
   root: HTMLElement | string;
