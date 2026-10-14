@@ -16,8 +16,14 @@ import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
 import { createProductCrepe } from "./product";
 import {
   currentTopBlockIndex,
+  documentEndSlot,
+  enclosingHeadingIndex,
+  headingLevelOf,
+  intoHeadingSlot,
   moveBlockCommand,
+  moveUnitTo,
   planUnitMove,
+  siblingSlotLevel,
   topBlockIndexAtPos,
   unitLengthAt,
 } from "./block-move";
@@ -81,7 +87,17 @@ async function mountWithCaret(input: string, index = 0) {
     crepe.editor.action((ctx) => ctx.get(commandsCtx).call(moveBlockCommand.key, dir));
   const caretIndex = () => currentTopBlockIndex(view.state);
   const doc = () => view.state.doc;
-  return { crepe, root, runMove, caretIndex, doc };
+  /** 直接按「插到第 insertBefore 块之前 + 目标层级」移动第 srcIndex 个单元 */
+  const moveUnit = (srcIndex: number, insertBefore: number, level?: number | null) =>
+    moveUnitTo(view.state, (tr) => view.dispatch(tr), srcIndex, insertBefore, level);
+  /** 取每个顶层块的「类型名 + 层级 + 文本」，用于断言层级升降 */
+  const outline = () =>
+    Array.from({ length: view.state.doc.childCount }, (_, i) => {
+      const n = view.state.doc.child(i);
+      const lv = headingLevelOf(n);
+      return `${n.type.name === "heading" ? `h${lv}` : n.type.name}:${n.textContent}`;
+    });
+  return { crepe, root, runMove, caretIndex, doc, moveUnit, outline };
 }
 
 describe("Milkdown 往返保真（M1 决策门）", () => {
@@ -412,6 +428,121 @@ describe("块单元：标题连同整节（M8）", () => {
     // ## 二级乙 是 # 一级甲 下的第一节：上移会变成 h2 在 h1 之前 = 提升，禁止
     const { crepe, root, runMove } = await mountWithCaret(SECTION, 2);
     expect(runMove(-1)).toBe(false);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("节边界滑槽：同级 = 该标题之前，入节 = 该节末尾 + 降一级", async () => {
+    const { crepe, root, doc } = await mountWithCaret(SECTION, 0);
+    const d = doc();
+    expect(enclosingHeadingIndex(d, 3)).toBe(2); // 列表块归属 ## 二级乙
+    expect(siblingSlotLevel(d, 6)).toBe(2); // 落 ## 二级丁 之前 → 与它同级
+    expect(intoHeadingSlot(d, 2)).toEqual({ insertBefore: 6, level: 3 }); // 入 ## 二级乙 → 节末 + L3
+    expect(intoHeadingSlot(d, 6)).toEqual({ insertBefore: 8, level: 3 }); // 末节入节 → 文末 + L3
+    expect(documentEndSlot(d)).toEqual({ insertBefore: 8, level: 2 }); // 文末追加 → 与末标题同级
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("同级重排：层级完全不变（只换位置）", async () => {
+    const { crepe, root, runMove, doc } = await mountWithCaret(SECTION, 2); // ## 二级乙
+    expect(runMove(1)).toBe(true);
+    const d = doc();
+    expect(headingLevelOf(d.child(2))).toBe(2); // 二级丁
+    expect(headingLevelOf(d.child(4))).toBe(2); // 二级乙仍是 L2
+    expect(headingLevelOf(d.child(6))).toBe(3); // 它的 h3 子节仍是 L3
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("降级并入某节：标题 +1，**下属标题整体 +1**", async () => {
+    // 把 ## 二级乙（单元 [2,6)，含 ### 三级丙）放进 # 一级甲这一节的末尾（slot 6）→ L3
+    const { crepe, root, moveUnit, outline } = await mountWithCaret(SECTION, 0);
+    expect(moveUnit(2, 6, 3)).not.toBeNull();
+    const o = outline();
+    // 二级乙变成 L3、它的 h3 子节变成 L4，两者都在一级甲这一节内
+    expect(o).toContain("h3:二级乙");
+    expect(o).toContain("h4:三级丙");
+    expect(o.indexOf("h3:二级乙")).toBeLessThan(o.indexOf("h2:二级丁"));
+    expect(crepe.getMarkdown()).toContain("### 二级乙");
+    expect(crepe.getMarkdown()).toContain("#### 三级丙");
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("升级拖出：标题 -1，**下属标题整体 -1**", async () => {
+    // 把 ### 三级丙（在 ## 二级乙 内）拖到文末并与 ## 二级丁 同级位置 → 提升到 L2
+    const { crepe, root, moveUnit, outline } = await mountWithCaret(SECTION, 0);
+    // 三级丙 = 块 4，单元 [4,6)；插到文末（slot 8），层级给 2
+    expect(moveUnit(4, 8, 2)).not.toBeNull();
+    const o = outline();
+    expect(o[o.length - 2]).toBe("h2:三级丙"); // 提到 L2
+    expect(o[o.length - 1]).toBe("paragraph:更深的正文。"); // 它的正文跟着走
+    expect(crepe.getMarkdown()).toContain("## 三级丙");
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("原地只改层级（Notion 式「往右缩进」）：位置不动、层级变化也算有效操作", async () => {
+    // ## 二级丁 放到「它自己这一节的末尾」（= 原地），但层级给 3 → 原地降一级
+    const { crepe, root, moveUnit, outline } = await mountWithCaret(SECTION, 0);
+    const before = outline();
+    expect(moveUnit(6, 8, 3)).not.toBeNull();
+    const after = outline();
+    expect(after).toHaveLength(before.length);
+    expect(after[6]).toBe("h3:二级丁"); // 原地降级
+    expect(after[7]).toBe("paragraph:尾段。");
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("层级夹紧在 1..6：h6 再降不越界，h1 再升不越界", async () => {
+    const md = ["# 甲", "", "###### 六", "", "内容。", "", "# 乙", "",].join("\n");
+    const { crepe, root, doc, moveUnit } = await mountWithCaret(md, 0);
+    // 把 h6 那节（块 1，单元 [1,3)）放进 #甲 的节末，层级给 6（已到底，不能再降）
+    moveUnit(1, 3, 6);
+    expect(headingLevelOf(doc().child(1))).toBe(6);
+    // 再把 h6 提到文末并给 level 1
+    moveUnit(1, doc().childCount, 1);
+    expect(headingLevelOf(doc().child(doc().childCount - 2))).toBe(1);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("标题单元落在非标题块上 → 吸附到安全边界，**不吞掉后面的内容**", async () => {
+    // SECTION: 0 h1甲 1 正文一 2 h2乙 3 列表 4 h3丙 5 更深的正文 6 h2丁 7 尾段
+    // 把 ## 二级丁 放到「### 三级丙」上（块 4，非标题块），目标层级 3。
+    // 不安全（H3 之后紧跟 H3丙 是同级的 → 其实安全），这里验的是不变量本身。
+    const { crepe, root, doc, moveUnit, outline } = await mountWithCaret(SECTION, 0);
+    moveUnit(6, 4, 3);
+    const d = doc();
+    const o = outline();
+    const at = o.findIndex((x) => x === "h3:二级丁");
+    expect(at).toBeGreaterThan(-1);
+    // 不变量：紧随被插入单元（长度 2）之后的块，必须是层级 ≤ 本单元层级的标题，或文末
+    const after = d.child(at + 2);
+    const safe =
+      after === undefined ||
+      (after.type.name === "heading" && headingLevelOf(after) <= 3);
+    expect(safe).toBe(true);
+    // 「更深的正文」仍归 ## 三级丙（没被二级丁抢走）
+    expect(o[o.indexOf("h3:三级丙") + 1]).toBe("paragraph:更深的正文。");
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("拖到自己正文上 → 原地降一级（Notion 式缩进：位置不动，只改层级）", async () => {
+    const { crepe, root, doc, moveUnit, outline } = await mountWithCaret(SECTION, 0);
+    const before = outline();
+    // 「放进 ## 二级乙 这一节」的槽 = 节末 6 + 层级 3；对块 2 而言这就是原地
+    const slot = intoHeadingSlot(doc(), 2);
+    expect(slot).toEqual({ insertBefore: 6, level: 3 });
+    expect(moveUnit(2, slot!.insertBefore, slot!.level)).not.toBeNull();
+    const after = outline();
+    expect(after).toHaveLength(before.length); // 位置没变
+    expect(after[2]).toBe("h3:二级乙"); // 自己降一级
+    expect(after[3]).toContain("列表项"); // 节内内容跟着走
+    expect(after[4]).toBe("h4:三级丙"); // 下属标题整体降一级
     await crepe.destroy();
     root.remove();
   });

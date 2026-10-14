@@ -515,3 +515,11 @@ body {
   background: var(--c-acc);
   transform: translateY(-50%);
 }
+
+/* 拖拽「放进某节」时，高亮该节标题整块（M8）：让「会变成它的子节」这件事在落点之外
+   还有第二处视觉确认——指示线说明「落在哪」，这块底说明「归谁管」。 */
+.lanmark-drop-parent {
+  background: var(--c-acc-08);
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px var(--c-acc-08);
+}

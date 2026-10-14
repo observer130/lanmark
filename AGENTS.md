@@ -64,7 +64,7 @@ Android 相关的非显然几条：
 | `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `BlockMenu`（块级操作浮层/底部抽屉：上移·下移·删除，三条触发路径见硬约定 13/17）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
 | `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量/外观属性 + 回滚）、`update.ts`（M5-4 更新检测：启动静默检查 + 手动检查，关于页展示）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
 | `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`settings.ts`（枚举→像素映射的**唯一来源** + `applyCssVars`/`applyScheme`/`applyFont`；外观 = 配色 + 编辑区字体 + 字号/行距，色值与字体栈在 index.css）、`ime-anchor.ts`（Windows 缩放后输入法候选框跑屏幕左上角的护栏，见硬约定 15）、`bridge.ts` |
-| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/上下移命令 + `Alt-↑/↓`，见硬约定 19）· `block-drag.ts`（**接管手柄拖放的落点**：自己记录拖拽源、把结果交给同一个移动原语，见硬约定 17/19）· `roundtrip.test.ts`（往返保真护栏，M1 决策门） |
+| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/层级/安全边界吸附/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、三区手势、层级、指示线与父标题高亮，见硬约定 17/19/20）· `roundtrip.test.ts`（往返保真护栏，M1 决策门） |
 | `src/index.css` | 设计 token（`:root` = 浅色 + 默认字体；`:root[data-scheme=…]` 深色/纸页、`:root[data-font=…]` 宋体/楷体，再加 `@theme`）与**全部 Crepe / CodeMirror 主题覆盖**；顶部 `@import` 内置字体（见硬约定 16）；改编辑器外观或加配色/字体先来这里 |
 | `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/**vault 统计与回收站清理**）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `settings`/`settings_cmd`（M4a 设备级偏好：结构 + 归一化 + 白名单，与 vault 无关）· `alias`（M4h-4 设备代号：词表生成/归一化/AppConfig 持久化/进程内缓存，语义对标 LocalSend alias）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `lan_scan`（M4h-1 LAN 并发探测发现）· `update`（M5-4 GitHub release 更新检测：纯逻辑版本比较 + 24h 节流进 AppConfig，`update_check` 命令）· `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
 | `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
@@ -131,15 +131,23 @@ Android 相关的非显然几条：
 
 18. **Crepe 的 feature 开关与 feature 配置是两个字段，别混**（M8 定）：开关走 `new Crepe({ features })`，配置走**独立的 `featureConfigs`**。把 `{ buildToolbar }` 之类塞进 `features[CrepeFeature.Toolbar]` 会**静默无效**——不报错、不生效，界面上只是少了个按钮（2026-10-13 实测踩过）。产品配置的唯一来源是 `src/milkdown/product.ts`：`EditorPane.tsx` 与往返护栏测试都经 `createProductCrepe` 建实例，**别再各自抄一份 feature 表**（两边漂移时护栏会失效）。同理，给编辑器加自研插件只经 `PRODUCT_PLUGINS` 注册。
 
-19. **块移动的语义是「标题 = 一节」，且落点必须落在单元边界上**（M8 定）：`src/milkdown/block-move.ts` 是**唯一**的移动原语，块菜单、`Alt-↑/↓`、拖放三条路都走它，别各写一套。
+19. **块移动的语义是「标题 = 一节」：整节搬 + 可升降级，且落点必须落在单元边界上**（M8 定）：`src/milkdown/block-move.ts` 是**唯一**的移动原语，块菜单、`Alt-↑/↓`、拖放三条路都走它，别各写一套。
     - **单元长度**（`unitLengthAt`）：标题连同它下属的内容，直到下一个**同级或更高级**标题为止；其余块恒为 1。所以拖一个 h2 会带走它的段落、列表与更深的 h3。
     - **标题只与同级节交换**：上移时跳过更深的标题、遇到更高级标题就停（那说明它已是父节的第一节，再上移等于把它「提升」出父节）；下移时若下一节更高级也停。不这么限，就会把别的节的内容悄悄改归它管。
-    - **落点吸附**（`block-drag.ts` 的 `computeDropSlot`）：拖到**标题**下半区要落到**整节之后**，不能落在「标题与其正文之间」——否则那段正文会被新节抢走（实测：拖 h1「甲」到 h1「乙」下缘，不吸附会得到 `[乙, 甲节…, 乙的正文]`）。非标题目标仍是逐块粒度，这样节内段落重排不会被放大成整节跳动。
+    - **非标题单元**（段落/列表/代码块等）仍是**逐块**移动（上半区插到它之前、下半区插到它之后），这样节内段落重排不会被放大成整节跳动；**标题单元**另有层级语义，见硬约定 20。
     - **命中判定与坐标定位必须同一口径**（`topBlockIndexFromPoint`）：右键/长按/落点常常落在正文之外（左侧槽位、`.ProseMirror` 自身 padding、手指偏出文本列），`posAtCoords` 在那里**直接返 null**——横向出内容列时只按纵向定位、横向取内容列中线。分开写两份必然漂移，表现成「点了没反应」。
     - 菜单置灰用 `planMove` **预演**（`moveUnitTo` 传 `undefined` dispatch），别在 UI 里重算索引。
     - **落点指示线**（`computeDropSlot` 一个函数同时产出「插入序号」与「线的位置」）：拖拽时必须让用户看见精确落点，且**线画在哪就必须落在哪**——判定与画线分成两份必然漂移，变成「线在这儿、东西落在别处」，比没有线更糟。落点算出来是「不动」时**不画线**，让「这里放不下」也有反馈。
     - **手柄拖拽一律由本插件给结论（`handleDrop` 必须返回 true）**：只有它不是手柄拖拽（正文选字 / 外部文件）时才返回 false。曾在这里 `return moved !== null`，于是「落点算出来无操作」时把 drop 交回 prosemirror-view 的内建路径，而它只搬**单个节点**——表现就是「拖标题只搬标题」（2026-10-13 走查反馈）。**别再让它有机会接手。**
     - 别改用 ProseMirror 的 `dropCursor`（`CrepeFeature.Cursor`）当指示线：它按 `dropPoint` 画在**块级**位置，而这里的落点是**单元边界**（标题 = 一节），拖标题时两者必然不一致。
+
+20. **标题拖拽可以改变层级（重新归位），靠三区手势而不是横向拖动**（M8 定）：markdown 的标题是**显式层级**（`##`/`###`）而不是容器，节边界由「最近的上层标题」决定——把标题插到**段落中间**必然把后面的段落划进新节。所以：
+    - **标题单元只能落在安全边界**：`snapSlotForHeading`（纯逻辑层，任何调用方都绕不过）把落点吸附到「下一块是层级 ≤ 目标层级的标题」或文末；不安全时**向后**吸附 = 该节末尾。**别把这条移到拖放层**——它是不变量，不是手势。
+    - **三区手势**（`block-drag.ts` 的 `computeDropSlot`）：落在**标题上半区** = 插到它之前、与它同级（纯换位 / 升级拖出）；落在**标题下半区** = 放进**该节末尾**、成为它的子节（降一级，**整块高亮该标题**）；落在非标题块 = 放进**所属节**末尾；正文下方空白 = 追加到文末。**不做横向拖动映射层级**——本编辑器标题不缩进，横向只能是武断的像素阶梯，且手柄在左侧、指针自然落在右侧，会导致「永远最深层级」。
+    - **「放进某节」落在节末而不是紧跟标题之后**：后者会把该节原有正文挤到新区块之下、改归新区块管。
+    - **升降级要整体平移**：被移动节内的**所有**标题按同一差值调整（`shiftHeadingLevels`），夹在 1..6。`###` 提到 `##` 时它下面的 `####` 也要跟着变 `###`，否则节内相对层级被压平。
+    - **落在自己身上 = 不动**（`computeDropSlot` 里显式返回 null）：否则「拖歪一点、松手落在自己正文上」就会被降级，误触代价不对称；降级本身仍可用「落在上一节标题下沿」完成。
+    - **指示线同时表达位置与层级**：线的纵向位置 = 精确插入点，**左端缩进与圆点横向位置 = 落点层级**（每深一级 +22px，`INDENT_PX`）；「放进某节」时 `lanmark-drop-parent` 高亮父标题块，让「归谁管」有第二处视觉确认。算出来是「不动」时**线不画、高亮不出**。
 
 ## 完成标准（DoD）
 

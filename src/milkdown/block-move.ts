@@ -1,4 +1,5 @@
 import { commandsCtx } from "@milkdown/kit/core";
+import { Fragment } from "@milkdown/kit/prose/model";
 import type { Node as PMNode } from "@milkdown/kit/prose/model";
 import type { EditorState, Transaction } from "@milkdown/kit/prose/state";
 import { TextSelection } from "@milkdown/kit/prose/state";
@@ -85,34 +86,175 @@ export function unitLengthAt(doc: PMNode, index: number): number {
   return length;
 }
 
+/** 块的标题级别（1..6）；**非标题返回 0**（0 是「不是标题」的哨兵，不参与比较） */
+export function headingLevelOf(node: PMNode): number {
+  if (node.type.name !== "heading") return 0;
+  return Math.min(6, Math.max(1, Number(node.attrs.level ?? 1)));
+}
+
+/**
+ * 第 index 块所属的**最内层上层标题**序号；文首没有标题时返回 null。
+ *
+ * 「最内层」= 往上第一个标题：正文永远归属离它最近的那个标题（节按就近嵌套）。
+ */
+export function enclosingHeadingIndex(doc: PMNode, index: number): number | null {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (doc.child(i).type.name === "heading") return i;
+  }
+  return null;
+}
+
+/**
+ * 「插到标题 `headIndex` 之前」这一落点的层级 = 该标题自己的级别（成为它的同级）。
+ */
+export function siblingSlotLevel(doc: PMNode, headIndex: number): number {
+  return headingLevelOf(doc.child(headIndex)) || 1;
+}
+
+/**
+ * 「放进标题 `headIndex` 这一节」的落点：插到**该节末尾**（下一个同级/更高级标题之前，或文末），
+ * 层级 = 该标题级别 + 1。
+ *
+ * 为什么必须是**节末**而不是紧跟标题之后：后者会把该节原有的正文挤到新区块之下、改归新区块管
+ * （markdown 的节由「最近的上层标题」决定，插入标题必然重划边界）。落在节末则原有内容一块不动，
+ * 新区块成为该节的**最后一个子节**——这也是文件管理器「拖进文件夹」的语义。
+ */
+export function intoHeadingSlot(
+  doc: PMNode,
+  headIndex: number,
+): { insertBefore: number; level: number } | null {
+  const node = doc.child(headIndex);
+  if (node.type.name !== "heading") return null;
+  const insertBefore = headIndex + unitLengthAt(doc, headIndex);
+  return { insertBefore, level: Math.min(6, headingLevelOf(node) + 1) };
+}
+
+/** 文末落点：插到最后一块之后，层级取**最后一个标题的级别**（与它同级，最常见的追加意图） */
+export function documentEndSlot(doc: PMNode): { insertBefore: number; level: number } {
+  for (let i = doc.childCount - 1; i >= 0; i -= 1) {
+    const level = headingLevelOf(doc.child(i));
+    if (level > 0) return { insertBefore: doc.childCount, level };
+  }
+  return { insertBefore: doc.childCount, level: 1 };
+}
+
+/** 把单元里的顶层标题整体升降 `delta` 级（夹在 1..6）。非标题原样返回 */
+function shiftHeadingLevels(fragment: Fragment, delta: number): Fragment {
+  if (delta === 0) return fragment;
+  const out: PMNode[] = [];
+  fragment.forEach((node: PMNode) => {
+    const level = headingLevelOf(node);
+    if (level > 0) {
+      const next = Math.min(6, Math.max(1, level + delta));
+      out.push(node.type.create({ ...node.attrs, level: next }, node.content, node.marks));
+    } else {
+      out.push(node);
+    }
+  });
+  return Fragment.fromArray(out);
+}
+
+/**
+ * 把标题单元的落点**吸附到安全边界**。
+ *
+ * 插入一个标题必然重划节边界（markdown 的节由「最近的上层标题」决定），所以只有在
+ * **紧跟其后的块是「层级 ≤ 目标层级」的标题**（或文末）时才不会吞掉原有内容——此时新节的
+ * 范围到那个标题为止，原有一块不动。否则后面的正文会被划进新节，就是「拖一次结构就变了」。
+ *
+ * 不安全时**向后**找最近的这类位置 = 该节末尾，也就是「放进这一节」的语义。
+ * 这个不变量放在纯逻辑层而不是拖放层：**任何调用方都不该有能力违反它**（菜单/快捷键用不到，
+ * 但拖放的落点计算需要它兜底）。
+ */
+export function snapSlotForHeading(doc: PMNode, insertBefore: number, level: number): number {
+  const from = Math.max(0, Math.min(insertBefore, doc.childCount));
+  for (let j = from; j < doc.childCount; j += 1) {
+    const node = doc.child(j);
+    if (node.type.name === "heading" && headingLevelOf(node) <= level) return j;
+  }
+  return doc.childCount;
+}
+
 export interface UnitMovePlan {
   srcFrom: number;
   srcTo: number;
   /** **删除源之后**坐标系里，单元应插入到的块序号 */
   target: number;
+  /** 标题层级变化量：0 = 不变，null = 该单元不是标题单元（不调层级） */
+  levelDelta: number | null;
 }
 
 /**
  * 规划「把 `[srcIndex, srcIndex+length)` 这段单元移到第 `insertBefore` 块之前」。
  *
  * `insertBefore` 用**删除前**的块序号表述（「插到那一块前面」），这样调用方不必先做
- * 坐标换算；越界/落回自身（含紧邻两端）一律返回 null = 不动。
+ * 坐标换算。`level` 给出目标标题级别（1..6）：标题单元会按差值整体升降，非标题单元忽略它。
+ *
+ * 两种情况返回 null（= 不动）：位置与层级都没变化。**只变层级也算有效操作**——把一节原地
+ * 降级成上一节的子节（Notion 里「往右拖缩进」）就是只改层级。
  */
 export function planUnitMove(
   doc: PMNode,
   srcIndex: number,
   length: number,
   insertBefore: number,
+  level?: number | null,
 ): UnitMovePlan | null {
   if (length <= 0) return null;
   const head = topBlockAt(doc, srcIndex);
   const tail = topBlockAt(doc, srcIndex + length - 1);
   if (!head || !tail) return null;
+  const headLevel = headingLevelOf(head.node);
+  const targetLevel = level != null ? Math.min(6, Math.max(1, level)) : headLevel;
+  const levelDelta = headLevel > 0 && level != null ? targetLevel - headLevel : null;
+  // 标题单元只能落在安全边界（否则会吞掉后面的内容）；非标题单元原样
+  const slot =
+    headLevel > 0 ? snapSlotForHeading(doc, insertBefore, targetLevel) : insertBefore;
   // 落点在源单元自身范围内（含紧邻两端）→ 位置不变
-  if (insertBefore >= srcIndex && insertBefore <= srcIndex + length) return null;
-  const target = insertBefore > srcIndex ? insertBefore - length : insertBefore;
+  const inPlace = slot >= srcIndex && slot <= srcIndex + length;
+  if (inPlace) {
+    if (levelDelta === null || levelDelta === 0) return null;
+    return { srcFrom: head.from, srcTo: tail.to, target: srcIndex, levelDelta };
+  }
+  const target = slot > srcIndex ? slot - length : slot;
   if (target < 0 || target > doc.childCount - length) return null;
-  return { srcFrom: head.from, srcTo: tail.to, target };
+  return { srcFrom: head.from, srcTo: tail.to, target, levelDelta };
+}
+
+/**
+ * 执行单元移动（含标题层级升降），返回**移动后单元的新序号**；无操作返回 null。
+ *
+ * 事务做法是**先删源、再按删除后的文档重算插入点**，而不是整篇 `replaceWith`——后者会让
+ * 位置映射失效、选区找不回来。返回新序号是给块菜单用的：新序号不一定是 `index ± 1`。
+ */
+export function moveUnitTo(
+  state: EditorState,
+  dispatch: ((tr: Transaction) => void) | undefined,
+  srcIndex: number,
+  insertBefore: number,
+  level?: number | null,
+): number | null {
+  const plan = planUnitMove(
+    state.doc,
+    srcIndex,
+    unitLengthAt(state.doc, srcIndex),
+    insertBefore,
+    level,
+  );
+  if (!plan) return null;
+  if (!dispatch) return plan.target; // 仅查询可用性（canExec）
+  const slice = state.doc.slice(plan.srcFrom, plan.srcTo);
+  const content = plan.levelDelta
+    ? shiftHeadingLevels(slice.content, plan.levelDelta)
+    : slice.content;
+  const tr = state.tr.delete(plan.srcFrom, plan.srcTo);
+  let insertPos = 0;
+  for (let i = 0; i < plan.target; i += 1) insertPos += tr.doc.child(i).nodeSize;
+  tr.insert(insertPos, content);
+  // 选区落回被移动的单元内（+1 即进入块内容），并滚动到可见
+  tr.setSelection(TextSelection.near(tr.doc.resolve(insertPos + 1)));
+  tr.scrollIntoView();
+  dispatch(tr);
+  return plan.target;
 }
 
 /**
@@ -161,39 +303,6 @@ export function unitInsertBefore(
 }
 
 /**
- * 执行单元移动，返回**移动后单元的新序号**；无操作返回 null。
- *
- * 事务做法是**先删源、再按删除后的文档重算插入点**，而不是整篇 `replaceWith`——后者会让
- * 位置映射失效、选区找不回来。返回新序号是给块菜单用的：标题移动的是整节，新序号不一定
- * 是 `index ± 1`，菜单据此刷新置灰状态才不会错。
- */
-export function moveUnitTo(
-  state: EditorState,
-  dispatch: ((tr: Transaction) => void) | undefined,
-  srcIndex: number,
-  insertBefore: number,
-): number | null {
-  const plan = planUnitMove(
-    state.doc,
-    srcIndex,
-    unitLengthAt(state.doc, srcIndex),
-    insertBefore,
-  );
-  if (!plan) return null;
-  if (!dispatch) return plan.target; // 仅查询可用性（canExec）
-  const content = state.doc.slice(plan.srcFrom, plan.srcTo).content;
-  const tr = state.tr.delete(plan.srcFrom, plan.srcTo);
-  let insertPos = 0;
-  for (let i = 0; i < plan.target; i += 1) insertPos += tr.doc.child(i).nodeSize;
-  tr.insert(insertPos, content);
-  // 选区落回被移动的单元内（+1 即进入块内容），并滚动到可见
-  tr.setSelection(TextSelection.near(tr.doc.resolve(insertPos + 1)));
-  tr.scrollIntoView();
-  dispatch(tr);
-  return plan.target;
-}
-
-/**
  * 触发点（右键 / 长按 / 拖放落点）→ 顶层块序号。
  *
  * 触发点常落在正文之外：左侧槽位（手柄所在的留白）、`.ProseMirror` 自身 padding、手机上
@@ -203,15 +312,24 @@ export function moveUnitTo(
  * ⚠️ 块菜单的**命中判定**与这里的**定位**必须同一口径（都用内容列），否则会出现「判定通过
  * 但定位失败 → 点了没反应」。实测数据见 `.cache/probe-blockmenu.mjs`。
  */
+/** 正文**内容列**的左右边界（去掉 `.ProseMirror` 自身 padding）。命中判定、坐标定位、
+ *  落点指示线的横向范围都用它——**只能有一份**，否则「判定通过但定位失败」。 */
+export function contentColumn(view: EditorView): { left: number; right: number } {
+  const rect = view.dom.getBoundingClientRect();
+  const cs = getComputedStyle(view.dom);
+  return {
+    left: rect.left + (parseFloat(cs.paddingLeft) || 0),
+    right: rect.right - (parseFloat(cs.paddingRight) || 0),
+  };
+}
+
 export function topBlockIndexFromPoint(
   view: EditorView,
   x: number,
   y: number,
 ): number | null {
   const rect = view.dom.getBoundingClientRect();
-  const cs = getComputedStyle(view.dom);
-  const left = rect.left + (parseFloat(cs.paddingLeft) || 0);
-  const right = rect.right - (parseFloat(cs.paddingRight) || 0);
+  const { left, right } = contentColumn(view);
   const outsideX = x < left || x > right;
   const coords = view.posAtCoords({
     left: outsideX ? (left + right) / 2 : x,
