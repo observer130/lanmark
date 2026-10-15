@@ -173,14 +173,27 @@ export const highlightKeymap = $useKeymap("highlightKeymap", {
   },
 });
 
-/** 画在选区气泡条上的荧光笔图标（Crepe 的 icon 通道只吃 **SVG 字符串**，不接 React 组件） */
+/**
+ * 画在选区气泡条上的荧光笔图标。
+ *
+ * **必须是「单个填充 path」，不能是描边（stroke）图标**：Crepe 自带那套（粗体/斜体/删除线/
+ * 公式/链接）全是 24×24 的单条 `<path>` 纯填充形状（无 stroke、无 fill 属性，靠 currentColor
+ * 继承）。塞一个 stroke 版进去（比如 Lucide 的 highlighter）会明显**格格不入**——线宽、圆角、
+ * 视觉重心全都对不上（2026-10-13 Linux 桌面走查：「图标太丑，和其他图标格格不入」）。
+ *
+ * 形状：斜放的笔身 + 收窄的笔尖 + 底下一道划痕，三段子路径拼成一条 path。
+ */
 export const highlightIcon = `
-  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="m9 11-6 6v3h3l6-6" />
-    <path d="m12 8 4 4" />
-    <path d="M18 2 22 6 12 16 8 12z" />
-    <path d="M3 22h18" />
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+  >
+    <path
+      fill="currentColor"
+      d="M15.5 3.3a.95.95 0 0 1 1.34 0l3.86 3.86a.95.95 0 0 1 0 1.34l-9.4 9.4-5.2-5.2 9.4-9.4ZM5.4 13.9l4.7 4.7-1.2 1.2a1.2 1.2 0 0 1-.54.32l-3.3.79a.8.8 0 0 1-.97-.97l.79-3.3c.06-.21.17-.4.32-.54l.2-.2ZM3.6 21.2h16.8a.9.9 0 0 1 0 1.8H3.6a.9.9 0 0 1 0-1.8Z"
+    />
   </svg>
 `;
 

@@ -8,7 +8,7 @@ import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 
 import { useVaultStore } from "../stores/vault";
-import { uploadFile } from "../lib/image";
+import { pickImageFiles, uploadFile } from "../lib/image";
 import { dragWindow, isLinuxDesktop, WindowControls } from "./WindowControls";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
 import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
@@ -312,14 +312,26 @@ function MilkdownHost({
         onBlockMenuRef.current?.(index, rect.left, rect.bottom);
       };
 
-      // 文件拖入（仅拦截图片文件，文本拖拽仍走 ProseMirror 默认行为）
+      /**
+       * 文件拖入（仅处理图片文件，文本拖拽仍走 ProseMirror 默认行为）。
+       *
+       * ⚠️ **`dragover` 必须一律 preventDefault，不能只在 `types` 含 "Files" 时才接受**：
+       * WebKit 系（Linux 的 WebKitGTK / Safari）在 `dragover` 阶段**不暴露** "Files"——文件
+       * 拖拽只报 `text/uri-list`，有时连 `types` 都是空的。此时不 preventDefault，浏览器就
+       * 判定「这里不接受拖放」，**`drop` 事件根本不会派发**，表现成「图片拖不进编辑器」。
+       *
+       * 而且 `dragover` 阶段**没有任何可靠办法判断这次拖拽带不带文件**（WebKit 故意隐藏），
+       * 所以别去穷举 `types` 的取值——那又是一次猜测。一律接受，真正的内容过滤放在 `drop`：
+       * 那里 `dataTransfer.files` 才是可读的。
+       *
+       * 本机探针看不见这个问题：Chrome 在 `dragover` 就会报 `types: ["Files"]`
+       * （2026-10-13 Linux 桌面走查实测，与硬约定 23 同一条教训）。
+       */
       const onDragOver = (e: DragEvent) => {
-        if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+        if (e.dataTransfer) e.preventDefault();
       };
       const onDrop = (e: DragEvent) => {
-        const files = Array.from(e.dataTransfer?.files ?? []).filter(
-          (f) => f.type.startsWith("image/") || f.name.match(/\.(png|jpe?g|gif|webp|svg|bmp)$/i),
-        );
+        const files = pickImageFiles(e.dataTransfer?.files);
         if (files.length === 0) return;
         e.preventDefault();
         void insertFiles(files);

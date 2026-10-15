@@ -251,8 +251,9 @@ export const blockDragPlugin = $prose((ctx) => {
         if (source === null) return false; // 不是手柄拖拽（正文选字/外部文件）→ 让原链路处理
         const srcIndex = source;
         source = null;
-        // 外部文件拖入：交给 plugin-upload 与 EditorPane 的 drop 监听（图片落盘那条链）
-        if (event.dataTransfer?.types?.includes("Files")) return false;
+        // 外部文件拖入：交给 EditorPane 的 drop 监听（图片落盘那条链）。
+        // 判据用 `files.length` 而不是 `types.includes("Files")`——后者在 WebKit 上不可靠（硬约定 23）
+        if (event.dataTransfer?.files?.length) return false;
         const slot = computeDropSlot(view, event.clientX, event.clientY, srcIndex);
         if (slot) {
           moveUnitTo(
