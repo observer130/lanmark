@@ -178,7 +178,8 @@ Android 相关的非显然几条：
 
 24. **Crepe 工具条的图标必须是「单条填充 path」，不是描边图标**（M8 走查定）：自带那套（粗体/斜体/删除线/公式/链接）全是 24×24 的**单条 `<path>` 纯填充形状**（无 stroke；部分带 `fill="currentColor"`，其余靠继承）。塞一个 stroke 版进去（比如 Lucide 的 highlighter）会明显**格格不入**——线宽、圆角、视觉重心全对不上（2026-10-13 走查：「图标太丑，和其他图标格格不入」）。
     - 加按钮时**先照抄邻居的画法**（`fill="currentColor"` + 一条 `d`），别去图标库里找「语义对得上」的描边图标。
-    - 不确定分量是否匹配时，渲染候选并排截图对比（`.cache/icon-candidates.html` + `.cache/screenshots/m8-24-icon-candidates.png` 就是这么选出来的），别凭感觉定。
+    - **占位也要对齐**：自带那套字形只占约 **13×13** 格。自绘形状横跨 17×20 时，同样 24px 下会**显得大一号**（2026-10-13 走查：「主体明显更粗、色块更大，视觉上就显得大一号」）。修法是给形状套 `translate(24/2×(1−s)) scale(s)` 做**绕画布中心**缩放（当前 `s = 0.76`），不必重画路径。
+    - **不确定分量/占位是否匹配时，渲染候选并排截图对比**（`.cache/icon-candidates.html`；`.cache/screenshots/m8-24-icon-candidates.png` 选形状、`m8-25-icon-scale.png` 选缩放系数），别凭感觉定。
 
 ## 完成标准（DoD）
 
