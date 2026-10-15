@@ -515,17 +515,18 @@ describe("块单元：标题连同整节（M8）", () => {
     // 用户那篇文档的形状：# 标题 + 两个 ## 分节
     const title2 = ["# 文档标题", "", "## 甲", "", "甲正文", "", "## 乙", "", "乙正文", ""].join("\n");
     const t = await mountWithCaret(title2, 0);
-    expect(outlineBaseline(t.doc())).toBe(2); // # 只有一个 → 不占刻度
+    expect(outlineBaseline(t.doc())).toBe(2); // 有 ## → 刻度从 ## 起
     // 两个 # 说明 # 也在分节 → 从 # 起算
+    // 全篇都是 `#`（没有更深的一级）→ 退化取 ##，`#` 仍贴最左格
     const twoH1 = ["# 甲", "", "甲正文", "", "# 乙", "", "乙正文", ""].join("\n");
     const h = await mountWithCaret(twoH1, 0);
-    expect(outlineBaseline(h.doc())).toBe(1);
+    expect(outlineBaseline(h.doc())).toBe(2);
     // 没有 # 的文档：刻从最浅的那一级起算
     const noH1 = ["## 甲", "", "甲正文", "", "### 子", ""].join("\n");
     const n = await mountWithCaret(noH1, 0);
     expect(outlineBaseline(n.doc())).toBe(2);
-    // 落点层级不浅于刻度起点（大纲里没有比最外层分节更浅的一级）
-    expect(naturalLevelAtGap(t.doc(), 0)).toBe(2);
+    // 刻度只影响指示线；层级本身不收口（拖动已有的 # 不会被强制降级）
+    expect(naturalLevelAtGap(t.doc(), 0)).toBe(1);
     await t.crepe.destroy(); t.root.remove();
     await h.crepe.destroy(); h.root.remove();
     await n.crepe.destroy(); n.root.remove();
@@ -535,8 +536,8 @@ describe("块单元：标题连同整节（M8）", () => {
     // SECTION: 0 h1甲 1 正文一 2 h2乙 3 列表 4 h3丙 5 更深的正文 6 h2丁 7 尾段
     const { crepe, root, doc } = await mountWithCaret(SECTION, 0);
     const d = doc();
-    expect(outlineBaseline(d)).toBe(2); // 唯一的 # 是文档标题 → 刻度从 ## 起算
-    expect(naturalLevelAtGap(d, 0)).toBe(2); // 文首收口到刻度起点（不浅于最外层分节）
+    expect(outlineBaseline(d)).toBe(2); // 有 ## → 刻度从 ## 起算
+    expect(naturalLevelAtGap(d, 0)).toBe(1); // 文首在 # 之前 → 层级 1（指示线同样贴最左格）
     expect(naturalLevelAtGap(d, 2)).toBe(2); // 间隙后是 h2乙 → 与它同级
     expect(naturalLevelAtGap(d, 3)).toBe(3); // 间隙后是正文（属 h2乙）→ h3
     expect(naturalLevelAtGap(d, 6)).toBe(2); // 间隙后是 h2丁 → 与它同级

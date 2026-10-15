@@ -155,28 +155,26 @@ function shiftHeadingLevels(fragment: Fragment, delta: number): Fragment {
 }
 
 /**
- * **大纲刻度起点**：拖拽层级刻度（指示线圆点的左端缩进）以哪一级为第 0 格。
+ * **大纲刻度起点**：拖拽层级刻度（指示线圆点）以哪一级为第 0 格。
  *
- * 笔记里的 `#` 通常是**文档标题**——全篇只有一个，并不参与分节；真正分节的最高级别是 `##`。
- * 所以判据是：**全篇恰好一个 `#`、且存在更深的标题** → 它按文档标题处理，刻度从 `##` 起算。
- * 有多个 `#` 时说明 `#` 也在当分节用，刻度就从 `#` 起算。
+ * 约定是**绝对**的，不看文档里 `#` 的数量：`#` 在笔记里是**文档标题**，`##` 及以下才是分节。
+ * 所以起点 = **文档里最浅的「大于 `#`」的那一级**（`##`/`###`… 里最浅的那个）；没有这样的级别
+ * （例如全篇只有 `#`）时取 `##`。
  *
- * 不这么做的话，`##` 会被推到第 2 格（2026-10-13 走查：横线与圆点「太靠右，视觉上误导」）。
+ * 两次踩坑记录（别再回到计数判据）：
+ *  - 最初用「绝对层级 − 1」当刻度 → `##` 落在第 2 格、圆点明显偏右（走查：视觉误导）。
+ *  - 改成「全篇恰好一个 `#` 才算文档标题」→ 用户那篇测试文档里 `# 测试` 与 `# Hello world!`
+ *    都是 H1（两个），判据直接不成立，刻度毫无变化（走查：真机验收不通过）。
+ * **只要文档里存在 `##` 这一级，`##` 就必须贴内容列左边缘**——这是用户明确的期望，
+ * 不该被「`#` 出现了几次」左右。
  */
 export function outlineBaseline(doc: PMNode): number {
-  let min = 0;
-  let h1 = 0;
-  let deeperThan1 = false;
+  let base = 0;
   for (let i = 0; i < doc.childCount; i += 1) {
     const level = headingLevelOf(doc.child(i));
-    if (level === 0) continue;
-    if (min === 0 || level < min) min = level;
-    if (level === 1) h1 += 1;
-    if (level >= 2) deeperThan1 = true;
+    if (level >= 2 && (base === 0 || level < base)) base = level;
   }
-  if (min === 0) return 1; // 全篇没有标题
-  if (min === 1 && h1 === 1 && deeperThan1) return 2; // 唯一的 # = 文档标题
-  return min;
+  return base === 0 ? 2 : base;
 }
 
 /**
@@ -194,10 +192,9 @@ export function outlineBaseline(doc: PMNode): number {
  */
 export function naturalLevelAtGap(doc: PMNode, gap: number): number {
   if (doc.childCount === 0) return 1;
-  const floor = outlineBaseline(doc);
-  // 落点层级不浅于刻度起点：刻度起点的意义就是「大纲里最外层的分节级别」，
-  // 再浅就超出了大纲（例如给「唯一的 # 文档标题」再加一个同级标题）。
-  return Math.max(floor, rawLevelAtGap(doc, gap));
+  // **不把层级收口到刻度起点**：那会让「拖动一个已有的 `#` 块」被强制降成 `##`。
+  // 刻度只决定「指示线画在哪」（`#` 与 `##` 共用最左格），不改变落点层级本身。
+  return rawLevelAtGap(doc, gap);
 }
 
 function rawLevelAtGap(doc: PMNode, gap: number): number {
