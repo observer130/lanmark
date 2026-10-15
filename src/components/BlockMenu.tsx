@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
+
+import { useDismissable } from "./useDismissable";
 
 /**
  * 块菜单：对准 doc 顶层块的「上移 / 下移 / 删除」。
@@ -69,28 +70,7 @@ function MenuItem({
 }
 
 export function BlockMenu({ target, narrow, onMove, onDelete, onClose }: BlockMenuProps) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  // 关闭时机：Escape / 点浮层外 / 滚动（锚点会失效）/ 窗口缩放
-  useEffect(() => {
-    if (!target) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    const onPointerDown = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    document.addEventListener("pointerdown", onPointerDown, true);
-    window.addEventListener("scroll", onClose, true);
-    window.addEventListener("resize", onClose);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("pointerdown", onPointerDown, true);
-      window.removeEventListener("scroll", onClose, true);
-      window.removeEventListener("resize", onClose);
-    };
-  }, [target, onClose]);
+  const ref = useDismissable(!!target, onClose);
 
   if (!target) return null;
 

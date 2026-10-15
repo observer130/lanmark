@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BookOpen, Check, Code, Folder, NotebookText, PenLine, Star } from "lucide-react";
+import { BookOpen, Check, Code, Folder, NotebookText, PenLine, Plus, Star } from "lucide-react";
 import type { Crepe } from "@milkdown/crepe";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
@@ -29,6 +29,9 @@ import {
   unitInsertBefore,
 } from "../milkdown/block-move";
 import { BlockMenu, type BlockMenuTarget } from "./BlockMenu";
+import { InsertMenu } from "./InsertMenu";
+import { ModeMenu } from "./ModeMenu";
+import { insertBlock, type BlockKind } from "../milkdown/block-insert";
 
 /** 从 Crepe 取 ProseMirror EditorView（类型走推断，避免直接依赖 prosemirror 包） */
 async function getEditorView(crepe: Crepe) {
@@ -67,6 +70,8 @@ export interface EditorApi {
   /** 执行移动（标题搬的是整节），返回移动后的新序号；无操作返回 null */
   moveBlock: (index: number, dir: -1 | 1) => number | null;
   deleteBlock: (index: number) => void;
+  /** 执行「插入块」（移动端头部「+」菜单用）：转换当前块或新增一块 */
+  insertBlock: (kind: BlockKind) => void;
 }
 
 /**
@@ -201,8 +206,16 @@ function MilkdownHost({
         void insertFiles(files);
       };
 
+      // ctx 供「插入块」用（命令都挂在 ctx 上）。与 view 同生命周期，捕获一次即可。
+      const ctx = await crepe.editor.action((c) => c);
+
       // ── 块级操作面（M8：不依赖拖拽的通路，拖放落点也走同一个原语）──────────
       const api: EditorApi = {
+        insertBlock: (kind) => {
+          insertBlock(ctx, kind);
+          // 插完把焦点交回编辑器：连着的动作通常是「接着打字」（手机上会带出键盘）
+          view?.focus();
+        },
         blockCount: () => view?.state.doc.childCount ?? 0,
         indexFromSelection: () => (view ? currentTopBlockIndex(view.state) : null),
         indexFromPoint: (x, y) => {
@@ -393,6 +406,9 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   // 编辑器操作面：ref 而非 state——`onReady` 在 effect 里回调，进 state 会触发重渲染
   const editorApiRef = useRef<EditorApi | null>(null);
   const [blockMenu, setBlockMenu] = useState<BlockMenuTarget | null>(null);
+  // 窄屏「插入块」抽屉：桌面端不需要（hover「+」够用），所以只在窄屏给入口
+  const [insertMenu, setInsertMenu] = useState(false);
+  const [modeMenu, setModeMenu] = useState(false);
 
   /**
    * 菜单的置灰状态。用 `planMove` **预演**而不是自己算索引：标题搬的是整节，
@@ -418,6 +434,11 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   );
 
   const closeBlockMenu = useCallback(() => setBlockMenu(null), []);
+
+  const handleInsertBlock = useCallback((kind: BlockKind) => {
+    editorApiRef.current?.insertBlock(kind);
+    setInsertMenu(false);
+  }, []);
 
   // 移动后**保持菜单打开**并刷新置灰状态：连续微调位置是「移动块」最常见的用法。
   // 新序号必须用 moveBlock 的返回值：标题搬的是整节，新序号不一定是 index±1。
@@ -445,6 +466,8 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   // 否则会对着已经销毁的编辑器执行命令（静默无反应）。
   useEffect(() => {
     setBlockMenu(null);
+    setInsertMenu(false);
+    setModeMenu(false);
   }, [activePath, editorMode]);
 
   if (!activePath) {
@@ -525,38 +548,77 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           </span>
         ) : null}
 
-        <button
-          title="收藏 / 取消收藏"
-          className="rounded-md p-1 hover:bg-canvas"
-          onClick={() => void toggleFavorite(activePath)}
-        >
-          <Star
-            size={15}
-            className={isFav ? "fill-amber-400 text-amber-400" : "text-ink-3 hover:text-ink"}
-          />
-        </button>
+        {/* 窄屏「插入块」入口（M8 批次 2）：补上桌面 hover「+」的等价能力。
+            44px 触控目标只属于窄屏，桌面端不渲染（hover「+」够用，且头部已挤） */}
+        {narrow && editorMode !== "read" && editorMode !== "source" && (
+          <button
+            type="button"
+            title="插入块"
+            aria-label="插入块"
+            onClick={() => setInsertMenu(true)}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-2 active:bg-canvas"
+          >
+            <Plus size={18} />
+          </button>
+        )}
 
-        {/* 模式切换：阅读 / 所见即所得 / 源码（图标 + 悬停提示） */}
-        <div className="flex shrink-0 rounded-lg bg-ink/5 p-0.5 text-xs">
-          <ModeButton
-            icon={BookOpen}
-            tip="阅读模式"
-            active={editorMode === "read"}
-            onClick={() => setEditorMode("read")}
-          />
-          <ModeButton
-            icon={PenLine}
-            tip="所见即所得"
-            active={editorMode === "wysiwyg"}
-            onClick={() => setEditorMode("wysiwyg")}
-          />
-          <ModeButton
-            icon={Code}
-            tip="源码模式"
-            active={editorMode === "source"}
-            onClick={() => setEditorMode("source")}
-          />
-        </div>
+        {/* 收藏：**窄屏不渲染**（M8 批次 2）。理由：① 它只有 23px，违反硬约定 13 的窄屏
+            ≥44px；② 同一动作侧栏树行长按/右键菜单里已有（TreeView 的「收藏 / 取消收藏」），
+            窄屏不算能力缺失；③ 385px 下腾出的 31px 让面包屑从 28px 回到 ~109px（可读）。
+            桌面端保留：那里头部宽裕，且星标能一眼看出收藏态。 */}
+        {!narrow && (
+          <button
+            title="收藏 / 取消收藏"
+            className="rounded-md p-1 hover:bg-canvas"
+            onClick={() => void toggleFavorite(activePath)}
+          >
+            <Star
+              size={15}
+              className={isFav ? "fill-amber-400 text-amber-400" : "text-ink-3 hover:text-ink"}
+            />
+          </button>
+        )}
+
+        {/* 模式切换：桌面是阅读 / 所见即所得 / 源码三段内联；**窄屏收成一个 44px 按钮 + 抽屉**
+            （三段每段只有 31px，违反硬约定 13 的 ≥44px，且挤掉面包屑），见 ModeMenu 注释 */}
+        {narrow ? (
+          <button
+            type="button"
+            title="编辑模式"
+            aria-label="编辑模式"
+            onClick={() => setModeMenu(true)}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-2 active:bg-canvas"
+          >
+            {editorMode === "read" ? (
+              <BookOpen size={18} />
+            ) : editorMode === "source" ? (
+              <Code size={18} />
+            ) : (
+              <PenLine size={18} />
+            )}
+          </button>
+        ) : (
+          <div className="flex shrink-0 rounded-lg bg-ink/5 p-0.5 text-xs">
+            <ModeButton
+              icon={BookOpen}
+              tip="阅读模式"
+              active={editorMode === "read"}
+              onClick={() => setEditorMode("read")}
+            />
+            <ModeButton
+              icon={PenLine}
+              tip="所见即所得"
+              active={editorMode === "wysiwyg"}
+              onClick={() => setEditorMode("wysiwyg")}
+            />
+            <ModeButton
+              icon={Code}
+              tip="源码模式"
+              active={editorMode === "source"}
+              onClick={() => setEditorMode("source")}
+            />
+          </div>
+        )}
 
         {/* Linux 无边框窗口：自绘窗控（最小化/最大化/关闭） */}
         {isLinuxDesktop && <WindowControls />}
@@ -611,6 +673,28 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           )}
         </div>
       </div>
+
+      {/* 编辑模式抽屉（M8 批次 2，窄屏） */}
+      {narrow && (
+        <ModeMenu
+          open={modeMenu}
+          current={editorMode}
+          onPick={(m) => {
+            setEditorMode(m);
+            setModeMenu(false);
+          }}
+          onClose={() => setModeMenu(false)}
+        />
+      )}
+
+      {/* 插入块抽屉（M8 批次 2，窄屏） */}
+      {narrow && (
+        <InsertMenu
+          open={insertMenu}
+          onPick={handleInsertBlock}
+          onClose={() => setInsertMenu(false)}
+        />
+      )}
 
       {/* 块菜单：上移 / 下移 / 删除（M8 G3）。三条触发路径见 BlockMenu 注释 */}
       <BlockMenu

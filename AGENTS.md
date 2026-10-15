@@ -61,10 +61,10 @@ Android 相关的非显然几条：
 
 | 位置 | 内容 |
 |---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `BlockMenu`（块级操作浮层/底部抽屉：上移·下移·删除，三条触发路径见硬约定 13/17）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
+| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `BlockMenu`（块级操作浮层/底部抽屉：上移·下移·删除，三条触发路径见硬约定 13/17）· `InsertMenu` / `ModeMenu`（窄屏底部抽屉：插入块 / 编辑模式，见硬约定 13/21）· `useDismissable`（浮层统一关闭行为）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
 | `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量/外观属性 + 回滚）、`update.ts`（M5-4 更新检测：启动静默检查 + 手动检查，关于页展示）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
 | `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`settings.ts`（枚举→像素映射的**唯一来源** + `applyCssVars`/`applyScheme`/`applyFont`；外观 = 配色 + 编辑区字体 + 字号/行距，色值与字体栈在 index.css）、`ime-anchor.ts`（Windows 缩放后输入法候选框跑屏幕左上角的护栏，见硬约定 15）、`bridge.ts` |
-| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/行间隙天然层级/整体升降级/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、行间隙落点、层级、指示线与父标题高亮，见硬约定 17/19/20）· `roundtrip.test.ts`（往返保真护栏，M1 决策门） |
+| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/行间隙天然层级/整体升降级/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、行间隙落点、层级、指示线与父标题高亮，见硬约定 17/19/20）· `block-insert.ts`（插入块命令，见硬约定 21）· `roundtrip.test.ts`（往返保真护栏，M1 决策门）· `insert.test.ts`（插入块护栏） |
 | `src/index.css` | 设计 token（`:root` = 浅色 + 默认字体；`:root[data-scheme=…]` 深色/纸页、`:root[data-font=…]` 宋体/楷体，再加 `@theme`）与**全部 Crepe / CodeMirror 主题覆盖**；顶部 `@import` 内置字体（见硬约定 16）；改编辑器外观或加配色/字体先来这里 |
 | `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/**vault 统计与回收站清理**）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `settings`/`settings_cmd`（M4a 设备级偏好：结构 + 归一化 + 白名单，与 vault 无关）· `alias`（M4h-4 设备代号：词表生成/归一化/AppConfig 持久化/进程内缓存，语义对标 LocalSend alias）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `lan_scan`（M4h-1 LAN 并发探测发现）· `update`（M5-4 GitHub release 更新检测：纯逻辑版本比较 + 24h 节流进 AppConfig，`update_check` 命令）· `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
 | `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
@@ -119,6 +119,7 @@ Android 相关的非显然几条：
 13. **移动端（窄屏）UI 按触屏做，不做「桌面布局缩小版」**（M4i 定）：触控目标 **≥44px**（树行 / 搜索框 / 菜单项 / 图标按钮）——**44px 只属于窄屏**：类名写移动优先的 `min-h-[44px]` / `h-11`，再跟 `md:` 前缀恢复桌面紧凑高度（Tailwind v4 默认 `md:` = 768px，与硬约定 6 的断点一致；28eed13 只给新建按钮加了 `md:`、树行/搜索框/菜单项/齿轮漏加，桌面端被连带放大，已修）。手机上**没有 hover**，依赖 `group-hover` 的控件等于不可达——行级操作走**长按 `contextmenu`**（真机实测 WebView 长按会派发该事件）。**编辑器里的块级操作同理**：Crepe 的左侧「+」与六个点手柄靠 ProseMirror `pointermove` 悬浮显示，触屏一进入滚动、浏览器就发 `pointercancel` 掐断 `pointermove`，手柄等于不可达——所以块操作在窄屏走长按唤出 `BlockMenu`（`src/components/BlockMenu.tsx`），**别指望把手柄样式改大就能用**（M8 G2）。侧栏在窄屏是 **85vw 半屏抽屉 + 遮罩**（Gmail / Obsidian Mobile 式，此前是全屏铺满，右侧无可点遮罩区，是「像桌面端」的根因）。**新建入口留在侧栏「笔记本」标题右侧**（M4i：曾加过编辑器右下角 FAB，因悬在正文上挡字、且「新建」属导航/管理动作而非编辑器行为而移除——别再加回来）。
     返回手势：**有浮层先关浮层，没有就正常退出**，**不做「再划一次退出」**——两段式是把侧栏当一级菜单页的设计，半屏浮层下不成立（M4i 中途推翻）。
     `src/index.css` 的窄屏块里有三条手机端适配（去点击高亮蓝块 / `overscroll-behavior: contain` / `text-size-adjust`），别顺手删。
+    **窄屏头部（编辑器页头）的实测布局**（M8 批次 2，385px）：塞得下的是「面包屑 + 插入块「+」+ 编辑模式 + Linux 窗控」；**别再往这里加东西**。两处刻意的取舍：① 模式切换在窄屏**收成一个 44px 按钮 + 抽屉**（`ModeMenu`）——原来三段内联每段只有 31px，本身就违反本条的 ≥44px，而且挤掉面包屑；② **窄屏不渲染「收藏」星**——它只有 23px、且同一动作侧栏树行的长按/右键菜单里已有，省下的 31px 让面包屑从 28px 回到 ~109px（28px 约等于一个字，等于没有）。Linux 窗控那三个 ~26px 的按钮不动：那是桌面标题栏惯例、Android 上不存在。
 14. **Android 返回键要拦两条路，且事件不走插件通道**：`generated/TauriActivity.kt` 把 `handleBackNavigation` 覆盖成 **false**，返回默认直接 finish、前端收不到任何事件。自拦时必须同时覆盖 **`OnBackPressedCallback`** 与 **`dispatchKeyEvent`**——部分 ROM（真机 2510DRK44C / Android 16 的 MIUI）把返回键转成广播 `miui.intent.KEYCODE_BACK`，**不派发给 `OnBackPressedDispatcher`**，只注册回调根本不触发。
     原生→前端的事件**不要用 `addPluginListener`**（实测注册后 Kotlin 侧 `hasListener=false`，事件永远收不到），改在插件里持 WebView 用 `evaluateJavascript` 派发 DOM CustomEvent（见 `BackPlugin.kt` / `src/stores/back.ts`）。
     Kotlin 纯逻辑单测放 `gen/android/app/src/test/java/`，跑法：`source scripts/env.sh && cd src-tauri/gen/android && ./gradlew :app:testUniversalDebugUnitTest`（注意是 **universal** 变体，`testDebugUnitTest` 会因多 flavor 歧义报 ambiguous）。
@@ -153,6 +154,12 @@ Android 相关的非显然几条：
       - 改成「全篇恰好一个 `#` 才算文档标题」→ 用户那篇测试文档里 `# 测试` 与 `# Hello world!` 都是 H1（两个），判据直接不成立，刻度毫无变化（走查：**真机验收不通过**）。**踩过两次的计数判据不要再回去用。**
     - **刻度只决定指示线画在哪，不改变落点层级**（`naturalLevelAtGap` **不**收口到起点）：否则拖动一个已有的 `#` 块会被强制降成 `##`。代价是 `#` 与 `##` 共用最左格——在「`#` 是文档标题」的文档里，落点在 `#` 之前的场景本就无意义。
     - **指示线同时表达位置与层级**：线画在**它将要插入的那一块的顶边**（`gapY`；不用上一块的底边——标题自带 24px 下边距会让线浮在空白里），**左端缩进与圆点横向位置 = 落点层级**（每深一级 +22px，`INDENT_PX`，超出时不画在内容列左侧之外）；「放进某节」时 `lanmark-drop-parent` 高亮父标题块。算出来是「不动」时**线不画、高亮不出**。
+
+21. **「插入块」菜单（窄屏头部「+」）的两条不变量**（M8 批次 2 定）：执行层在 `src/milkdown/block-insert.ts`，逐条命令组合对齐 Crepe 同版本的斜杠菜单，**但有两处刻意不同**：
+    - **不许抄 `clearTextInCurrentBlockCommand`**。Crepe 斜杠菜单每条命令前都挂它（用来抹掉用户敲的 `/h2`），照抄会把**当前块的正文整段删掉**——我们的菜单是点按钮打开的，当前块里是用户的字。文本类用 `setBlockTypeCommand` / `wrapInBlockTypeCommand`（转换当前块、保留文字）。
+    - **块类（分割线/表格/公式）不要用 `addBlockTypeCommand`**（= `replaceSelectionWith`）：光标在「你好」中间时会得到 `你` + 块 + `好`，**把正文劈成两半**。它们走 `insertBlockAfterCurrent`（在当前顶层块**之后**新增一块），与桌面 hover「+」的「在下方插入」语义一致。
+    - 菜单只列**标题 1–3**：窄屏抽屉里 h1–h6 六项太长，而 h4–h6 极少用（需要时 `Ctrl+1..6` 或源码模式）。真机走查觉得不够再加。
+    - 浮层的关闭行为（Escape / 点外部 / 滚动 / 缩放）统一走 `src/components/useDismissable.ts`——块菜单、插入抽屉、模式抽屉三处**不要各写一份**，否则必然漂移成「某个菜单按 Esc 关不掉」。
 
 ## 完成标准（DoD）
 
