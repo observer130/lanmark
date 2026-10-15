@@ -1,8 +1,18 @@
-import { Crepe, CrepeFeature } from "@milkdown/crepe";
+import { Crepe, CrepeFeature, type CrepeConfig } from "@milkdown/crepe";
+import { keymapRef } from "@milkdown/crepe/feature/toolbar";
+import { commandsCtx } from "@milkdown/kit/core";
+import { isMarkSelectedCommand } from "@milkdown/kit/preset/commonmark";
 import type { MilkdownPlugin } from "@milkdown/kit/ctx";
 
 import { blockDragPlugins } from "./block-drag";
 import { blockMovePlugins } from "./block-move";
+import {
+  highlightIcon,
+  highlightKeymap,
+  highlightPlugins,
+  highlightSchema,
+  toggleHighlightCommand,
+} from "./highlight";
 
 /**
  * 产品编辑器配置的**唯一来源**。
@@ -48,7 +58,37 @@ export function productFeatures(readOnly = false): Partial<Record<CrepeFeature, 
  * 顺序无所谓（Milkdown 内部按 timer 阶段装配），但必须都经过这里——`EditorPane` 与
  * 往返护栏测试都走 `createProductCrepe`，否则「测试绿」不代表「产品对」。
  */
-export const PRODUCT_PLUGINS: MilkdownPlugin[] = [...blockMovePlugins, ...blockDragPlugins];
+export const PRODUCT_PLUGINS: MilkdownPlugin[] = [
+  ...blockMovePlugins,
+  ...blockDragPlugins,
+  ...highlightPlugins,
+];
+
+/**
+ * feature **配置**（与上面的开关分开，见文件头 ⚠️）。当前只有选区气泡条的自定义按钮：
+ * 给 Crepe 默认那组（粗体/斜体/删除线/行内代码/链接）加一枚荧光笔。
+ *
+ * 只有走这里才能加按钮——把 `buildToolbar` 塞进 `features[CrepeFeature.Toolbar]` 会**静默无效**。
+ * 图标必须是 **SVG 字符串**（Crepe 的 icon 通道不接 React 组件）。
+ */
+export const PRODUCT_FEATURE_CONFIGS: NonNullable<CrepeConfig["featureConfigs"]> = {
+  [CrepeFeature.Toolbar]: {
+    buildToolbar: (builder) => {
+      builder.getGroup("formatting").addItem("highlight", {
+        icon: highlightIcon,
+        label: "高亮",
+        // 走 keymapRef 而不是自己写 "Mod-Shift-h"：快捷键的显示串由 Crepe 按平台
+        // （Mac 的 ⌘ vs 其他平台的 Ctrl）解析，手写会两边不一致。
+        keymap: keymapRef(highlightKeymap.key, "ToggleHighlight"),
+        active: (ctx) =>
+          ctx.get(commandsCtx).call(isMarkSelectedCommand.key, highlightSchema.type(ctx)),
+        onRun: (ctx) => {
+          ctx.get(commandsCtx).call(toggleHighlightCommand.key);
+        },
+      });
+    },
+  },
+};
 
 export interface ProductCrepeOptions {
   root: HTMLElement | string;
@@ -66,6 +106,7 @@ export function createProductCrepe({
     root,
     defaultValue,
     features: productFeatures(readOnly),
+    featureConfigs: PRODUCT_FEATURE_CONFIGS,
   });
   crepe.editor.use(PRODUCT_PLUGINS);
   return crepe;

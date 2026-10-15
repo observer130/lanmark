@@ -11,9 +11,11 @@
  */
 import { describe, it, expect } from "vitest";
 import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
+import { TextSelection } from "@milkdown/kit/prose/state";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
 import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
 import { createProductCrepe } from "./product";
+import { toggleHighlightCommand } from "./highlight";
 import {
   currentTopBlockIndex,
   documentEndSlot,
@@ -629,6 +631,66 @@ describe("块单元：标题连同整节（M8）", () => {
     expect(out).toContain("甲的要点");
     // 关键：甲的子节不能改归乙
     expect(out.indexOf("乙的正文。")).toBeLessThan(out.indexOf("### 甲的子节"));
+    await crepe.destroy();
+    root.remove();
+  });
+});
+
+describe("荧光笔 `==文字==`（M8 批次 3）", () => {
+  /** 往返一次，返回输出 */
+  const rt = async (md: string) => roundtrip(md);
+
+  it.each([
+    ["段落中间", "前 ==高亮== 后", ""],
+    ["整段只有高亮", "==高亮==", ""],
+    ["行首紧跟文字", "==高亮== 后缀", ""],
+    ["行尾", "前缀 ==高亮==", ""],
+    ["两个并行", "==一== 和 ==二==", ""],
+    ["内含等号", "==a=b==", ""],
+    ["跨行内节点不误吞（**粗**在标记之外）", "==纯文字==", ""],
+  ])("往返保真：%s", async (_name, line) => {
+    const md = ["# 标题", "", line, ""].join("\n");
+    const out = await rt(md);
+    expect(out).toContain(line);
+  });
+
+  it("行首的 `==文字==` 不再被加反斜杠转义（本功能顺带修好的既有行为）", async () => {
+    // spike 记录：无插件时 remark-stringify 会因「`=` 可起 setext 下划线」把它写成 \==文字\==
+    const out = await rt("==文字==\n");
+    expect(out).toContain("==文字==");
+    expect(out).not.toContain("\\==");
+  });
+
+  it("代码里的 `==` 是字面内容，不能被当成语法（护栏）", async () => {
+    const md = ["```text", "==不是高亮==", "```", "", "`==也不是==` 行内代码", ""].join("\n");
+    const out = await rt(md);
+    expect(out).toContain("==不是高亮==");
+    expect(out).toContain("==也不是==");
+  });
+
+  it("不误判：`== 文字 ==`（内侧贴空格）与 `a == b`（非紧贴）保持原样", async () => {
+    const md = ["== 文字 ==", "", "a == b", ""].join("\n");
+    const out = await rt(md);
+    expect(out).toContain("== 文字 ==");
+    expect(out).toContain("a == b");
+  });
+
+  it("命令可切换：加高亮后 markdown 出现 `==`，再切一次消失", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const crepe = createProductCrepe({ root, defaultValue: "把这段高亮\n" });
+    await crepe.create();
+    const view = await crepe.editor.action((c) => c.get(editorViewCtx));
+    // 选中整个段落文字
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1, 6)));
+    const run = () =>
+      crepe.editor.action((c) =>
+        c.get(commandsCtx).call(toggleHighlightCommand.key),
+      );
+    await run();
+    expect(crepe.getMarkdown()).toContain("==把这段高亮==");
+    await run();
+    expect(crepe.getMarkdown()).not.toContain("==");
     await crepe.destroy();
     root.remove();
   });

@@ -38,6 +38,9 @@
   --c-acc-08: oklch(0.53 0.19 264 / 0.08);
   --c-acc-12: oklch(0.53 0.19 264 / 0.12);
   --c-acc-14: oklch(0.53 0.19 264 / 0.14);
+  /* 荧光笔（mark，M8 批次 3）：单色背景块。浅色用暖黄——与靛蓝强调色分属不同色相，
+     高亮不会和选区/链接撞色 */
+  --c-mark: oklch(0.92 0.14 95);
   /* 强调色「面上」的文字/图标色：浅色主题为白；深色主题反转为深色
      （夜航把靛蓝提亮到 0.70 才能在深底上跳出来，此时白字对比反而不足） */
   --c-on-acc: #ffffff;
@@ -117,6 +120,8 @@
   --c-acc-08: oklch(0.70 0.14 264 / 0.10);
   --c-acc-12: oklch(0.70 0.14 264 / 0.16);
   --c-acc-14: oklch(0.70 0.14 264 / 0.18);
+  /* 荧光笔：深色下不能沿用亮黄——217 亮度块的深底白字对比不足，改用低饱和琥珀 */
+  --c-mark: oklch(0.45 0.09 80);
   --c-on-acc: oklch(0.18 0.02 264);
   --c-ok: oklch(0.72 0.12 155);
   --c-warn: oklch(0.78 0.12 75);
@@ -156,6 +161,8 @@
   --c-acc-08: oklch(0.50 0.13 60 / 0.08);
   --c-acc-12: oklch(0.50 0.13 60 / 0.16);
   --c-acc-14: oklch(0.50 0.13 60 / 0.14);
+  /* 荧光笔：纸页配色整体偏暖沙，用沙金以免在一片暖棕里看不出来 */
+  --c-mark: oklch(0.90 0.10 85);
   --c-ok: oklch(0.52 0.11 155);
   --c-warn: oklch(0.58 0.11 75);
   --c-err: oklch(0.50 0.19 25);
@@ -518,6 +525,18 @@ body {
 
 /* 拖拽「放进某节」时，高亮该节标题整块（M8）：让「会变成它的子节」这件事在落点之外
    还有第二处视觉确认——指示线说明「落在哪」，这块底说明「归谁管」。 */
+/* 荧光笔（`==文字==`，M8 批次 3）。加 `.editor-host .milkdown` 前缀是为压过 Crepe/
+   frame 的默认 mark 样式（硬约定 7：覆盖靠 specificity）。`color: inherit` 是必需的——
+   frame 给 mark 设了自己的文字色，深色下会变成黑底黑字 */
+.editor-host .milkdown .ProseMirror mark {
+  background: var(--c-mark);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0.05em 0.15em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
 .lanmark-drop-parent {
   background: var(--c-acc-08);
   border-radius: 6px;

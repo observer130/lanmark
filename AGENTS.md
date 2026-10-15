@@ -64,7 +64,7 @@ Android 相关的非显然几条：
 | `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `BlockMenu`（块级操作浮层/底部抽屉：上移·下移·删除，三条触发路径见硬约定 13/17）· `InsertMenu` / `ModeMenu`（窄屏底部抽屉：插入块 / 编辑模式，见硬约定 13/21）· `useDismissable`（浮层统一关闭行为）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
 | `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量/外观属性 + 回滚）、`update.ts`（M5-4 更新检测：启动静默检查 + 手动检查，关于页展示）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
 | `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（`vault://` ↔ 相对引用换算）、`frontmatter.ts`、`wikilink.ts`、`image.ts`、`sync.ts`、`settings.ts`（枚举→像素映射的**唯一来源** + `applyCssVars`/`applyScheme`/`applyFont`；外观 = 配色 + 编辑区字体 + 字号/行距，色值与字体栈在 index.css）、`ime-anchor.ts`（Windows 缩放后输入法候选框跑屏幕左上角的护栏，见硬约定 15）、`bridge.ts` |
-| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/行间隙天然层级/整体升降级/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、行间隙落点、层级、指示线与父标题高亮，见硬约定 17/19/20）· `block-insert.ts`（插入块命令，见硬约定 21）· `roundtrip.test.ts`（往返保真护栏，M1 决策门）· `insert.test.ts`（插入块护栏） |
+| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/行间隙天然层级/整体升降级/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、行间隙落点、层级、指示线与父标题高亮，见硬约定 17/19/20）· `block-insert.ts`（插入块命令，见硬约定 21）· `highlight.ts`（荧光笔 `==文字==`：remark 切分 + mark + 命令/输入规则/快捷键/图标，见硬约定 22）· `roundtrip.test.ts`（往返保真护栏，M1 决策门）· `insert.test.ts`（插入块护栏） |
 | `src/index.css` | 设计 token（`:root` = 浅色 + 默认字体；`:root[data-scheme=…]` 深色/纸页、`:root[data-font=…]` 宋体/楷体，再加 `@theme`）与**全部 Crepe / CodeMirror 主题覆盖**；顶部 `@import` 内置字体（见硬约定 16）；改编辑器外观或加配色/字体先来这里 |
 | `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/**vault 统计与回收站清理**）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `settings`/`settings_cmd`（M4a 设备级偏好：结构 + 归一化 + 白名单，与 vault 无关）· `alias`（M4h-4 设备代号：词表生成/归一化/AppConfig 持久化/进程内缓存，语义对标 LocalSend alias）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `lan_scan`（M4h-1 LAN 并发探测发现）· `update`（M5-4 GitHub release 更新检测：纯逻辑版本比较 + 24h 节流进 AppConfig，`update_check` 命令）· `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
 | `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
@@ -160,6 +160,14 @@ Android 相关的非显然几条：
     - **块类（分割线/表格/公式）不要用 `addBlockTypeCommand`**（= `replaceSelectionWith`）：光标在「你好」中间时会得到 `你` + 块 + `好`，**把正文劈成两半**。它们走 `insertBlockAfterCurrent`（在当前顶层块**之后**新增一块），与桌面 hover「+」的「在下方插入」语义一致。
     - 菜单只列**标题 1–3**：窄屏抽屉里 h1–h6 六项太长，而 h4–h6 极少用（需要时 `Ctrl+1..6` 或源码模式）。真机走查觉得不够再加。
     - 浮层的关闭行为（Escape / 点外部 / 滚动 / 缩放）统一走 `src/components/useDismissable.ts`——块菜单、插入抽屉、模式抽屉三处**不要各写一份**，否则必然漂移成「某个菜单按 Esc 关不掉」。
+
+22. **荧光笔是 `==文字==`，解析不走 micromark**（M8 批次 3 定）：实现全在 `src/milkdown/highlight.ts`，注册进 `PRODUCT_PLUGINS`，工具条按钮在 `product.ts` 的 `PRODUCT_FEATURE_CONFIGS`。
+    - **别给 `==` 手写 micromark 分词器**。`~~删除~~` 那种要词法层识别，但荧光笔只要在 mdast 建好后**事后切分 `text` 节点**就够了（`remarkHighlight` 插件 → `lanmarkHighlight` mdast 节点 → mark 的 `parseMarkdown`/`toMarkdown` 双向映射）。手写分词器的定界符规则极易写错，而错了就是**往返损坏**（硬约定 3，本仓库最不能出的问题）。
+    - **正则的形状是有约束的**：分隔符必须用**反向引用**（`\1`）而不是第三个捕获组——`markRule` 取**最后一个捕获组**当「要加标记的内容」，多一个捕获组就会把分隔符当成内容。切分用第 1 组（内容）。
+    - **递归切分时必须跳过 `inlineCode` / `code` / `html` 子树**，否则代码块里的 `==x==` 会被当成语法吃掉。
+    - **已知边界**（有意接受，别当 bug 修）：不支持跨行内节点，所以 `==**粗**==` 不会高亮；`== 文字 ==`（内侧贴空格）与 `a == b` 都**不**判为高亮。
+    - **两个既有行为已用用例钉住**：① 段落行首的 `==文字==` 在没有本功能时会被 `remark-stringify` 加反斜杠转义（因为 `=` 可起 setext 下划线）——本功能**顺带修好了**它；② 行首 `\== 文字 ==`（不构成高亮的那种）仍会被转义，**非本功能引入**。
+    - **CSS 里的 `color: inherit` 不能删**：色值走 `--c-mark`，在 `:root` / `[data-scheme="dark"]` / `[data-scheme="paper"]` 三块各给一个（浅色暖黄 / 深色低饱和琥珀 / 纸页沙金）；规则用 `.editor-host .milkdown .ProseMirror mark` 压过 Crepe 默认（硬约定 7）。frame 给 `mark` 设了自己的文字色，不继承就是**深色下黑底黑字**。
 
 ## 完成标准（DoD）
 
