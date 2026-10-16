@@ -51,9 +51,11 @@ scripts/android-check.sh         # Android 交叉编译门禁（不跑 gradle）
 Android 相关的非显然几条：
 
 - **任何 Android 构建前先 `source scripts/env.sh`**：JDK 21（本机 26 与 Gradle 8.14 不兼容）、ANDROID_HOME/NDK_HOME、`ANDROID_USER_HOME`（AGP 写 `~/.android` 会崩）、Java 强制 IPv4（直连 dl.google.com 会被重置）都在里面，缺了必挂
-- 打可装机 APK（debug 签名，与已装应用一致，可 `adb install -r` 覆盖）：
+- 打 debug APK（真机走查用）：
   `source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`
   产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
+  **它装成独立应用**（`com.lanmark.app.debug`，桌面名「Lanmark Debug」），与 release 版**共存**、
+  **不能**用 `adb install -r` 覆盖 release 版——这是刻意的，见硬约定 27
 - 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`（中文/图片/frontmatter + 验收清单），首启页「打开现有笔记库」指向它
 - 桌面 release 用 `scripts/lanmark-desktop.sh`（原生二进制；本机 AppImage 有 Intel Arc 兼容性问题）
 
@@ -105,8 +107,8 @@ Android 相关的非显然几条：
 
 1. **工具链与缓存一律进仓库 `.cache/`**（cargo/rustup/pnpm/JDK/SDK/gradle），不污染 `$HOME`；新增缓存照此办（`scripts/env.sh` 已处理，别绕过；`.gitignore` 已忽略 `.cache/`）。
 2. **`gen/android` 是手工改的，删目录重 init 会丢工作**：删掉重 init 会冲掉 SyncService/SAF 代码。
-    ⚠️ **但「手改安全」是错的**（2026-10-16 实测）：`pnpm tauri android build` 会**重新生成** `app/build.gradle.kts`——往里加的**语句会被抹掉**（注释会留下，极易误判成「改成功了」）。改动要么放进它不重写的文件（`app/src/debug/res/**` 这类新增 source set 文件就安全），要么走「CLI 构建完再回填、然后直接调 gradle」的两步法（见 `.cache/build-coexist-debug.sh`）。
-    ⚠️ **直接 `./gradlew :app:assembleXxx` 也是坏的**：它的 `rustBuild*` 任务会调 `pnpm tauri android android-studio-script --target aarch64-linux-android`，而这个 CLI 版本只认短架构名（`aarch64`）→ 必失败（exit 134）。绕法：用一个只拦 `android-studio-script` 的 `pnpm` 垫片放进 PATH（**并先 `./gradlew --stop`**，否则复用的守护进程仍用旧 PATH）。
+    ⚠️ **但「手改安全」是错的**（2026-10-16 实测）：`pnpm tauri android build` 会**重新生成** `app/build.gradle.kts`——往里加的**语句会被抹掉**（注释会留下，极易误判成「改成功了」）。**正确做法**：改动放进**它不重写**的文件——新增 source set 文件（`app/src/debug/res/**`）安全；要给所有 debug 变体加配置就写在**根** `build.gradle.kts` 的 `subprojects { plugins.withId("com.android.application") { … } }` 里（`applicationIdSuffix` 就是这么加的，见硬约定 27）。
+    ⚠️ **别走「直接 `./gradlew :app:assembleXxx`」**：它的 `rustBuild*` 任务会调 `pnpm tauri android android-studio-script --target aarch64-linux-android`，而这个 CLI 版本只认短架构名（`aarch64`）→ 必失败（exit 134）。绕法（用一个只拦 `android-studio-script` 的 `pnpm` 垫片 + 先 `./gradlew --stop`）曾用过，但**既然根文件钩子能让标准命令生效，就别再维护那套绕法**。
 3. **往返保真是硬门槛**：打开笔记不得重写文件（Crepe 建实例会发一次伪 `markdownUpdated`，`EditorPane.tsx` 里 `MilkdownHost` 的 `lastKnownDoc` 基线专门压它）；frontmatter 与 wikilink 不进编辑器、保存时回填还原；图片显示走 `vault://`、落盘还原相对引用。动 `src/components/EditorPane.tsx`、`src/lib/vault-url.ts`、`src/lib/frontmatter.ts`、`src/lib/wikilink.ts` 前先看这些文件内的注释；护栏是 `pnpm test` 里的 roundtrip 与往返用例。
 4. **vault 文件是唯一事实源**；`src-tauri/src/db.rs` 的 SQLite 只是可重建索引（含正文搜索缓存）。任何「数据」改动先问文件侧怎么表达。
 5. **同步方向固定**：手机 = axum 服务器（`0.0.0.0:4180`，被占则 +1，见 `sync_server.rs` 的 `DEFAULT_PORT` / `spawn`），桌面 = 客户端；JSON over HTTP，文件级 sha256 版本对比；冲突按 **mtime LWW 裁决**（较新者留原路径、较旧者存为可见冲突副本），删除走 tombstone 传播——规则实现在 `sync.rs` / `sync_client.rs` / `sync_server.rs`。
@@ -198,8 +200,9 @@ Android 相关的非显然几条：
     - **Android 16（API 36）忽略 `windowSoftInputMode`**：manifest 里设了 `adjustResize` 也不生效（边到边强制）；键盘弹出时页面被上推、**顶栏会滚出可视区**，此时头部按钮既看不到也点不到（真用户也一样）。要修得在 web 层监听 `visualViewport` 做锚定，尚未做。
 
 27. **真机装 debug 版不要卸载 release 版**（M8 定，2026-10-16 教训）：release 资产是固定 keystore 签的，本地只能出 debug 签名，两者**无法互相覆盖**（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。而卸载会清掉应用私有存储——「应用目录」用户（`getExternalFilesDir`，**注意它按 applicationId 解析**）的笔记库就在那儿，卸载即丢。
-    做法：给 debug build type 加 `applicationIdSuffix = ".debug"`，装成**独立应用**共存（配上 `app/src/debug/res/values/strings.xml` 改应用名，否则两个同名同图标的应用分不清）。**别用 `pm uninstall -k` 赌数据能留下**。
-    `VaultPicker.tsx` 里那行 `应用目录：/Android/data/com.lanmark.app/...` 是**硬编码的显示文案**，在 `.debug` 版里显示的是错的（无功能影响）。
+    做法：`applicationIdSuffix = ".debug"` + `app/src/debug/res/values/strings.xml`（应用名改「Lanmark Debug」，否则两个同名同图标的应用分不清）。**后缀写在根 `build.gradle.kts` 的 `subprojects` 钩子里**——写进 `app/build.gradle.kts` 会被 CLI 抹掉（硬约定 2），写在根文件里**标准构建命令就生效**（2026-10-16 实测：一次 `pnpm tauri android build --apk --debug` 直接产出 `com.lanmark.app.debug`）。
+    **别用 `pm uninstall -k` 赌数据能留下**。
+    首启页那句「应用目录：…」的路径必须**问插件**（`vaultPicker.appDir()` → `getExternalFilesDir`，按 applicationId 解析），**不要写死包名**——`.debug` 版会显示成另一个包的目录。
 
 ## 完成标准（DoD）
 
@@ -227,7 +230,8 @@ debug APK 的 WebView 开 CDP（release 不行），比盲摸坐标准：
 
 ```bash
 source scripts/env.sh   # adb 进 PATH（.cache/android-sdk/platform-tools）
-adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.lanmark.app | tr -d '\r')
+adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.lanmark.app.debug | tr -d '\r')
+# 注意包名：本地 debug APK 是 com.lanmark.app.debug（见硬约定 27），不是 release 的 com.lanmark.app
 curl -s localhost:9222/json   # 拿 webSocketDebuggerUrl
 node scripts/cdp-eval.mjs "document.querySelector('.ProseMirror')?.clientWidth"   # 页面内执行 JS
 ```

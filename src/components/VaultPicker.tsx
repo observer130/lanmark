@@ -3,7 +3,7 @@ import { FolderOpen, FolderPlus, Home, Keyboard, Settings } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { useSyncStore } from "../stores/sync";
 import { useSettingsStore } from "../stores/settings";
-import { isAndroid } from "../lib/sync";
+import { isAndroid, vaultPicker } from "../lib/sync";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./WindowControls";
 import { AppMark } from "./AppMark";
 
@@ -27,6 +27,27 @@ export function VaultPicker() {
   const [android] = useState(isAndroid());
   const [customPath, setCustomPath] = useState("");
   const [showCustom, setShowCustom] = useState(false);
+  /**
+   * 「应用目录」的**真实**路径：必须问插件（`getExternalFilesDir` 按 applicationId 解析），
+   * 不能写死 `com.lanmark.app`——debug 包（`applicationIdSuffix = ".debug"`，见硬约定 27）
+   * 与 release 包的路径不同，写死就会显示成另一个包的目录。取不到时退回不带路径的描述。
+   */
+  const [appDirPath, setAppDirPath] = useState<string | null>(null);
+  useEffect(() => {
+    if (!android) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const base = await vaultPicker.appDir();
+        if (!cancelled && base) setAppDirPath(`${base.replace(/\/+$/, "")}/lanmark-vault`);
+      } catch {
+        /* 取不到就不显示具体路径（描述仍然成立） */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [android]);
 
   // Android：进首启页即查授权状态（自定义路径需要；应用目录不需要）
   useEffect(() => {
@@ -144,7 +165,7 @@ export function VaultPicker() {
                 </div>
               )}
               <p className="pt-1 text-[11px] leading-4 text-ink-3">
-                应用目录：/Android/data/com.lanmark.app/files/lanmark-vault
+                {appDirPath ? `应用目录：${appDirPath}` : "应用目录：App 专属外部目录"}
                 <br />
                 （卸载 App 会删除；同步后桌面端有完整镜像）
               </p>

@@ -62,7 +62,6 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".debug"
             // 真机走查用：debug 包加后缀，装成**独立应用**，与已装的 release 版共存。
             //
             // 为什么需要：本地构建只有 debug 签名，而 release 版是固定 keystore 签的，
