@@ -1,6 +1,8 @@
 import { commandsCtx } from "@milkdown/kit/core";
 import type { MilkdownPlugin } from "@milkdown/kit/ctx";
-import { markRule } from "@milkdown/kit/prose";
+import { InputRule } from "@milkdown/kit/prose/inputrules";
+import type { MarkType } from "@milkdown/kit/prose/model";
+import type { EditorState, Transaction } from "@milkdown/kit/prose/state";
 import { toggleMark } from "@milkdown/kit/prose/commands";
 import { $command, $inputRule, $markSchema, $remark, $useKeymap } from "@milkdown/kit/utils";
 
@@ -158,10 +160,53 @@ export const toggleHighlightCommand = $command("ToggleHighlight", (ctx) => () =>
   toggleMark(highlightSchema.type(ctx)),
 );
 
-/** 输入 `==文字==` 打完最后一个 `=` 即刻转成高亮 */
-export const highlightInputRule = $inputRule((ctx) =>
-  markRule(INPUT_RE, highlightSchema.type(ctx)),
-);
+/**
+ * 输入 `==文字==` 打完最后一个 `=` 即刻转成高亮。
+ *
+ * **自己写、不用 Milkdown 的 `markRule`**：它把光标前的文本交给 `rangeHasCodeMark` 时会算出
+ * 越界的 `to`，而 `state.doc.nodesBetween(from, to)` 一旦越界就抛
+ * `TypeError: Cannot read properties of undefined (reading 'nodeSize')`
+ * （2026-10-16 桌面 + 真机双复现；堆栈 Fragment.nodesBetween → rangeHasCodeMark → InputRule.handler）。
+ * 报错不致命（mark 仍会加上），但它是**用户打字路径上的未捕获异常**，不能留着。
+ * 这条规则只做三件事：删掉两个分隔符、给中间文字加 mark——不需要上游那套 code-span 判定，
+ * 用「父块是 code 就跳过」代替（更便宜也更明确）；
+ * **显式挡掉越界位置**（`end > doc.content.size` 直接放弃这次转换），这正是上游缺的那道闸。
+ *
+ * 拆成纯函数是为了能在 jsdom 里直接测（输入规则的完整触发链在 jsdom 里跑不起来）。
+ */
+export function applyHighlightInputRule(
+  state: EditorState,
+  match: RegExpMatchArray | null,
+  start: number,
+  end: number,
+  markType: MarkType,
+): Transaction | null {
+  const inner = match?.[match.length - 1];
+  const full = match?.[0];
+  if (!inner || !full) return null;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  // 越界一律不处理（宁可这次不转换，也不要让 prosemirror 抛异常）
+  if (start < 0 || start > end || end > state.doc.content.size) return null;
+  if (state.doc.resolve(start).parent.type.spec.code) return null;
+  const at = full.lastIndexOf(inner);
+  if (at < 0) return null;
+  const textStart = start + at;
+  const textEnd = textStart + inner.length;
+  if (textStart < start || textEnd > end) return null;
+  const tr = state.tr;
+  // 先删尾再删头：删后面的区间不会移动前面的位置
+  if (end > textEnd) tr.delete(textEnd, end);
+  if (textStart > start) tr.delete(start, textStart);
+  tr.addMark(start, start + inner.length, markType.create());
+  return tr;
+}
+
+export const highlightInputRule = $inputRule((ctx) => {
+  const markType = highlightSchema.type(ctx);
+  return new InputRule(INPUT_RE, (state, match, start, end) =>
+    applyHighlightInputRule(state, match, start, end, markType),
+  );
+});
 
 export const highlightKeymap = $useKeymap("highlightKeymap", {
   ToggleHighlight: {

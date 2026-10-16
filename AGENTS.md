@@ -104,7 +104,9 @@ Android 相关的非显然几条：
 ## 硬约定
 
 1. **工具链与缓存一律进仓库 `.cache/`**（cargo/rustup/pnpm/JDK/SDK/gradle），不污染 `$HOME`；新增缓存照此办（`scripts/env.sh` 已处理，别绕过；`.gitignore` 已忽略 `.cache/`）。
-2. **`gen/android` 是手工改的，删目录重 init 会丢工作**：`tauri android build/dev` 对已存在文件只读不写（手改安全），但删掉重 init 会冲掉 SyncService/SAF 代码。
+2. **`gen/android` 是手工改的，删目录重 init 会丢工作**：删掉重 init 会冲掉 SyncService/SAF 代码。
+    ⚠️ **但「手改安全」是错的**（2026-10-16 实测）：`pnpm tauri android build` 会**重新生成** `app/build.gradle.kts`——往里加的**语句会被抹掉**（注释会留下，极易误判成「改成功了」）。改动要么放进它不重写的文件（`app/src/debug/res/**` 这类新增 source set 文件就安全），要么走「CLI 构建完再回填、然后直接调 gradle」的两步法（见 `.cache/build-coexist-debug.sh`）。
+    ⚠️ **直接 `./gradlew :app:assembleXxx` 也是坏的**：它的 `rustBuild*` 任务会调 `pnpm tauri android android-studio-script --target aarch64-linux-android`，而这个 CLI 版本只认短架构名（`aarch64`）→ 必失败（exit 134）。绕法：用一个只拦 `android-studio-script` 的 `pnpm` 垫片放进 PATH（**并先 `./gradlew --stop`**，否则复用的守护进程仍用旧 PATH）。
 3. **往返保真是硬门槛**：打开笔记不得重写文件（Crepe 建实例会发一次伪 `markdownUpdated`，`EditorPane.tsx` 里 `MilkdownHost` 的 `lastKnownDoc` 基线专门压它）；frontmatter 与 wikilink 不进编辑器、保存时回填还原；图片显示走 `vault://`、落盘还原相对引用。动 `src/components/EditorPane.tsx`、`src/lib/vault-url.ts`、`src/lib/frontmatter.ts`、`src/lib/wikilink.ts` 前先看这些文件内的注释；护栏是 `pnpm test` 里的 roundtrip 与往返用例。
 4. **vault 文件是唯一事实源**；`src-tauri/src/db.rs` 的 SQLite 只是可重建索引（含正文搜索缓存）。任何「数据」改动先问文件侧怎么表达。
 5. **同步方向固定**：手机 = axum 服务器（`0.0.0.0:4180`，被占则 +1，见 `sync_server.rs` 的 `DEFAULT_PORT` / `spawn`），桌面 = 客户端；JSON over HTTP，文件级 sha256 版本对比；冲突按 **mtime LWW 裁决**（较新者留原路径、较旧者存为可见冲突副本），删除走 tombstone 传播——规则实现在 `sync.rs` / `sync_client.rs` / `sync_server.rs`。
@@ -180,6 +182,24 @@ Android 相关的非显然几条：
     - 加按钮时**先照抄邻居的画法**（`fill="currentColor"` + 一条 `d`），别去图标库里找「语义对得上」的描边图标。
     - **占位也要对齐**：自带那套字形只占约 **13×13** 格。自绘形状横跨 17×20 时，同样 24px 下会**显得大一号**（2026-10-13 走查：「主体明显更粗、色块更大，视觉上就显得大一号」）。修法是给形状套 `translate(24/2×(1−s)) scale(s)` 做**绕画布中心**缩放（当前 `s = 0.76`），不必重画路径。
     - **不确定分量/占位是否匹配时，渲染候选并排截图对比**（`.cache/icon-candidates.html`；`.cache/screenshots/m8-24-icon-candidates.png` 选形状、`m8-25-icon-scale.png` 选缩放系数），别凭感觉定。
+
+25. **触屏长按唤块菜单：别依赖 `contextmenu`，但要自己起定时器；且浮层遮罩不能挂 `onClick`**（M8 真机走查定）：这三条都是「桌面 Chrome 永远绿、真机全废」的坑。
+    - **`contextmenu` 在编辑器正文上不派发**（Android WebView 把长按当选字手势）。硬约定 13 里「真机实测会派发该事件」只对**普通 DOM**（侧栏树行）成立，**对 ProseMirror 正文不成立**。做法：`touchstart` 起 480ms 定时器，`touchmove` 超过 10px 或 `touchend/touchcancel` 取消（`EditorPane` 的 `onTouchStart/onTouchMove`）。
+    - **与选字不冲突**：手机选字走**双击**（真机实测双击选中整段并弹出气泡条，高亮按钮可达）。分工＝「长按 = 块菜单、双击 = 选字」。
+    - **浮层的遮罩一律不挂 `onClick`**：`click` 会在「打开浮层那个手势」结束时补发一次，落在刚出现的遮罩上 → 长按唤出的菜单**只闪现几十毫秒**就被关掉（真机现象是「长按毫无反应」，因为肉眼看不到那一瞬）。「点外部关闭」只认 `useDismissable` 的 **`pointerdown`**（只在新手势开始时触发）。
+    - **抽屉不许监听 `scroll`/`resize`**（`useDismissable` 第三参 `anchored`，默认 false）：这两个逃生门只对「贴点击位置的浮层」有意义；抽屉贴屏幕底，而真机上长按残留的选区被清掉会触发滚动/布局事件 → 抽屉一开就被关。
+
+26. **真机走查的探针约束**（M8 定，全套在 `.cache/probe-mobile.mjs` + `.cache/cdp-lib.mjs`）：
+    - 交互一律 `Input.dispatchTouchEvent`（真触摸），**别用合成 MouseEvent**——触屏专属行为（长按、`pointercancel`）只有真触摸才复现。
+    - **触摸坐标要减 `visualViewport.offsetTop/Left`**：软键盘弹出时页面被上推（实测 69px）而 CDP 坐标是相对视觉视口的 → 不减的话「键盘弹出后头部按钮全部失灵」，是**探针假象**（真用户点屏幕正常）。
+    - **截图用 `adb exec-out screencap`，不要 `Page.captureScreenshot`**：后者在真机 WebView 上会**常年挂住**（不返回也不报错，表现为探针无输出地卡死，极难定位）。
+    - `adb` 要用**绝对路径**（探针不经 `scripts/env.sh`，裸 `"adb"` 会 ENOENT，而异常常被 `finally` 吞掉）。
+    - 探针假设文档里有 `<p>` 会脆断（前几轮测试会把段落转成标题）——按「任意顶层块」取。
+    - **Android 16（API 36）忽略 `windowSoftInputMode`**：manifest 里设了 `adjustResize` 也不生效（边到边强制）；键盘弹出时页面被上推、**顶栏会滚出可视区**，此时头部按钮既看不到也点不到（真用户也一样）。要修得在 web 层监听 `visualViewport` 做锚定，尚未做。
+
+27. **真机装 debug 版不要卸载 release 版**（M8 定，2026-10-16 教训）：release 资产是固定 keystore 签的，本地只能出 debug 签名，两者**无法互相覆盖**（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。而卸载会清掉应用私有存储——「应用目录」用户（`getExternalFilesDir`，**注意它按 applicationId 解析**）的笔记库就在那儿，卸载即丢。
+    做法：给 debug build type 加 `applicationIdSuffix = ".debug"`，装成**独立应用**共存（配上 `app/src/debug/res/values/strings.xml` 改应用名，否则两个同名同图标的应用分不清）。**别用 `pm uninstall -k` 赌数据能留下**。
+    `VaultPicker.tsx` 里那行 `应用目录：/Android/data/com.lanmark.app/...` 是**硬编码的显示文案**，在 `.debug` 版里显示的是错的（无功能影响）。
 
 ## 完成标准（DoD）
 

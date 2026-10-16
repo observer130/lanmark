@@ -298,6 +298,45 @@ function MilkdownHost({
        * 后一个才是拖拽点）因此是硬编码依赖——Crepe 改结构时这里会静默失效，
        * 但**不会**让功能不可用：右键留白与 `Alt-↑/↓` 仍在。改动 Crepe 版本后请复核。
        */
+      /**
+       * 触屏长按唤出块菜单。**不能靠 `contextmenu`**：真机上长按 ProseMirror 正文根本
+       * 不派发该事件（WebView 把它当成选字手势），2026-10-16 Android 走查实测——
+       * 现象是「长按毫无反应」，而这条路径在桌面 Chrome 里永远绿。
+       *
+       * 与选字**不冲突**：手机上选字走**双击**（真机实测双击即选中整段并弹出气泡条，
+       * 高亮按钮可达），长按在编辑器里本来什么都不做。所以分工是
+       * 「长按 = 块菜单（对应桌面的六个点手柄）、双击 = 选字」。
+       */
+      let pressTimer: number | null = null;
+      let pressAt: { x: number; y: number } | null = null;
+      const cancelPress = () => {
+        if (pressTimer !== null) window.clearTimeout(pressTimer);
+        pressTimer = null;
+        pressAt = null;
+      };
+      const onTouchStart = (e: TouchEvent) => {
+        if (e.touches.length !== 1) return cancelPress();
+        const t = e.touches[0];
+        pressAt = { x: t.clientX, y: t.clientY };
+        pressTimer = window.setTimeout(() => {
+          pressTimer = null;
+          const at = pressAt;
+          pressAt = null;
+          if (!at) return;
+          const index = api.indexFromPoint(at.x, at.y);
+          if (index === null) return;
+          // 与手柄点击同一条路径：贴近触摸点弹出，菜单里用 planMove 预演决定置灰
+          onBlockMenuRef.current?.(index, at.x, at.y);
+        }, 480);
+      };
+      const onTouchMove = (e: TouchEvent) => {
+        if (pressTimer === null || !pressAt) return;
+        const t = e.touches[0];
+        if (!t) return cancelPress();
+        // 移动超过阈值就当滚动/拖拽，不再触发长按
+        if (Math.hypot(t.clientX - pressAt.x, t.clientY - pressAt.y) > 10) cancelPress();
+      };
+
       const onBlockHandleClick = (e: MouseEvent) => {
         const target = e.target as HTMLElement | null;
         const handle = target?.closest?.(".milkdown-block-handle");
@@ -343,12 +382,21 @@ function MilkdownHost({
         host.addEventListener("drop", onDrop);
         host.addEventListener("contextmenu", onBlockContextMenu);
         host.addEventListener("click", onBlockHandleClick);
+        host.addEventListener("touchstart", onTouchStart, { passive: true });
+        host.addEventListener("touchmove", onTouchMove, { passive: true });
+        host.addEventListener("touchend", cancelPress);
+        host.addEventListener("touchcancel", cancelPress);
         (host as HTMLDivElement & { __lanmarkCleanup?: () => void }).__lanmarkCleanup = () => {
           host.removeEventListener("paste", onPaste);
           host.removeEventListener("dragover", onDragOver);
           host.removeEventListener("drop", onDrop);
           host.removeEventListener("contextmenu", onBlockContextMenu);
           host.removeEventListener("click", onBlockHandleClick);
+          host.removeEventListener("touchstart", onTouchStart);
+          host.removeEventListener("touchmove", onTouchMove);
+          host.removeEventListener("touchend", cancelPress);
+          host.removeEventListener("touchcancel", cancelPress);
+          cancelPress();
         };
       }
     })();

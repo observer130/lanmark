@@ -62,6 +62,16 @@ android {
     }
     buildTypes {
         getByName("debug") {
+            applicationIdSuffix = ".debug"
+            // 真机走查用：debug 包加后缀，装成**独立应用**，与已装的 release 版共存。
+            //
+            // 为什么需要：本地构建只有 debug 签名，而 release 版是固定 keystore 签的，
+            // 两者**无法互相覆盖**（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。要装 debug 版
+            // 就只能先卸载 release 版——对「应用目录」用户（vault 在应用私有存储）等于
+            // **把本地笔记库整体删掉**（2026-10-16 真机走查时正是这个局面）。
+            // 加后缀后两条安装链互不干扰，本地走查不再有丢数据的风险。
+            // 配套：`src/debug/res/values/strings.xml` 把应用名改成 "Lanmark Debug"，
+            // 否则桌面上两个同名同图标的图标分不清哪个是哪个。
             manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true

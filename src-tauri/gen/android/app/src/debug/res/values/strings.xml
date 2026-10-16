@@ -1,0 +1,5 @@
+<resources>
+    <!-- debug build type 专属：与 release 版共存时能一眼分清（package 另有 .debug 后缀） -->
+    <string name="app_name">"Lanmark Debug"</string>
+    <string name="main_activity_title">"Lanmark Debug"</string>
+</resources>

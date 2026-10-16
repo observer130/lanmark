@@ -70,7 +70,8 @@ function MenuItem({
 }
 
 export function BlockMenu({ target, narrow, onMove, onDelete, onClose }: BlockMenuProps) {
-  const ref = useDismissable(!!target, onClose);
+  // 抽屉（窄屏）不监听滚动/缩放，只有贴锚点的桌面浮层才需要（见 useDismissable 注释）
+  const ref = useDismissable(!!target, onClose, !narrow);
 
   if (!target) return null;
 
@@ -103,7 +104,10 @@ export function BlockMenu({ target, narrow, onMove, onDelete, onClose }: BlockMe
   if (narrow) {
     return (
       <>
-        <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
+        {/* 遮罩**不挂 onClick**：点外部关闭由 useDismissable 的 pointerdown 负责。
+            挂 onClick 会被「打开菜单那个手势的尾巴 click」立刻关掉——长按唤出时尤其明显
+            （手指抬起时 click 落在刚出现的遮罩上，菜单只闪现几十毫秒，2026-10-16 真机实测） */}
+        <div className="fixed inset-0 z-40 bg-black/30" />
         <div
           ref={ref}
           role="menu"

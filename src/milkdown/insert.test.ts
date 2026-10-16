@@ -13,6 +13,7 @@ import { TextSelection } from "@milkdown/kit/prose/state";
 
 import { createProductCrepe } from "./product";
 import { insertBlock, type BlockKind } from "./block-insert";
+import { applyHighlightInputRule, highlightSchema } from "./highlight";
 
 /** 建编辑器，把光标放到**末段文字中间**（劈开/删字的问题都只在中段光标下才暴露），返回句柄 */
 async function mountWithCaretInLastParagraph(md: string) {
@@ -104,6 +105,94 @@ describe("插入块（M8 批次 2）", () => {
     const { crepe, root, run } = await mountWithCaretInLastParagraph(DOC);
     run("text");
     expect(crepe.getMarkdown()).toBe(DOC);
+    await crepe.destroy();
+    root.remove();
+  });
+});
+
+describe("荧光笔输入规则（M8 走查修复：不再借 Milkdown 的 markRule）", () => {
+  /**
+   * 上游 `markRule` 会算出越界的 `to` 交给 `doc.nodesBetween`，prosemirror-model 直接抛
+   * `Cannot read properties of undefined (reading 'nodeSize')`。这条用例钉住「不抛、且 mark 正确」。
+   */
+  const RE = /(?<![=\w])(==)(?!\s)([^\n]+?)(?<!\s)\1(?![\w=])$/;
+
+  async function setup(text = "前缀") {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const crepe = createProductCrepe({ root, defaultValue: `${text}\n` });
+    await crepe.create();
+    const ctx = await crepe.editor.action((c) => c);
+    const view = await crepe.editor.action((c) => c.get(editorViewCtx));
+    const markType = highlightSchema.type(ctx);
+    return { crepe, root, view, markType };
+  }
+
+  it("正常情形：删掉分隔符、给中间文字加 mark", async () => {
+    const { crepe, root, view, markType } = await setup();
+    // 模拟「刚输入完 ==高亮==」：先把文本插进文档，再按输入规则的位置调用
+    const insertAt = 1 + view.state.doc.child(0).content.size;
+    view.dispatch(view.state.tr.insertText("==高亮==", insertAt));
+    const text = view.state.doc.textContent;
+    const m = RE.exec(text)!;
+    const start = 1 + (m.index ?? 0);
+    const end = start + m[0].length;
+    let threw: unknown = null;
+    let tr: unknown = null;
+    try {
+      tr = applyHighlightInputRule(view.state, m, start, end, markType);
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw, `不应抛异常，实际：${String(threw)}`).toBeNull();
+    expect(tr).not.toBeNull();
+    view.dispatch(tr as never);
+    const md = crepe.getMarkdown();
+    expect(md).toContain("==高亮==");          // 序列化回原语法
+    expect(view.state.doc.textContent).toBe("前缀高亮");
+    expect(view.state.doc.textContent).not.toContain("==");
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("**越界位置一律放弃**（上游就是在这里抛的），不抛异常、不改文档", async () => {
+    const { crepe, root, view, markType } = await setup();
+    const before = view.state.doc.toJSON();
+    for (const [start, end] of [
+      [0, 0],
+      [1, view.state.doc.content.size + 5],   // end 越界
+      [-1, 3],
+      [5, 2],                                  // start > end
+    ] as [number, number][]) {
+      const m = RE.exec("==高亮==");
+      let threw: unknown = null;
+      let tr: unknown = "skipped";
+      try {
+        tr = applyHighlightInputRule(view.state, m, start, end, markType);
+      } catch (e) {
+        threw = e;
+      }
+      expect(threw, `(${start},${end}) 不应抛异常`).toBeNull();
+      expect(tr, `(${start},${end}) 应放弃`).toBeNull();
+    }
+    expect(view.state.doc.toJSON()).toEqual(before);
+    await crepe.destroy();
+    root.remove();
+  });
+
+  it("代码块内不转换（用父块 spec.code 判，不上上游那套 code-span 判定）", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const crepe = createProductCrepe({ root, defaultValue: "```\n==高亮==\n```\n" });
+    await crepe.create();
+    const ctx = await crepe.editor.action((c) => c);
+    const view = await crepe.editor.action((c) => c.get(editorViewCtx));
+    const markType = highlightSchema.type(ctx);
+    // 光标放进代码块
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2)));
+    const m = RE.exec("==高亮==")!;
+    const tr = applyHighlightInputRule(view.state, m, 2, 2 + m[0].length, markType);
+    expect(tr).toBeNull();
     await crepe.destroy();
     root.remove();
   });
