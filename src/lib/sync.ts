@@ -161,7 +161,6 @@ export const vaultPicker = {
   pickFolder: () => invoke<string | null>("vault_picker_pick_folder"),
 };
 
-/** 平台判断：Android WebView UA 必含 Android；桌面端（Win/Linux/macOS）不含 */
-export function isAndroid(): boolean {
-  return navigator.userAgent.includes("Android");
-}
+/** 平台判断：Android WebView UA 必含 Android；桌面端（Win/Linux/macOS）不含。
+ *  实现已挪到 `platform.ts`（纯逻辑，供 vault-url 复用），这里保留原导出名。 */
+export { isAndroid } from "./platform";

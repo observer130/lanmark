@@ -13,7 +13,9 @@ import { useDismissable } from "./useDismissable";
  *  ③ 窄屏：长按块（真机 WebView 长按即派发 `contextmenu`，硬约定 13）
  *
  * 布局：桌面是贴着点击位置的浮层；窄屏是底部抽屉（触控目标 ≥44px）。
- * 删除走 ProseMirror 的 history，`Ctrl+Z` 可撤销——所以不再加二次确认。
+ * 删除走 ProseMirror 的 history——所以不再加二次确认。但**别以为按 Ctrl+Z 总能救回来**：
+ * 点完菜单焦点就落回 body，快捷键只在编辑器 DOM 有焦点时生效（2026-10-20 实测）。
+ * 窄屏靠头部的「撤回」按钮（不走焦点）；桌面要先点回正文再 Ctrl+Z（见硬约定 13）。
  */
 
 export interface BlockMenuTarget {

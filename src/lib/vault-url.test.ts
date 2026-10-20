@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
   isExternal,
   resolveFrom,
@@ -6,6 +6,8 @@ import {
   toVaultUrl,
   fromVaultUrl,
   vaultUrlsToRelative,
+  vaultUrlPrefix,
+  stripVaultPrefix,
 } from "./vault-url";
 
 describe("isExternal", () => {
@@ -114,5 +116,61 @@ describe("vaultUrlsToRelative（保存时 URL → 笔记相对引用）", () => 
     const md = `![](${toVaultUrl("assets/a.png")})\n![](${toVaultUrl("assets/b.png")})`;
     const out = vaultUrlsToRelative(md, "a/b");
     expect(out).toBe("![](../../assets/a.png)\n![](../../assets/b.png)");
+  });
+});
+
+/**
+ * Android 的协议前缀与桌面**不同**（2026-10-20 真机走查定）：
+ * Tauri 在 Android 把自定义协议暴露成 http://vault.localhost/，
+ * `vault://` 的 <img> 在 WebView 里直接 onerror（自然尺寸 0）。
+ */
+describe("Android 协议前缀（跨平台 URL 生成 / 保存还原）", () => {
+  const desktopUa = navigator.userAgent;
+  const setUa = (v: string) =>
+    Object.defineProperty(navigator, "userAgent", { value: v, configurable: true });
+  const ANDROID_UA =
+    "Mozilla/5.0 (Linux; Android 16; 2510DRK44C Build/BP2A.250705.008) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/140.0.0.0 Mobile Safari/537.36";
+
+  afterEach(() => setUa(desktopUa));
+
+  it("桌面默认仍是 vault://localhost/", () => {
+    expect(navigator.userAgent).not.toContain("Android");
+    expect(vaultUrlPrefix()).toBe("vault://localhost/");
+    expect(toVaultUrl("assets/x.png")).toBe("vault://localhost/assets/x.png");
+  });
+
+  it("Android UA 下生成 http://vault.localhost/（含中文段编码）", () => {
+    setUa(ANDROID_UA);
+    expect(vaultUrlPrefix()).toBe("http://vault.localhost/");
+    expect(toVaultUrl("assets/x.png")).toBe("http://vault.localhost/assets/x.png");
+    expect(toVaultUrl("读书/图.png")).toBe(
+      "http://vault.localhost/" + encodeURIComponent("读书") + "/" + encodeURIComponent("图.png"),
+    );
+  });
+
+  it("两种前缀都能被 fromVaultUrl 还原（跨端编辑同一篇笔记）", () => {
+    expect(fromVaultUrl("vault://localhost/a/b.png")).toBe("a/b.png");
+    expect(fromVaultUrl("http://vault.localhost/a/b.png")).toBe("a/b.png");
+    expect(fromVaultUrl("http://vault.localhost/工作/图.png")).toBe("工作/图.png");
+  });
+
+  it("保存时 Android URL 也还原为相对引用（否则把 http://vault.localhost 写进 md）", () => {
+    const md = `![](${toVaultUrl("assets/x.png")})`;
+    setUa(ANDROID_UA);
+    const androidUrl = toVaultUrl("assets/x.png");
+    expect(androidUrl.startsWith("http://vault.localhost/")).toBe(true);
+    expect(vaultUrlsToRelative(`![](${androidUrl})`, "工作")).toBe("![](../assets/x.png)");
+    expect(vaultUrlsToRelative(`![](${androidUrl})`, "工作")).not.toContain("vault.localhost");
+    // 桌面 UA 下同样要能剥（跨端读到 Android 写过的内容）
+    expect(vaultUrlsToRelative(md, "工作")).toBe("![](../assets/x.png)");
+  });
+
+  it("isExternal 认两种前缀", () => {
+    expect(isExternal("vault://localhost/a.png")).toBe(true);
+    expect(isExternal("http://vault.localhost/a.png")).toBe(true);
+  });
+
+  it("stripVaultPrefix 两种前缀都剥（调试用）", () => {
+    expect(stripVaultPrefix("a vault://localhost/x http://vault.localhost/y")).toBe("a x y");
   });
 });

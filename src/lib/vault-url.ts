@@ -3,18 +3,42 @@
  *
  * 约定（与 Obsidian 一致）：markdown 里的图片引用是「相对笔记所在目录」的路径，
  * 例如 工作/笔记.md 里写 ![](assets/x.png) 实际指 工作/assets/x.png。
- * WYSIWYG 文档树内的 image src 则用 vault 绝对协议 URL（vault://localhost/<vault相对路径>），
- * 序列化回 markdown 时把前缀剥掉，恢复为相对引用（源文件零侵入）。
+ * WYSIWYG 文档树内的 image src 则用 vault 绝对协议 URL，序列化回 markdown 时把前缀剥掉，
+ * 恢复为相对引用（源文件零侵入）。
+ *
+ * ⚠️ **协议前缀随平台不同，这不是笔误**（2026-10-20 真机走查定）：
+ *  - 桌面（WebView2 / WebKitGTK）：`vault://localhost/<相对路径>`
+ *  - Android：`http://vault.localhost/<相对路径>`
+ *
+ * Android WebView **不认自定义 scheme 的子资源**（`<img src="vault://…">` 直接 onerror，
+ * `naturalWidth=0`），Tauri 在 Android 上把 `register_asynchronous_uri_scheme_protocol`
+ * 暴露成 `http://<scheme>.localhost`，同一文件换这个前缀就能加载（真机实测：
+ * `http://vault.localhost/assets/pic.png` → 32×32，`vault://…` → onerror）。
+ * 所以：**生成 URL 用 `vaultUrlPrefix()`，保存前两种前缀都要认**——否则 Android 写回的
+ * 引用会变成 `http://vault.localhost/...`，把相对引用写坏。
  */
 
-const VAULT_PREFIX = "vault://localhost/";
+import { isAndroid } from "./platform";
+
+const DESKTOP_PREFIX = "vault://localhost/";
+const ANDROID_PREFIX = "http://vault.localhost/";
+
+/** 当前平台下文档树里的协议前缀（Tauri 在 Android 只认 http://<scheme>.localhost） */
+export function vaultUrlPrefix(): string {
+  return isAndroid() ? ANDROID_PREFIX : DESKTOP_PREFIX;
+}
+
+/** 是否是任一平台的 vault 协议 URL（保存时两种都要剥，跨端复制内容也安全） */
+function hasVaultPrefix(src: string): boolean {
+  return src.startsWith(DESKTOP_PREFIX) || src.startsWith(ANDROID_PREFIX);
+}
 
 /** 是否外部/绝对 URL（不需要走 vault 协议） */
 export function isExternal(src: string): boolean {
   return (
     /^https?:\/\//i.test(src) ||
     /^data:/i.test(src) ||
-    src.startsWith(VAULT_PREFIX) ||
+    hasVaultPrefix(src) ||
     src.startsWith("/") ||
     /^[a-zA-Z]:[\\/]/.test(src) // Windows 绝对路径
   );
@@ -48,10 +72,10 @@ export function relativeFrom(fromDir: string, toPath: string): string {
   return [...Array(ups).fill(".."), ...to.slice(i)].filter(Boolean).join("/");
 }
 
-/** vault 相对路径 → 协议 URL（每段 percent-encode，支持中文） */
+/** vault 相对路径 → 当前平台的协议 URL（每段 percent-encode，支持中文） */
 export function toVaultUrl(vaultRel: string): string {
   return (
-    VAULT_PREFIX +
+    vaultUrlPrefix() +
     vaultRel
       .split("/")
       .filter(Boolean)
@@ -69,11 +93,17 @@ export function toVaultUrl(vaultRel: string): string {
  * 协议 URL → vault 相对路径（保存前还原用）。
  * 注意必须逐段 percent-decode，与 toVaultUrl 的 encode 对称——
  * 漏掉解码会把编码后的引用写回磁盘（曾导致中文文件名逐次启动叠加编码）。
+ * 两种平台前缀都认：笔记可能在 Android 上编辑过，桌面端打开后仍要能还原。
  */
 export function fromVaultUrl(src: string): string {
-  if (!src.startsWith(VAULT_PREFIX)) return src;
+  const prefix = src.startsWith(ANDROID_PREFIX)
+    ? ANDROID_PREFIX
+    : src.startsWith(DESKTOP_PREFIX)
+      ? DESKTOP_PREFIX
+      : null;
+  if (!prefix) return src;
   return src
-    .slice(VAULT_PREFIX.length)
+    .slice(prefix.length)
     .split("/")
     .map((seg) => {
       try {
@@ -95,7 +125,7 @@ export function fromVaultUrl(src: string): string {
  */
 export function vaultUrlsToRelative(markdown: string, noteDir: string): string {
   const inSrc = (url: string): string => {
-    if (!url.startsWith(VAULT_PREFIX)) return url;
+    if (!hasVaultPrefix(url)) return url;
     const rel = fromVaultUrl(url);
     return rel ? relativeFrom(noteDir, rel) : url;
   };
@@ -106,5 +136,5 @@ export function vaultUrlsToRelative(markdown: string, noteDir: string): string {
 
 /** 简单前缀剥离（测试/调试用；产品保存路径请用 vaultUrlsToRelative） */
 export function stripVaultPrefix(markdown: string): string {
-  return markdown.split(VAULT_PREFIX).join("");
+  return markdown.split(DESKTOP_PREFIX).join("").split(ANDROID_PREFIX).join("");
 }

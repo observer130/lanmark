@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BookOpen, Check, Code, Folder, NotebookText, PenLine, Plus, Star } from "lucide-react";
+import {
+  BookOpen,
+  Check,
+  Code,
+  Folder,
+  NotebookText,
+  PenLine,
+  Plus,
+  Star,
+  Undo2,
+} from "lucide-react";
 import type { Crepe } from "@milkdown/crepe";
 import { editorViewCtx } from "@milkdown/kit/core";
+import { undo, undoDepth } from "@milkdown/kit/prose/history";
 import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
 import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
 import CodeMirror from "@uiw/react-codemirror";
@@ -72,6 +83,10 @@ export interface EditorApi {
   deleteBlock: (index: number) => void;
   /** 执行「插入块」（移动端头部「+」菜单用）：转换当前块或新增一块 */
   insertBlock: (kind: BlockKind) => void;
+  /** 撤回一步（窄屏头部「撤回」按钮用）；无历史可撤返回 false */
+  undo: () => boolean;
+  /** 是否还有可撤销的历史（按钮置灰用，只说「有没有」，不执行） */
+  canUndo: () => boolean;
 }
 
 /**
@@ -177,7 +192,10 @@ function MilkdownHost({
           }
         }
       });
-      if (changed) view.dispatch(tr);
+      // 这一步只是**显示层**改写（相对引用 → vault://），不是用户编辑：
+      // 必须标 addToHistory=false，否则「打开一篇带图片的笔记」就等于垫了一步历史，
+      // 窄屏「撤回」按钮一打开就是亮的，按下去还会把 src 改回去。
+      if (changed) view.dispatch(tr.setMeta("addToHistory", false));
       lastKnownDoc = view.state.doc; // 基线建立：此后只放行真实 doc 变化
 
       // 图片落盘并插入（粘贴 / 拖入共用）：插入 vault 协议 URL（显示用），
@@ -249,6 +267,22 @@ function MilkdownHost({
           if (!block) return;
           view.dispatch(view.state.tr.delete(block.from, block.to).scrollIntoView());
         },
+        /**
+         * 撤销一步。
+         *
+         * 为什么按钮不能直接派发 `keydown`：手机没有 Ctrl 键，而 history 的快捷键
+         * 只挂在 ProseMirror 自己的 DOM 上——点按钮时焦点在按钮上，键压根到不了编辑器
+         * （桌面端块菜单删块后 Ctrl+Z 无效，也是同一条原因）。所以这里直接调
+         * prosemirror-history 的 `undo`，并把焦点交回正文：撤完通常要继续打字，
+         * 手机上也能顺带把键盘带出来。
+         */
+        undo: () => {
+          const v = view;
+          if (!v || undoDepth(v.state) === 0) return false;
+          v.focus();
+          return undo(v.state, v.dispatch);
+        },
+        canUndo: () => (view ? undoDepth(view.state) > 0 : false),
       };
       onReadyRef.current?.(api);
 
@@ -469,6 +503,13 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   // 窄屏「插入块」抽屉：桌面端不需要（hover「+」够用），所以只在窄屏给入口
   const [insertMenu, setInsertMenu] = useState(false);
   const [modeMenu, setModeMenu] = useState(false);
+  /**
+   * 窄屏头部「撤回」按钮的置灰状态。
+   * 真源是 ProseMirror 的 undo 栈（`api.canUndo()`），这里只是它的 React 镜像：
+   * 每次 `markdownUpdated`（=每次真实 doc 变化，含撤销本身）后重算。不这么做就得
+   * 给编辑器装一个 update 回调，等于为了一个按钮改产品配置（见 product.ts 的约束）。
+   */
+  const [canUndo, setCanUndo] = useState(false);
 
   /**
    * 菜单的置灰状态。用 `planMove` **预演**而不是自己算索引：标题搬的是整节，
@@ -523,11 +564,12 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   }, [blockMenu]);
 
   // 切笔记 / 切模式会重建编辑器实例，旧实例的 ref 随即失效——菜单必须一起关，
-  // 否则会对着已经销毁的编辑器执行命令（静默无反应）。
+  // 否则会对着已经销毁的编辑器执行命令（静默无反应）；撤销栈同理，属旧实例。
   useEffect(() => {
     setBlockMenu(null);
     setInsertMenu(false);
     setModeMenu(false);
+    setCanUndo(false);
   }, [activePath, editorMode]);
 
   if (!activePath) {
@@ -571,17 +613,29 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           右端是自绘窗控（方案 A · 头部融合，design/direction-approved.md）。 */}
       <div
         onMouseDown={isLinuxDesktop ? dragWindow : undefined}
-        className={`flex items-center gap-2 py-2.5 ${
-          // 窄屏：左侧让出悬浮汉堡按钮（left-3 + 44px = 占 12~56px），
-          // 再留 16px 间隙 —— 原先 pl-14(56px) 让面包屑正好贴在按钮右边缘
-          narrow ? "pl-[72px] pr-2" : "px-4"
+        className={`flex items-center gap-0 py-2.5 md:gap-2 ${
+          // 窄屏：左侧让出悬浮汉堡按钮（left-3 + 44px = 占 12~56px），再留 8px。
+          // 三个 44px 按钮之间**不留 gap**（图标本身只有 18px，视觉间距来自按钮内边距，
+          // 已经够；2026-10-20 走查：4px gap 仍然挤标题）。
+          narrow ? "pl-16 pr-1" : "px-4"
         }`}
       >
         <div
           className="flex min-w-0 flex-1 items-center gap-1 truncate text-xs text-ink-3"
           title={activePath}
         >
-          <Folder size={13} className="shrink-0" />
+          {/* 窄屏：未保存只用一个压在文件夹图标角上的小圆点（见下），
+              不再占一整块「未保存…」的文字宽度——那 60 多 px 正是标题被挤掉的元凶 */}
+          <span className="relative shrink-0">
+            <Folder size={13} />
+            {narrow && dirty && (
+              <span
+                title="未保存"
+                aria-label="未保存"
+                className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-warn"
+              />
+            )}
+          </span>
           {crumbs.map((c, i) => (
             <span key={i} className="flex min-w-0 items-center">
               {i > 0 && <span className="mx-1 opacity-60">/</span>}
@@ -596,17 +650,39 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           ))}
         </div>
 
-        {dirty ? (
+        {dirty && !narrow ? (
           <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-warn">
             <span className="h-1.5 w-1.5 rounded-full bg-warn" />
             未保存…
           </span>
-        ) : savedAt && !narrow ? ( /* 窄屏头部拥挤，保存时刻省略，保留未保存警示 */
+        ) : savedAt && !narrow ? (
           <span className="flex shrink-0 items-center gap-1 text-[11px] text-ink-2">
             <Check size={12} className="text-ok" />
             已保存 {new Date(savedAt).toLocaleTimeString()}
           </span>
         ) : null}
+
+        {/* 窄屏「撤回」（2026-10-20 走查补）：手机没有 Ctrl 键，而 history 的快捷键只挂在
+            ProseMirror 自己的 DOM 上——不给按钮就等于没有撤销。只在所见即所得下渲染
+            （源码模式走 CodeMirror 自己的历史，这次不做）；阅读模式没有可撤的编辑。
+            置灰状态来自 `api.canUndo()`，经 `markdownUpdated` 每次 doc 变化后同步。 */}
+        {narrow && editorMode === "wysiwyg" && (
+          <button
+            type="button"
+            title="撤回"
+            aria-label="撤回"
+            disabled={!canUndo}
+            onClick={() => {
+              const api = editorApiRef.current;
+              if (!api) return;
+              api.undo();
+              setCanUndo(api.canUndo());
+            }}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-2 active:bg-canvas disabled:opacity-35 disabled:active:bg-transparent"
+          >
+            <Undo2 size={18} />
+          </button>
+        )}
 
         {/* 窄屏「插入块」入口（M8 批次 2）：补上桌面 hover「+」的等价能力。
             44px 触控目标只属于窄屏，桌面端不渲染（hover「+」够用，且头部已挤） */}
@@ -710,11 +786,14 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
               narrow={narrow}
               onReady={(api) => {
                 editorApiRef.current = api;
+                setCanUndo(api?.canUndo() ?? false);
               }}
               onBlockMenu={openBlockMenu}
               onChange={(md) => {
                 setContent(md);
                 scheduleSave();
+                // 每次真实 doc 变化后同步撤销栈（含「撤销」自身：撤到底后按钮要变灰）
+                setCanUndo(editorApiRef.current?.canUndo() ?? false);
               }}
             />
           ) : (
