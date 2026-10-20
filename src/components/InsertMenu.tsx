@@ -20,7 +20,7 @@ import { useDismissable } from "./useDismissable";
  * 「插入块」底部抽屉（M8 批次 2）——移动端补上桌面 hover「+」的等价能力。
  *
  * 为什么必须有它：窄屏没有 hover，Crepe 的 hover「+」与块手柄都靠 `pointermove` 悬浮显示，
- * 触屏一滚动就发 `pointercancel` 掐断（硬约定 13）——所以「插入标题/代码块」这条能力在手机上
+ * 触屏一滚动就发 `pointercancel` 掐断——所以「插入标题/代码块」这条能力在手机上
  * 完全够不着。输入 `/` 能唤出 Crepe 的斜杠菜单，但依赖键盘、且没人知道。
  *
  * 形态：**底部抽屉**（与块菜单同一套语言），触控目标 ≥44px。桌面端不需要它（hover「+」够用），

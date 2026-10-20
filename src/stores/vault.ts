@@ -30,7 +30,7 @@ interface VaultStore {
   collapsedDirs: Set<string>;
   /**
    * v0.5.1：侧栏分区展开状态（"favorites" | "trash" 在集合里 = 展开）。
-   * 默认收起（只展示 3 条 + 展开栏）；按 vault 持久化到 localStorage（硬约定 10）。
+   * 默认收起（只展示 3 条 + 展开栏）；按 vault 持久化到 localStorage（硬约定 3）。
    */
   expandedSections: Set<string>;
   /** 新建对话框状态（null = 关闭） */

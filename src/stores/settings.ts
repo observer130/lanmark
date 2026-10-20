@@ -89,7 +89,7 @@ export type SectionKey = "appearance" | "editor" | "storage" | "sync" | "about";
 /**
  * 外观写入的**唯一入口**：CSS 变量（字号/行距）+ `<html data-scheme>`（配色）
  * + `<html data-font>`（编辑区字体）。三者都只影响渲染、都不进编辑器 key
- * （硬约定 11）——合成一个函数是为了不可能出现「改了 state 却漏写某个属性」
+ * （外观不进编辑器 key）——合成一个函数是为了不可能出现「改了 state 却漏写某个属性」
  * 这类半应用状态。
  */
 const applyAppearance = (a: Appearance): void => {

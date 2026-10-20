@@ -9,7 +9,7 @@ import { OutlineList } from "./OutlineList";
  *
  * 调研结论（Obsidian / Bear / Craft / Notion）：手机上的目录入口应该是**一个按钮 + 面板**，
  * 而不是藏进侧栏。这里沿用 BlockMenu / InsertMenu 的抽屉语言：遮罩不挂 onClick、
- * 关闭只认 useDismissable 的 pointerdown，抽屉不监听 scroll/resize（硬约定 25）。
+ * 关闭只认 useDismissable 的 pointerdown，抽屉不监听 scroll/resize。
  */
 export function OutlineSheet({
   open,
@@ -27,7 +27,7 @@ export function OutlineSheet({
   closeRef.current = onClose;
 
   // Android 返回键：抽屉开着时先关抽屉，而不是退出应用。
-  // 原生只在前端上报 overlay 时才派发 lanmark:back（硬约定 14）；
+  // 原生只在前端上报 overlay 时才派发 lanmark:back（见 AGENTS.md 平台三坑）；
   // 这里必须在开/关时维护 handler，否则返回会直接把 App 杀掉。
   useEffect(() => {
     if (!open) return;

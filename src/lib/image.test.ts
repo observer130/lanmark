@@ -4,7 +4,7 @@
  * 这里钉住的是一个平台差异：Linux（WebKitGTK）从文件管理器拖过来的文件
  * `File.type` 常是**空串**（WebKit 不按扩展名猜 MIME）。历史上只看
  * `type.startsWith("image/")` 就会把正常 PNG 全滤掉，表现成「图片拖不进编辑器」
- * ——与硬约定 23 是同一类「拿 Chrome 的行为当所有平台的行为」的错。
+ * ——与外部拖入是同一类「拿 Chrome 的行为当所有平台的行为」的错。
  */
 import { describe, it, expect } from "vitest";
 

@@ -252,7 +252,7 @@ export const blockDragPlugin = $prose((ctx) => {
         const srcIndex = source;
         source = null;
         // 外部文件拖入：交给 EditorPane 的 drop 监听（图片落盘那条链）。
-        // 判据用 `files.length` 而不是 `types.includes("Files")`——后者在 WebKit 上不可靠（硬约定 23）
+        // 判据用 `files.length` 而不是 `types.includes("Files")`——后者在 WebKit 上不可靠（见 AGENTS.md 平台三坑）
         if (event.dataTransfer?.files?.length) return false;
         const slot = computeDropSlot(view, event.clientX, event.clientY, srcIndex);
         if (slot) {

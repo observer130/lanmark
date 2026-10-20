@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * 1. 枚举 → CSS 值映射（字号四档 / 行距）
  * 2. 应用与回滚链路（乐观更新、以 Rust 返回值为准、失败复原变量与外观属性）
  * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号/配色/字体会重建 Crepe
- *    实例，触发伪 markdownUpdated → 打开笔记被重写，硬约定 3）
+ *    实例，触发伪 markdownUpdated → 打开笔记被重写，硬约定 1）
  */
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -252,7 +252,7 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
   });
 });
 
-describe("editorKey：外观不得进入编辑器 key（硬约定 3 护栏）", () => {
+describe("editorKey：外观不得进入编辑器 key（硬约定 1 护栏：改外观不得重写笔记）", () => {
   it("只由路径 + 模式决定", () => {
     expect(editorKey("a/b.md", "wysiwyg")).toBe("a/b.md|wysiwyg");
     expect(editorKey("a/b.md", "read")).toBe("a/b.md|read");

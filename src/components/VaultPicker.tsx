@@ -29,7 +29,7 @@ export function VaultPicker() {
   const [showCustom, setShowCustom] = useState(false);
   /**
    * 「应用目录」的**真实**路径：必须问插件（`getExternalFilesDir` 按 applicationId 解析），
-   * 不能写死 `com.lanmark.app`——debug 包（`applicationIdSuffix = ".debug"`，见硬约定 27）
+   * 不能写死 `com.lanmark.app`——debug 包（`applicationIdSuffix = ".debug"`，见 AGENTS.md「真机调试」）
    * 与 release 包的路径不同，写死就会显示成另一个包的目录。取不到时退回不带路径的描述。
    */
   const [appDirPath, setAppDirPath] = useState<string | null>(null);

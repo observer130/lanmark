@@ -85,7 +85,7 @@ pub fn run() {
         // 日志：stdout（无头 E2E / 终端可见 WebView console）+ 日志文件。
         // debug 构建日志落仓库 .cache/logs：本机安全软件（勒索防护类）会拦截
         // 未签名 dev exe 写 AppData（CreateFile 直接 os error 5，release/CI 不受
-        // 影响——安装器路径有系统安装动作背书），且 .cache 归置符合硬约定 1。
+        // 影响——安装器路径有系统安装动作背书），且 .cache 归置符合仓库约定（工具链进 .cache/）。
         // release 仍是标准 LogDir（app_log_dir）。
         .plugin(
             tauri_plugin_log::Builder::new()

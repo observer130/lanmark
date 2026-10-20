@@ -4,7 +4,7 @@
  * 为什么自己写而不引 markdownlint / prettier / remark-lint：
  *  - markdownlint 是 linter，只有一小部分规则可 fix，且是 Node CLI；
  *  - remark-lint / prettier 会整篇 AST 重新 stringify，列表符号、强调符号、表格对齐、
- *    转义都可能被改写——直接威胁硬约定 3 的往返保真。
+ *    转义都可能被改写——直接威胁硬约定 1 的往返保真。
  *
  * 本模块只处理「语义无关的空白」：文末空行、行尾空格、连续空行、ATX 标题内空格。
  * 代码块 / frontmatter / 缩进行逐字保留；硬换行（行尾两个空格或 `\`）保留。

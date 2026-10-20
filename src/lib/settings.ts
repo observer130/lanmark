@@ -146,7 +146,7 @@ export const TRASH_RETENTION_OPTIONS: { key: number; label: string }[] = [
  * 把外观设置写进 `:root` 的 CSS 变量（M5 减法后只剩字号/行距两项）。
  *
  * **为什么走变量**：改字号绝不能重建编辑器实例——Crepe 建实例会发一次伪
- * `markdownUpdated`，若因此重跑就可能「改个字号把笔记重写一遍」（硬约定 3）。
+ * `markdownUpdated`，若因此重跑就可能「改个字号把笔记重写一遍」（硬约定 1）。
  * 变量只影响渲染，`MilkdownHost` 的 key 不受影响（见 `editorKey`）。
  */
 export function applyCssVars(a: Appearance, root?: HTMLElement): void {
@@ -162,7 +162,7 @@ export function applyCssVars(a: Appearance, root?: HTMLElement): void {
  *
  * **为什么不用 style.setProperty 逐个写色值**：那等于把设计 token 复制进 JS，
  * 与「色值只在 CSS、枚举映射只在 TS」的分工相悖（docs/09 §4.1）；改配色是一个
- * DOM 属性写入，同样不重建编辑器实例（硬约定 11）。
+ * DOM 属性写入，同样不重建编辑器实例（外观不进编辑器 key）。
  * 非法 key 的兜底在 Rust 归一化（`settings_patch` 返回值为准）+ TS 类型约束。
  */
 export function applyScheme(scheme: ColorSchemeKey, root?: HTMLElement): void {
@@ -181,7 +181,7 @@ export function applyScheme(scheme: ColorSchemeKey, root?: HTMLElement): void {
  * M7 编辑区字体：把 key 写成 `<html data-font="…">`，字体栈由 `index.css` 的
  * `:root[data-font=…]` 块给出（`sans` 无块 = `:root` 的内置 MiSans）。
  *
- * 与配色同理：只写属性不写字体串，也不重建编辑器实例（硬约定 11）；
+ * 与配色同理：只写属性不写字体串，也不重建编辑器实例（外观不进编辑器 key）；
  * 界面壳 `--font-sans` 不随这个属性变（字体只作用于编辑区，M5 D3 边界）。
  */
 export function applyFont(font: FontKey, root?: HTMLElement): void {
@@ -204,7 +204,7 @@ export const FONT_CACHE_KEY = "lanmark-font";
  *
  * 为什么需要它：`settings_get` 是异步 IPC，赶不上首帧——深色用户每次启动都会
  * 先闪一帧浅色（换字体同理）。`index.html` 的 <head> 内联脚本同步读这两个缓存，
- * 先把 `data-scheme` / `data-font` 落位。**真源仍是 AppConfig**（硬约定 10）：
+ * 先把 `data-scheme` / `data-font` 落位。**真源仍是 AppConfig**（硬约定 3）：
  * 缓存被清只退化为一帧闪白，不丢设置；隐私模式/配额满时静默忽略。
  */
 function writeAppearanceCache(key: string, value: string | null): void {

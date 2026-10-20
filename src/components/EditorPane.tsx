@@ -62,7 +62,7 @@ type LMDoc = LMView["state"]["doc"];
  * 这是一个回归护栏（docs/08 §4.4 / §9 R2）：外观设置（字体 / 字号 / 行距 / 行宽）
  * 一律走 CSS 变量，**绝不能进这个 key**。一旦进了 key，改字号会销毁重建 Crepe 实例，
  * 而 Crepe 建实例会发一次伪 `markdownUpdated` —— 打开着的笔记就被重写一遍
- * （硬约定 3「打开笔记不得重写文件」）。`settings.test.ts` 里有用例钉住这个契约。
+ * （硬约定 1「打开笔记不得重写文件」）。`settings.test.ts` 里有用例钉住这个契约。
  */
 export function editorKey(path: string, mode: string): string {
   return `${path}|${mode}`;
@@ -100,7 +100,7 @@ export interface EditorApi {
  * 把选区落到第 index 个顶层块上，使块级命令（移动/删除/插入）都作用在同一目标。
  * 分两种：文本块用光标落到块首（`TextSelection`），原子块（分割线、图片）用
  * `NodeSelection`——两者都能让 `currentTopBlockIndex` 解出同一个序号。
- * 只改选区、不改文档 ⇒ 不会触发 `markdownUpdated`（硬约定 3）。
+ * 只改选区、不改文档 ⇒ 不会触发 `markdownUpdated`（硬约定 1）。
  */
 function selectTopBlock(view: LMView, index: number): boolean {
   const block = topBlockAt(view.state.doc, index);
@@ -134,7 +134,7 @@ function MilkdownHost({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
 
-  // 「最新值 ref」：effect 依赖必须保持 `[]`（重建 Crepe = 重写笔记，硬约定 3），
+  // 「最新值 ref」：effect 依赖必须保持 `[]`（重建 Crepe = 重写笔记，硬约定 1），
   // 所以回调与 narrow 都经 ref 读取，不进依赖数组。
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
@@ -316,7 +316,7 @@ function MilkdownHost({
          * 跳到第 index 个顶层标题。
          *
          * 只 dispatch 选区事务 + 手算滚动位置：
-         *  - 不建事务去改 doc，所以不会触发 markdownUpdated（硬约定 3）；
+         *  - 不建事务去改 doc，所以不会触发 markdownUpdated（硬约定 1）；
          *  - 不用 `scrollIntoView`：WebKit 嵌套滚动容器上它会算错/静默失败，
          *    这里按 `.editor-host` 的矩形差直接设 scrollTop（标题顶边留 12px）。
          */
@@ -379,7 +379,7 @@ function MilkdownHost({
       /**
        * 块菜单的触发判定。
        *  - 窄屏（长按）：**任意位置**都开——移动端 WebView 没有可用的原生右键菜单，
-       *    而长按正文是这里唯一的块级入口（硬约定 13）。
+       *    而长按正文是这里唯一的块级入口（窄屏触屏约定）。
        *  - 桌面：只认「正文内容列左侧的留白」与「六个点手柄」两处，**不抢正文右键**——
        *    正文右键要留给 WebView 原生的复制/粘贴/查词菜单，全局抢占是实打实的回退。
        */
@@ -474,7 +474,7 @@ function MilkdownHost({
        * 那里 `dataTransfer.files` 才是可读的。
        *
        * 本机探针看不见这个问题：Chrome 在 `dragover` 就会报 `types: ["Files"]`
-       * （2026-10-13 Linux 桌面走查实测，与硬约定 23 同一条教训）。
+       * （2026-10-13 Linux 桌面走查实测，与外部拖入同一条教训）。
        */
       const onDragOver = (e: DragEvent) => {
         if (e.dataTransfer) e.preventDefault();
@@ -836,7 +836,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           </button>
         )}
 
-        {/* 收藏：**窄屏不渲染**（M8 批次 2）。理由：① 它只有 23px，违反硬约定 13 的窄屏
+        {/* 收藏：**窄屏不渲染**（M8 批次 2）。理由：① 它只有 23px，违反窄屏
             ≥44px；② 同一动作侧栏树行长按/右键菜单里已有（TreeView 的「收藏 / 取消收藏」），
             窄屏不算能力缺失；③ 385px 下腾出的 31px 让面包屑从 28px 回到 ~109px（可读）。
             桌面端保留：那里头部宽裕，且星标能一眼看出收藏态。 */}
@@ -854,7 +854,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         )}
 
         {/* 模式切换：桌面是阅读 / 所见即所得 / 源码三段内联；**窄屏收成一个 44px 按钮 + 抽屉**
-            （三段每段只有 31px，违反硬约定 13 的 ≥44px，且挤掉面包屑），见 ModeMenu 注释 */}
+            （三段每段只有 31px，违反 ≥44px 的触控目标，且挤掉面包屑），见 ModeMenu 注释 */}
         {narrow ? (
           <button
             type="button"
@@ -952,7 +952,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         </div>
       </div>
 
-      {/* 移动端「笔记目录」入口（M10）：不占窄屏头部（硬约定 13 已满），
+      {/* 移动端「笔记目录」入口（M10）：不占窄屏头部（头部已满），
           悬浮在编辑卡右下角；标题少于 2 个时没有目录价值，直接不渲染。 */}
       {narrow && !keyboardOpen && outlineItems.length >= 2 && (
         <button

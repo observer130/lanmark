@@ -54,7 +54,7 @@ function SectionLabel({ children }: { children: string }) {
 
 /**
  * 窄展开栏：收起时显示「展开全部 N 项」，展开后变「收起」。
- * 箭头随状态旋转给足反馈；触控目标 44px 仅窄屏（硬约定 13）。
+ * 箭头随状态旋转给足反馈；触控目标 44px 仅窄屏。
  */
 function ExpandRow({
   expanded,
@@ -267,7 +267,7 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
   };
 
   // 窄屏时抽屉容器已是 w-full；aside 用 w-full 填满，桌面保留固定 288px 栏宽。
-  // 硬约定 6：窄屏断点双源——这里用 Tailwind 的 md:（768px），
+  // 窄屏断点双源——这里用 Tailwind 的 md:（768px），
   // 与 App.tsx 的 useIsNarrow（<768）和 index.css 的 767.98px 同一阈值。
   return (
     <aside className="flex w-full shrink-0 flex-col border-r border-line bg-side md:w-72">
@@ -287,7 +287,7 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
             它与设置页那个按钮完全重复，而设置入口原先独占底部一整行横幅太占位置。
             重索引在开库与每回合同步时都会自动跑，这个按钮只在「外部程序改了
             vault 且不想等同步」时才需要，属低频操作，收进设置页更合理。 */}
-        {/* 触控 44px 仅窄屏；md: 恢复桌面紧凑尺寸（原 p-1.5，约 26px，硬约定 13） */}
+        {/* 触控 44px 仅窄屏；md: 恢复桌面紧凑尺寸（原 p-1.5，约 26px） */}
         <button
           title="设置"
           aria-label="设置"
@@ -303,7 +303,7 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
 
       {/* 桌面侧栏面板切换（Typora 式）：文件 / 大纲。
           窄屏强制文件面板——移动端的大纲入口是编辑器右下角悬浮按钮 + 底部抽屉，
-          不把目录藏进 85vw 抽屉（调研见 AGENTS / OutlineSheet 注释）。 */}
+          不把目录藏进 85vw 抽屉（调研见 OutlineSheet 注释）。 */}
       {!narrow && (
         <div className="px-3 pt-1">
           <div
@@ -404,7 +404,7 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
                   点击弹对话框（命名 + 选位置），不再「先建默认名再内联重命名」。
                   M4i：手机上这里是**唯一**的新建入口 —— 曾加过编辑器右下角的
                   悬浮按钮（FAB），但它悬在正文上挡字，且「新建」是导航/管理动作，
-                  属于侧栏而非编辑器，已移除。按钮触控尺寸 44px（硬约定 13）。 */}
+                  属于侧栏而非编辑器，已移除。按钮触控尺寸 44px。 */}
               <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
                 <span className="text-[11px] font-medium text-ink-3">笔记本</span>
                 <span className="flex gap-0.5">

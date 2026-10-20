@@ -1,259 +1,148 @@
 # AGENTS.md — Lanmark
 
 局域网优先的 Markdown 笔记：**手机 = 同步中心节点**（App 内嵌 axum 服务器），**桌面 = 客户端**（Win/Linux）。
-技术栈：Tauri 2 · React 19 · TypeScript 6（strict）· Vite 8 · Tailwind v4 · Zustand 5 · pnpm，一套 Rust core 跑三端。测试：vitest（jsdom，`src/**/*.test.ts`）+ `cargo test`。
+技术栈：Tauri 2 · React 19 · TypeScript 6（strict）· Vite 8 · Tailwind v4 · Zustand 5 · pnpm；Rust core 三端共用。
+测试：vitest（jsdom，`src/**/*.test.ts`）+ `cargo test`。
 
-> **本文定位**：只记**不随实现漂移的稳定约定与操作手册**，是面向 agent 的**唯一事实源**；具体行为一律**以代码为准**。
-> `README.md` 面向用户（功能/下载/首次使用），开发约定不进 README。
-> `docs/`、`design/` 是本地阶段稿，**已被 gitignore、不入库**：天然滞后于代码，且已与 M4 起的新决策有多处冲突（如已取消的扫码配对、已推翻的前台服务插件方案）。**读它会错**；拿不准时用代码与本文，并顺手更正本地稿。
+> **本文定位**：只记稳定的约定与操作手册，面向 agent；具体行为以代码与测试为准。
+> `README.md` 面向用户；`docs/`、`design/` 是本地阶段稿（gitignore、不入库），会滞后于代码，**不要当事实源**。
 
 ## 命令
 
 ```bash
-source scripts/env.sh            # 构建环境（Android / 交叉编译前必跑）；兼容 zsh/bash
+source scripts/env.sh            # 构建环境（Android / 交叉编译前必跑；兼容 zsh/bash）
 
-pnpm dev                         # vite 开发（仅前端，无 Tauri IPC）
-pnpm tauri:dev                   # 一键 tauri dev（跨平台分发：Windows→pwsh+env.ps1；Linux/macOS→env.sh+tauri dev）
+pnpm dev                         # 仅前端，无 Tauri IPC
+pnpm tauri:dev                   # 一键 tauri dev；跨平台（Windows→dev.ps1，Linux/macOS→env.sh+tauri dev）
 pnpm build                       # tsc + vite build（tsc 即类型门禁）
 pnpm test                        # vitest run
-pnpm vitest run -t "往返"         # 按用例名过滤
-pnpm vitest run src/lib/vault-url.test.ts   # 只跑单个文件
 
-cd src-tauri && cargo check      # Rust 静态检查
-cd src-tauri && cargo test       # Rust 测试
-cd src-tauri && cargo test --lib sync_server   # 按模块过滤
+cd src-tauri && cargo check
+cd src-tauri && cargo test
 
 scripts/android-check.sh         # Android 交叉编译门禁（不跑 gradle）
 ```
 
-**Windows 本机构建**（本机无全局 Rust/MSVC 时）：工具链已按硬约定 1 落在仓库 `.cache/`——
-`.cache\cargo`、`.cache\rustup`（rustup-init `-y --profile minimal --no-modify-path` 装 stable）与
-`.cache\vs-buildtools`（VS Build Tools，VCTools 工作负载 + Windows SDK）。pwsh 下先
-`. scripts/env.ps1` 再跑 `cargo`（它会捕获 vcvars64 的 INCLUDE/LIB/PATH 并缓存到
-`.cache\vcvars64.env`）；首次 `cargo check/test` 全量编译依赖树约十几分钟，之后增量秒级。
-`.cache\vs_BuildTools.exe` / `.cache\rustup-init.exe` 是安装器留存，删了不影响已装工具链。
-
-**`pnpm tauri:dev` 是跨平台的**（`scripts/dev.mjs` 分发：Windows → `scripts/dev.ps1`；Linux/macOS → `source scripts/env.sh` + `pnpm tauri dev`）。**别再把它写成 pwsh 专用**——曾直接写死 `pwsh -File scripts/dev.ps1`，非 Windows 上必报 `pwsh: 未找到命令`，把桌面 dev 入口堵死（2026-09-30 实测）。额外参数原样透传：`pnpm tauri:dev -- --no-watch`；`pnpm tauri:dev -- -- --appArg` 里第二个 `--` 会保留（tauri 用它标记 runner 参数起点）。
-
-**Windows 本机跑 dev 一律用 `pnpm tauri:dev`**（分发到 `scripts/dev.ps1`）：它除激活工具链外，
-还把 `WEBVIEW2_USER_DATA_FOLDER` 指到 `.cache\webview-profile`——本机安全软件会拦截
-**未签名 dev exe** 读写 `%LOCALAPPDATA%\com.lanmark.app`（WebView2 报 0x800700AA /
-0x8000FFFF「资源在使用中/灾难性故障」，日志写入报 os error 5；安装版有签名/信誉背书
-不受影响，CI 亦然）。dev 构建的日志同样因此落到 `.cache\logs`（lib.rs 按
-`cfg!(debug_assertions)` 分流，release 仍是标准 LogDir）。裸跑 `pnpm tauri dev` 会复现拦截。
-`vite.config.ts` 的 `watch.ignored` 必须同时忽略 `src-tauri` 与 `.cache`：TMP 指向
-`.cache/tmp` 时链接器临时文件会让 watcher 直接 EBUSY 崩掉 dev server（2026-10-07 实测）。
-
-**没有 lint / format 工具**：仓库无 ESLint / Biome / prettier / rustfmt / clippy 配置，`lint` 脚本不存在，别去找。静态门禁只有 `tsc`（strict + `noUnusedLocals`/`noUnusedParameters`/`noFallthroughCasesInSwitch`）与 `cargo check`。风格沿用既有文件：TS 双引号 + 分号 + 2 空格缩进；Rust 走 rustfmt 默认。
-
-**`/tmp` 只有 10M tmpfs（本机/沙箱），它会成为测试门禁的瓶颈**：Node 的编译缓存跑一次 `pnpm test` 就吃掉近 9M，紧接着 `cargo test` 里 `tempfile::TempDir` 建 SQLite 会成批报 `disk I/O error`（实测：先测前端再测 Rust，30 项必挂——正是硬约定 8 规定的顺序）。`scripts/env.sh` 已把 `TMPDIR` 指到 `.cache/tmp` 规避；没 source 时请按「先 `cargo test` 再 `pnpm test`」的顺序跑。之前 `env.sh` 只认 `BASH_SOURCE`，在 zsh 下会把仓库根算到上级目录、把整套缓存写到仓库外，**现已兼容 zsh**（找不到 `src-tauri` 会直接报错退出，不再静默写错位置）。
-
-Android 相关的非显然几条：
-
-- **任何 Android 构建前先 `source scripts/env.sh`**：JDK 21（本机 26 与 Gradle 8.14 不兼容）、ANDROID_HOME/NDK_HOME、`ANDROID_USER_HOME`（AGP 写 `~/.android` 会崩）、Java 强制 IPv4（直连 dl.google.com 会被重置）都在里面，缺了必挂
-- 打 debug APK（真机走查用）：
-  `source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`
-  产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
-  **它装成独立应用**（`com.lanmark.app.debug`，桌面名「Lanmark Debug」），与 release 版**共存**、
-  **不能**用 `adb install -r` 覆盖 release 版——这是刻意的，见硬约定 27
-- 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`（中文/图片/frontmatter + 验收清单），首启页「打开现有笔记库」指向它
-- 桌面 release 用 `scripts/lanmark-desktop.sh`（原生二进制；本机 AppImage 有 Intel Arc 兼容性问题）
-
-## 布局
-
-| 位置 | 内容 |
-|---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `BlockMenu`（块级操作浮层/底部抽屉：上移·下移·删除，三条触发路径见硬约定 13/17）· `InsertMenu` / `ModeMenu`（窄屏底部抽屉：插入块 / 编辑模式，见硬约定 13/21）· `OutlinePanel` / `OutlineSheet` / `OutlineList` / `useOutline`（M10 目录：桌面侧栏面板、移动端底部抽屉、共用行与当前标题高亮）· `useDismissable`（浮层统一关闭行为）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
-| `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量/外观属性 + 回滚）、`update.ts`（M5-4 更新检测：启动静默检查 + 手动检查，关于页展示）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）、`outline.ts`（M10 大纲跳转请求：path+item+seq，Sidebar/抽屉发请求，EditorPane 执行）；每个 store 旁有同名 `*.test.ts` |
-| `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（vault 协议 ↔ 相对引用换算；前缀随平台不同，见硬约定 3）、`frontmatter.ts`、`wikilink.ts`、`image.ts`（+`isImageFile`/`pickImageFiles`：拖入/粘贴的图片筛选，见硬约定 23）、`sync.ts`、`settings.ts`（枚举→像素映射的**唯一来源** + `applyCssVars`/`applyScheme`/`applyFont`；外观 = 配色 + 编辑区字体 + 字号/行距，色值与字体栈在 index.css）、`ime-anchor.ts`（Windows 缩放后输入法候选框跑屏幕左上角的护栏，见硬约定 15）、`bridge.ts`、`markdown-format.ts`（M10 保存整理：只动空白 + trimDocTail/compareKey，见硬约定 28）、`outline.ts`（M10 大纲提取：行首 ATX h1–h3，见硬约定 29） |
-| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/行间隙天然层级/整体升降级/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、行间隙落点、层级、指示线与父标题高亮，见硬约定 17/19/20）· `block-insert.ts`（插入块命令，见硬约定 21）· `highlight.ts`（荧光笔 `==文字==`：remark 切分 + mark + 命令/输入规则/快捷键/图标，见硬约定 22）· `roundtrip.test.ts`（往返保真护栏，M1 决策门）· `insert.test.ts`（插入块护栏）· `history.test.ts`（撤销护栏：窄屏「撤回」按钮直接调的就是 prosemirror-history，见硬约定 13）· `trailing.test.ts`（尾空段落护栏：trailing 插件首次选区事务会插空段落，规范化后不得产生落盘差异，见硬约定 28） |
-| `src/index.css` | 设计 token（`:root` = 浅色 + 默认字体；`:root[data-scheme=…]` 深色/纸页、`:root[data-font=…]` 宋体/楷体，再加 `@theme`）与**全部 Crepe / CodeMirror 主题覆盖**；顶部 `@import` 内置字体（见硬约定 16）；改编辑器外观或加配色/字体先来这里 |
-| `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/**vault 统计与回收站清理**）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `settings`/`settings_cmd`（M4a 设备级偏好：结构 + 归一化 + 白名单，与 vault 无关）· `alias`（M4h-4 设备代号：词表生成/归一化/AppConfig 持久化/进程内缓存，语义对标 LocalSend alias）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `lan_scan`（M4h-1 LAN 并发探测发现）· `update`（M5-4 GitHub release 更新检测：纯逻辑版本比较 + 24h 节流进 AppConfig，`update_check` 命令）· `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
-| `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
-| `scripts/` | `env.sh`（构建环境，必 source）· `env.ps1`（Windows 等价物：.cache 工具链 + vcvars64 捕获）· `dev.mjs`（`pnpm tauri:dev` 的跨平台分发器：Windows→`dev.ps1`，Linux/macOS→`env.sh`+`tauri dev`）· `dev.ps1`（Windows 分支：工具链 + WEBVIEW2_USER_DATA_FOLDER，见「Windows 本机构建」）· `android-check.sh`（交叉编译门禁）· `cdp-eval.mjs`（真机 CDP）· `make-demo-vault.sh` · `lanmark-desktop.sh` · `gen-icon.py` · `install-desktop-entry.sh` |
-| `patches/` | vendor 的依赖补丁（tauri-runtime-wry，tauri#15671），见硬约定 9 |
-| `licenses/fonts/` | 内置字体的许可文本与义务清单（OFL 全文 / MiSans 协议节选 / 各包 LICENSE），见硬约定 16 |
-| `.github/workflows` | `build.yml`（改动检查）· `release.yml`（三端发版） |
-| `.cache/` | 全部工具链与缓存（已 gitignore）：cargo/rustup、pnpm、JDK 21、Android SDK/NDK、gradle、QA 截图 |
-| `README.md` · `design/` · `docs/` | 面向用户说明 / 本地设计稿 / 本地阶段稿——后两者 gitignore 不入库，**读它会错**（见开头「本文定位」） |
+- **没有 lint / format 工具**：无 ESLint / Biome / prettier / rustfmt / clippy 配置，`lint` 脚本不存在。门禁只有 `tsc`（strict）与 `cargo check`。风格沿用既有文件：TS 双引号 + 分号 + 2 空格；Rust 走 rustfmt 默认。
+- **`/tmp` 只有 10M tmpfs**：`pnpm test` 的 Node 缓存会吃掉近 9M，随后 `cargo test` 的 SQLite 临时库会成批报 `disk I/O error`。`scripts/env.sh` 已把 `TMPDIR` 指到 `.cache/tmp`；没 source 时按「先 `cargo test` 再 `pnpm test`」跑。
+- **Windows 本机**：工具链在 `.cache/`（cargo/rustup/vs-buildtools），pwsh 下先 `. scripts/env.ps1`。dev 一律用 `pnpm tauri:dev`：它把 `WEBVIEW2_USER_DATA_FOLDER` 指到 `.cache\webview-profile`（安全软件会拦未签名 dev exe 读写 `%LOCALAPPDATA%\com.lanmark.app`），日志也落 `.cache\logs`。裸跑 `pnpm tauri dev` 会复现拦截。
+- **Android**：`source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`，产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。它装成独立应用 `com.lanmark.app.debug`（「Lanmark Debug」），与 release 共存。
+- 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`；桌面 release 用 `scripts/lanmark-desktop.sh`。
 
 ## 改动边界
 
 **总是**
 
-- 收尾跑 `pnpm test` 与 `cd src-tauri && cargo test`，成绩写进提交（见硬约定 8）
+- 收尾跑 `pnpm test` 与 `cd src-tauri && cargo test`，成绩写进提交
 - 新增工具链或缓存 → 落 `.cache/` 并由 `scripts/env.sh` 导出，不污染 `$HOME`
-- 改了构建流程 / 测试约定 / 目录结构 → **同一提交内**更新本文
+- 改了构建流程 / 测试约定 / 目录结构 → 同一提交内更新本文
 
 **先问**
 
-- 改 `src-tauri/gen/android/**` 与 `patches/**`——手工维护且是构建路径依赖，动错即 CI 三端挂
+- 改 `src-tauri/gen/android/**` 与 `patches/**`——手工维护且是构建路径依赖
 - 改往返保真链路：`src/components/EditorPane.tsx`、`src/lib/vault-url.ts`、`src/lib/frontmatter.ts`、`src/lib/wikilink.ts`
-- 改同步语义：LWW 裁决、tombstone 传播、端口策略（硬约定 5）
-- 改窄屏断点（硬约定 6 是 JS + CSS 双源，必须同步改）
+- 改同步语义：LWW 裁决、tombstone 传播、端口策略
+- 改窄屏断点（JS `innerWidth < 768` 与 CSS `767.98px` 两处必须同步改）
 - 加 / 升级依赖，尤其 `tauri-runtime-wry`（升级需重放 `patches/` 补丁）
 - 改发版产物矩阵或 `release.yml`
 
 **从不**
 
-- 删掉 `src-tauri/gen/android` 重新 init（会冲掉 SyncService / SAF 代码，见硬约定 2）
-- 把构建路径上的东西移进 `.cache/`（`patches/` 曾因此让 CI 三端全挂，见硬约定 9）
-- 把密钥 / keystore / `.env` 写进仓库（Android release keystore 只走环境变量；与 `patches/` 公开源码的性质相反）
-- 让 `db.rs` 的 SQLite 变成事实源——vault 下的文件才是（硬约定 4）
-- 打开笔记时重写文件（硬约定 3）
+- 删掉 `src-tauri/gen/android` 重新 init（会冲掉 SyncService / SAF 代码）
+- 把构建路径上的东西移进 `.cache/`（`patches/` 曾因此让 CI 三端全挂）
+- 把密钥 / keystore / `.env` 写进仓库
+- 让 `db.rs` 的 SQLite 变成事实源——vault 下的文件才是
+- 打开笔记时重写文件
 - 手改 `src-tauri/gen/schemas`（每次构建自动再生，已 gitignore）
 
 ## 硬约定
 
-1. **工具链与缓存一律进仓库 `.cache/`**（cargo/rustup/pnpm/JDK/SDK/gradle），不污染 `$HOME`；新增缓存照此办（`scripts/env.sh` 已处理，别绕过；`.gitignore` 已忽略 `.cache/`）。
-2. **`gen/android` 是手工改的，删目录重 init 会丢工作**：删掉重 init 会冲掉 SyncService/SAF 代码。
-    ⚠️ **但「手改安全」是错的**（2026-10-16 实测）：`pnpm tauri android build` 会**重新生成** `app/build.gradle.kts`——往里加的**语句会被抹掉**（注释会留下，极易误判成「改成功了」）。**正确做法**：改动放进**它不重写**的文件——新增 source set 文件（`app/src/debug/res/**`）安全；要给所有 debug 变体加配置就写在**根** `build.gradle.kts` 的 `subprojects { plugins.withId("com.android.application") { … } }` 里（`applicationIdSuffix` 就是这么加的，见硬约定 27）。
-    ⚠️ **别走「直接 `./gradlew :app:assembleXxx`」**：它的 `rustBuild*` 任务会调 `pnpm tauri android android-studio-script --target aarch64-linux-android`，而这个 CLI 版本只认短架构名（`aarch64`）→ 必失败（exit 134）。绕法（用一个只拦 `android-studio-script` 的 `pnpm` 垫片 + 先 `./gradlew --stop`）曾用过，但**既然根文件钩子能让标准命令生效，就别再维护那套绕法**。
-3. **往返保真是硬门槛**：打开笔记不得重写文件（Crepe 建实例会发一次伪 `markdownUpdated`，`EditorPane.tsx` 里 `MilkdownHost` 的 `lastKnownDoc` 基线专门压它）；frontmatter 与 wikilink 不进编辑器、保存时回填还原；图片显示走 vault 协议、落盘还原相对引用。动 `src/components/EditorPane.tsx`、`src/lib/vault-url.ts`、`src/lib/frontmatter.ts`、`src/lib/wikilink.ts` 前先看这些文件内的注释；护栏是 `pnpm test` 里的 roundtrip 与往返用例。
-    **协议前缀随平台不同（2026-10-20 真机走查定）**：桌面（WebView2 / WebKitGTK）是 `vault://localhost/<相对路径>`，**Android 必须用 `http://vault.localhost/<相对路径>`**——Android WebView 不认自定义 scheme 的子资源，`<img src="vault://…">` 直接 onerror（`naturalWidth=0`，界面上是破图 + alt），Tauri 在 Android 把自定义协议暴露成 `http://<scheme>.localhost`（真机实测同一文件换成 http 前缀即正常）。生成 URL 一律走 `vaultUrlPrefix()` / `toVaultUrl()`（`isAndroid()` 判定，见 `src/lib/platform.ts`），**保存前两种前缀都要剥**（`fromVaultUrl`/`vaultUrlsToRelative` 已同时认）——只剥一种会把 `http://vault.localhost/...` 写进 md，等于把相对引用写坏。
-4. **vault 文件是唯一事实源**；`src-tauri/src/db.rs` 的 SQLite 只是可重建索引（含正文搜索缓存）。任何「数据」改动先问文件侧怎么表达。
-5. **同步方向固定**：手机 = axum 服务器（`0.0.0.0:4180`，被占则 +1，见 `sync_server.rs` 的 `DEFAULT_PORT` / `spawn`），桌面 = 客户端；JSON over HTTP，文件级 sha256 版本对比；冲突按 **mtime LWW 裁决**（较新者留原路径、较旧者存为可见冲突副本），删除走 tombstone 传播——规则实现在 `sync.rs` / `sync_client.rs` / `sync_server.rs`。
-6. **窄屏断点是双源**：JS `useIsNarrow`（`innerWidth < 768`，`src/App.tsx`）与 CSS `@media (max-width: 767.98px)`（`src/index.css`），必须同步改。
-7. **Crepe 主题覆盖靠 specificity**：引入的是 `frame-dark.css`（仅变量块）+ common 规则，浅色「晨窗」全靠 `index.css` 更高优先级规则盖（如 `.editor-host .milkdown`）。新增覆盖要核对优先级；注释里标了已知漏覆盖点。
-8. **提交信息一律 `类型(可选范围): 中文简述`**（如 `fix(sync): 删除传播补 tombstone 时序`、`feat: M3b tombstone 删除传播`）；类型只用 feat/fix/perf/refactor/style/test/docs/build/ci/chore/revert，半角冒号 + 一个空格，简述不加句号。
-9. **构建路径上的东西必须入库，`.cache/` 只放可再生的缓存**：`patches/tauri-runtime-wry`（tauri#15671，仅 lib.rs 7 行差异，`[patch.crates-io]` 指向它）曾放 `.cache/` 导致 CI 三端全挂。升级该依赖时重拷 registry 原件 + 重放补丁，步骤见 `patches/README.md`。
-10. **设备偏好进 `AppConfig`，vault 级视图状态进 localStorage，笔记内容进文件**（M4a 定，docs/08 §4.1）：配色/字体/字号/行距/编辑器偏好/回收站策略都存 `app_config_dir/config.json`，**换库不该改变偏好**；折叠目录等跟库走的视图状态留 localStorage；`.lanmark/settings.json` 这种放 vault 里的做法是错的（会让设置随库漂移并卷进同步清单判定）。**唯一例外（M6c）**：外观 key 额外写一份 localStorage 作**首帧启动缓存**——`index.html` 的 `<head>` 内联脚本读它先把 `data-scheme`/`data-font` 落位，否则深色用户每次冷启动闪一帧白（读设置是异步 IPC、赶不上首帧；初始窗口来自 `tauri.conf.json`，没有建窗钩子可注入）。**真源仍是 AppConfig**：缓存被清只退化为一帧闪白，不丢设置；`applyScheme`/`applyFont` 是唯一写入点，与属性同步维护（M7 起是两个 key：`lanmark-scheme`/`lanmark-font`，**index.html 里的字符串必须与 `src/lib/settings.ts` 的常量一致**）。
-11. **外观设置只走 CSS 变量 / DOM 属性，绝不进编辑器 `key`**（M4b 定，docs/08 §9 R2；M6 扩到主题，M7 拆成配色 + 字体）：改字号/行距/配色/字体不得重建 Crepe 实例——建实例会发伪 `markdownUpdated`，等于把打开着的笔记重写一遍（硬约定 3）。`editorKey(path, mode)` 是这条的护栏函数，`settings.test.ts` 有用例钉住；写入点是 `src/lib/settings.ts` 的 `applyCssVars`（→ `:root` 变量）、`applyScheme`（→ `<html data-scheme>`）与 `applyFont`（→ `<html data-font>`），store 里统一经 `applyAppearance` 调用，**色值与字体栈只写在 `index.css` 的 `:root[data-scheme=…]` / `:root[data-font=…]` 块、JS 不持有色值也不持有字体串**。**配色与字体解耦**：两个属性覆盖的属性集不相交（颜色 token vs `--lanmark-font-text`），所以 3×3 组合天然成立，加新配色/字体只需加一个 CSS 块 + 一个枚举值；`light`/`sans` 故意不写块（`:root` 即默认，脏值/缺属性安全回落）。字体只作用于**编辑区**，界面壳 `--font-sans` 常驻不随动（M5 D3 边界，别再引入「界面字体」设置）。
-12. **应用图标改一处要改全套，UI 内品牌标走 `AppMark`**：图标有 4 处独立副本——`src-tauri/icons/`（Tauri 打包位图 + SVG + 桌面 entry 图标）、`scripts/gen-icon.py`、**`src/components/AppMark.tsx`**（界面内联矢量）、`public/app-icon.svg`（favicon）、`src-tauri/gen/android/**/mipmap-*`（Android 自适应层，手工维护）。a6a5a13 换图标时只换了前两处，界面里手写的「蓝底白 L」占位块漏改（就是这个 bug），**别再手写 `bg-accent` + 文字当 logo**。投影用 `index.css` 的 `.lanmark-appmark`（`filter: drop-shadow`），不用 `shadow-*`：那是 `box-shadow`，会按 svg 矩形边界投影，圆角外的透明四角露出直角阴影。`scripts/gen-icon.py` 必须与设计源 `icon.svg` 同步更新——它是「重跑即回退」的陷阱（旧版画的是白 L）。
+1. **往返保真是硬门槛**：打开笔记不得重写文件。Crepe 建实例会发一次伪 `markdownUpdated`，`EditorPane.tsx` 的 `lastKnownDoc` 基线专门压它；frontmatter 与 wikilink 不进编辑器、保存时回填；图片显示走 vault 协议、落盘还原相对引用。护栏：`src/milkdown/roundtrip.test.ts`。
+   **协议前缀随平台不同**：桌面是 `vault://localhost/<相对路径>`，**Android 必须用 `http://vault.localhost/<相对路径>`**（Android WebView 不认自定义 scheme 的子资源）。生成 URL 一律走 `vaultUrlPrefix()` / `toVaultUrl()`（`src/lib/platform.ts`）；保存前两种前缀都要剥（`fromVaultUrl` / `vaultUrlsToRelative`），只剥一种会把 http URL 写进 md。
 
-13. **移动端（窄屏）UI 按触屏做，不做「桌面布局缩小版」**（M4i 定）：触控目标 **≥44px**（树行 / 搜索框 / 菜单项 / 图标按钮）——**44px 只属于窄屏**：类名写移动优先的 `min-h-[44px]` / `h-11`，再跟 `md:` 前缀恢复桌面紧凑高度（Tailwind v4 默认 `md:` = 768px，与硬约定 6 的断点一致；28eed13 只给新建按钮加了 `md:`、树行/搜索框/菜单项/齿轮漏加，桌面端被连带放大，已修）。手机上**没有 hover**，依赖 `group-hover` 的控件等于不可达——行级操作走**长按 `contextmenu`**（真机实测 WebView 长按会派发该事件）。**编辑器里的块级操作同理**：Crepe 的左侧「+」与六个点手柄靠 ProseMirror `pointermove` 悬浮显示，触屏一进入滚动、浏览器就发 `pointercancel` 掐断 `pointermove`，手柄等于不可达——所以块操作在窄屏走长按唤出 `BlockMenu`（`src/components/BlockMenu.tsx`），**别指望把手柄样式改大就能用**（M8 G2）。侧栏在窄屏是 **85vw 半屏抽屉 + 遮罩**（Gmail / Obsidian Mobile 式，此前是全屏铺满，右侧无可点遮罩区，是「像桌面端」的根因）。**新建入口留在侧栏「笔记本」标题右侧**（M4i：曾加过编辑器右下角 FAB，因悬在正文上挡字、且「新建」属导航/管理动作而非编辑器行为而移除——别再加回来）。
-    返回手势：**有浮层先关浮层，没有就正常退出**，**不做「再划一次退出」**——两段式是把侧栏当一级菜单页的设计，半屏浮层下不成立（M4i 中途推翻）。
-    `src/index.css` 的窄屏块里有三条手机端适配（去点击高亮蓝块 / `overscroll-behavior: contain` / `text-size-adjust`），别顺手删。
-    **窄屏头部（编辑器页头）的实测布局**（M8 批次 2 定；2026-10-20 加「撤回」后 385px 仍不溢出）：塞得下的是「面包屑 + 撤回 + 插入块「+」+ 编辑模式 + Linux 窗控」；**别再往这里加东西**。两处刻意的取舍：① 模式切换在窄屏**收成一个 44px 按钮 + 抽屉**（`ModeMenu`）——原来三段内联每段只有 31px，本身就违反本条的 ≥44px，而且挤掉面包屑；② **窄屏不渲染「收藏」星**——它只有 23px、且同一动作侧栏树行的长按/右键菜单里已有，省下的 31px 让面包屑从 28px 回到 ~109px（28px 约等于一个字，等于没有）。Linux 窗控那三个 ~26px 的按钮不动：那是桌面标题栏惯例、Android 上不存在。
-    **「撤回」按钮（M9 走查补）**：手机没有 Ctrl 键，而 history 的快捷键只挂在 ProseMirror 自己的 DOM 上（点按钮时焦点在按钮上，键根本到不了编辑器）——所以窄屏头部给一个 44px 按钮，点击时直接调 `prosemirror-history` 的 `undo` 并把焦点交回正文。**只在所见即所得下渲染**：阅读模式没有可撤的编辑；源码模式走 CodeMirror 自己的历史（本次没做，要做得先把 `@codemirror/commands` 加为直接依赖，现在它只是传递依赖）。置灰由 `undoDepth` 驱动、经 `markdownUpdated` 在每次 doc 变化后同步；无历史时 disabled。为腾位置做了三件事（2026-10-20 二轮走查「还是挤标题」）：① 窄屏 header 间距 `gap-2` → **0**（`md:gap-2` 恢复桌面），左侧留白 72→64px、右侧 8→4px；② **未保存提示在窄屏收成一个 6px 圆点**、压在文件夹图标右上角（原来「未保存…」文字要占 ~65px，这是标题被挤掉的另一半原因；桌面仍保留文字）；③ 三个按钮仍是 **44px 触控目标**，只是彼此贴合。Android UA / 385px 实测：面包屑可用宽度 209 → **185px**（脏时也是 185，不再被提示文字吃掉），`scrollWidth == clientWidth`，长笔记名「未命名走查笔记.md」可完整显示。**再想更紧就只能缩按钮宽度（破 ≥44px 约定）**，别偷偷缩。**这条按钮顺带绕开了「块菜单删块后 Ctrl+Z 无效」**——菜单一关焦点落在 body，快捷键失效，但按钮不看焦点（`.cache/probe-mobile-undo.mjs` 实测：删块 → 点按钮 → 整块恢复）。重做仍只有桌面 `Ctrl+Shift+Z` / `Ctrl+Y`，窄屏暂无入口。
-14. **Android 返回键要拦两条路，且事件不走插件通道**：`generated/TauriActivity.kt` 把 `handleBackNavigation` 覆盖成 **false**，返回默认直接 finish、前端收不到任何事件。自拦时必须同时覆盖 **`OnBackPressedCallback`** 与 **`dispatchKeyEvent`**——部分 ROM（真机 2510DRK44C / Android 16 的 MIUI）把返回键转成广播 `miui.intent.KEYCODE_BACK`，**不派发给 `OnBackPressedDispatcher`**，只注册回调根本不触发。
-    原生→前端的事件**不要用 `addPluginListener`**（实测注册后 Kotlin 侧 `hasListener=false`，事件永远收不到），改在插件里持 WebView 用 `evaluateJavascript` 派发 DOM CustomEvent（见 `BackPlugin.kt` / `src/stores/back.ts`）。
-    Kotlin 纯逻辑单测放 `gen/android/app/src/test/java/`，跑法：`source scripts/env.sh && cd src-tauri/gen/android && ./gradlew :app:testUniversalDebugUnitTest`（注意是 **universal** 变体，`testDebugUnitTest` 会因多 flavor 歧义报 ambiguous）。
-15. **Windows 缩放窗口后输入法候选框跑到屏幕左上角，靠 `src/lib/ime-anchor.ts` 重锚焦点；别「简化」那 60ms**：WebView2 宿主窗口被**真实拖拽缩放**后（鼠标拖边框；`SetWindowPos` 这类程序化改尺寸不复现、真实移动窗口也不复现），浏览器进程侧的 TSF 文本库丢了 caret 布局，候选框与预编辑浮到屏幕原点且**不自愈**——直到发生一次真正的焦点转移（用户说的「点别处再点回来就好了」就是它）。上游记录 MicrosoftEdge/WebView2Feedback#5675，复现环境就是本仓库这套 tauri / wry / webview2 154，Edge/Chrome 不复现。护栏做法：窗口尺寸稳定后（防抖 120ms）把当前可编辑元素重锚一次——`blur()` → **等 60ms** → `focus({preventScroll:true})` + 还原选区与滚动。**实测结论（别再试更「干净」的替代）**：同一任务内同步 `blur+focus`、`setTimeout(0)`、只调 `focus()`、只挪 DOM 选区，全部无效；`setTimeout(0)` 在所见即所得（ProseMirror）够用、**源码模式（CodeMirror 6）不够**，故统一钉 60ms。合成中输入法不打断（等 `compositionend` 再补），且只在 Windows/WebView2 上装（Linux WebKitGTK / macOS WKWebView 的输入法行为不同，不替它们做这个动作）。复核手法：拖窗口边框缩放后立刻用微软拼音打字，看候选框是否仍贴在光标下方（真机 CDP + `SendInput` 注入；本机探针脚本在 `.cache/`，已 gitignore 不入库）。
+2. **vault 文件是唯一事实源**；`src-tauri/src/db.rs` 的 SQLite 只是可重建索引。任何「数据」改动先问文件侧怎么表达。
+   同步方向固定：手机 = axum 服务器（`0.0.0.0:4180`，被占则 +1），桌面 = 客户端；文件级 sha256 版本对比，冲突按 **mtime LWW**（较新者留原路径、较旧者存可见冲突副本），删除走 tombstone。**任何裁决都不丢弃内容**：删除先进回收站，冲突输家必留副本。
 
-16. **字体随应用内置（npm 包 + 钉死版本），许可义务落在 `licenses/fonts/`**（M6d 定）：编辑区字体来自 `misans` / `@fontsource/noto-serif-sc` / `lxgw-wenkai-screen-webfont` / `@fontsource/jetbrains-mono`，在 `index.css` 顶部 `@import`，**版本号不带 `^`**（字体包的目录结构与切片范围随大版本变）。**MiSans 的协议要求「在软件中特别注明使用了 MiSans」——「设置 → 关于」页那行字体署名不能删**；不得改编 MiSans 字体、不得单独分发/售卖字体文件（随 App 分发是明确允许的）。`@fontsource` 每个切片都带 `woff` 回退，由 `vite.config.ts` 的 `stripWoffFallback()` 在构建期剥掉（实测省 226 个文件 ≈7.7MB；三端 WebView 都支持 woff2）。**加新字体前先读 `licenses/fonts/README.md`**。
+3. **设置存放分层**：设备偏好（配色/字体/字号/行距/回收站策略）进 `AppConfig`（`app_config_dir/config.json`），换库不变；跟库走的视图状态（折叠目录等）进 localStorage；笔记内容进文件。**不要**把设置放 `.lanmark/settings.json`（会随库漂移、卷进同步清单）。唯一例外是外观 key 额外写一份 localStorage 作首帧缓存（`index.html` 内联脚本先落 `data-scheme`/`data-font`，防深色闪白）；真源仍是 AppConfig，key 名必须与 `src/lib/settings.ts` 常量一致。
 
-17. **`tauri.conf.json` 的 `dragDropEnabled` 必须保持 `false`，别再加回来**（M8 定）：该字段默认 `true`，开启时 wry 会调 `SetAllowExternalDrop(false)` 并注册原生拖放处理器（`wry-*/src/webview2/mod.rs`），WebView2 从此**不再向页面派发 HTML5 拖放事件**；而 Crepe 的块手柄只走 HTML5 拖放（`@milkdown/plugin-block` 挂 `dragstart` + ProseMirror `handleDrop`），症状就是「六个点拖不动」。Tauri 官方文档原话：*Disabling it is required to use HTML5 drag and drop on the frontend on Windows.* 关掉之后**平台层不再拦**（wry 只是不去接 `with_drag_drop_handler`，WebKitGTK 的默认 HTML5 拖放照常工作）——但**前端还得自己接得住**，见硬约定 23；`src/lib/image.ts` 的 `uploadFile` 只吃 `File` 对象、不需要路径。**别为外部文件改回 `onDragDropEvent`**：它是互斥方案——拿到文件路径的代价就是掐掉内部拖拽（tauri#15138）。
-    拖拽**不能**是块移动的唯一通路，而且**拖放的落点由我们自己接管**（`src/milkdown/block-drag.ts`）：ProseMirror 内建的 `view.dragging` 链在部分 WebView 上会断，断掉后它回退成「从 `dataTransfer` 解析 HTML 再插入」——**源块不删、目标处多一份**，也就是「拖了变成复制」。别把 `handleDrop` 交回去，那等于把复制 bug 请回来。**Linux 也受影响，别以为这条只对 Windows 有意义**（2026-10-13 本机 Linux/KDE 实测）：`true` 时用户报「六个点拖动无效」，改成 `false` 后同一台机器拖拽立即有反应（先是复制，去掉对 `view.dragging` 的依赖后才是移动）。**外部拖入图片在三端仍待复核**——改这里之后 Windows 与 Linux 都要真机走一遍「拖拽」与「拖入图片」两件事。
+4. **构建三禁忌**：
+   - `gen/android` 是手工维护的，但 `pnpm tauri android build` 会**重新生成** `app/build.gradle.kts`，往里加的语句会被抹掉（注释会留下，极易误判成「改成功了」）。配置写进 `src-tauri/gen/android/build.gradle.kts`（Android 工程根）的 `subprojects` 钩子（`applicationIdSuffix` 就是这么加的），或新增 `app/src/debug/res/**` 这类不被重写的文件。别直接跑 `./gradlew :app:assembleXxx`（`rustBuild*` 会调只认短架构名的 CLI，必失败）。
+   - 构建路径上的东西必须入库：`patches/tauri-runtime-wry`（tauri#15671）曾放 `.cache/` 导致 CI 三端全挂；升级时重拷原件 + 重放补丁，见 `patches/README.md`。
+   - `tauri.conf.json` 的 `dragDropEnabled` **必须保持 `false`**：开启后 WebView2 不再向页面派发 HTML5 拖放事件，Crepe 手柄拖不动，且会退化成「拖了变复制」。外部文件拖入另走 `dragover` + `dataTransfer.files`。
 
-18. **Crepe 的 feature 开关与 feature 配置是两个字段，别混**（M8 定）：开关走 `new Crepe({ features })`，配置走**独立的 `featureConfigs`**。把 `{ buildToolbar }` 之类塞进 `features[CrepeFeature.Toolbar]` 会**静默无效**——不报错、不生效，界面上只是少了个按钮（2026-10-13 实测踩过）。产品配置的唯一来源是 `src/milkdown/product.ts`：`EditorPane.tsx` 与往返护栏测试都经 `createProductCrepe` 建实例，**别再各自抄一份 feature 表**（两边漂移时护栏会失效）。同理，给编辑器加自研插件只经 `PRODUCT_PLUGINS` 注册。
+5. **平台三坑**（真机 / 桌面 WebView 才复现，Chrome 探针永远绿）：
+   - **Android 返回键要拦两条路**：`OnBackPressedCallback` 与 `dispatchKeyEvent`（部分 ROM 把返回转成广播，不走 dispatcher）。原生→前端事件**不要用 `addPluginListener`**，用 `evaluateJavascript` 派发 DOM CustomEvent。Kotlin 单测跑 `./gradlew :app:testUniversalDebugUnitTest`（universal 变体）。
+   - **外部文件拖入**：`dragover` 一律 `preventDefault`，**绝不用 `types.includes("Files")` 判断**——WebKit 系在该阶段不暴露 Files，不 preventDefault 则 `drop` 根本不派发；过滤放到 `drop`。
+   - **Windows 缩放窗口后输入法候选框跑到屏幕左上角**：`src/lib/ime-anchor.ts` 用 `blur()` → **等 60ms** → `focus()` 重锚；别简化这个间隔（`setTimeout(0)` 对 CodeMirror 不够），且只在 Windows/WebView2 上装。
 
-19. **块移动的语义是「标题 = 一节」：整节搬 + 可升降级；移动原语只有一份**（M8 定）：`src/milkdown/block-move.ts` 是**唯一**的移动原语，块菜单、`Alt-↑/↓`、拖放三条路都走它，别各写一套。
-    - **单元长度**（`unitLengthAt`）：标题连同它下属的内容，直到下一个**同级或更高级**标题为止；其余块恒为 1。所以拖一个 h2 会带走它的段落、列表与更深的 h3。
-    - **标题只与同级节交换**：上移时跳过更深的标题、遇到更高级标题就停（那说明它已是父节的第一节，再上移等于把它「提升」出父节）；下移时若下一节更高级也停。不这么限，就会把别的节的内容悄悄改归它管。
-    - **非标题单元**（段落/列表/代码块等）仍是**逐块**移动（上半区插到它之前、下半区插到它之后），这样节内段落重排不会被放大成整节跳动；**标题单元**另有层级语义，见硬约定 20。
-    - **命中判定与坐标定位必须同一口径**（`topBlockIndexFromPoint`）：右键/长按/落点常常落在正文之外（左侧槽位、`.ProseMirror` 自身 padding、手指偏出文本列），`posAtCoords` 在那里**直接返 null**——横向出内容列时只按纵向定位、横向取内容列中线。分开写两份必然漂移，表现成「点了没反应」。
-    - 菜单置灰用 `planMove` **预演**（`moveUnitTo` 传 `undefined` dispatch），别在 UI 里重算索引。
-    - **落点指示线**（`computeDropSlot` 一个函数同时产出「插入序号」与「线的位置」）：拖拽时必须让用户看见精确落点，且**线画在哪就必须落在哪**——判定与画线分成两份必然漂移，变成「线在这儿、东西落在别处」，比没有线更糟。落点算出来是「不动」时**不画线**，让「这里放不下」也有反馈。
-    - **手柄拖拽一律由本插件给结论（`handleDrop` 必须返回 true）**：只有它不是手柄拖拽（正文选字 / 外部文件）时才返回 false。曾在这里 `return moved !== null`，于是「落点算出来无操作」时把 drop 交回 prosemirror-view 的内建路径，而它只搬**单个节点**——表现就是「拖标题只搬标题」（2026-10-13 走查反馈）。**别再让它有机会接手。**
-    - 别改用 ProseMirror 的 `dropCursor`（`CrepeFeature.Cursor`）当指示线：它按 `dropPoint` 画在**块级**位置，而这里的落点带**节层级**语义（见硬约定 20），拖标题时两者必然不一致。
+6. **提交信息一律 `类型(可选范围): 中文简述`**（如 `fix(sync): 删除传播补 tombstone 时序`）；类型只用 feat/fix/perf/refactor/style/test/docs/build/ci/chore/revert，半角冒号 + 一个空格，简述不加句号。
 
-20. **标题拖拽 = 行间隙 + 层级；落点不折叠、层级取该间隙的天然值**（M8 定）：markdown 的标题是**显式层级**（`##`/`###`）而不是容器，节边界由「最近的上层标题」决定。
-    - **落点就是顶层块之间的行间隙**（`computeDropSlot`）：上半区插到该行之前、下半区插到该行之后——**每一行之间都能插入**。层级由 `naturalLevelAtGap`（纯逻辑、有用例）给出：间隙后是标题 M → 与它**同级**（M）；间隙后是正文或文末 → 成为**所属节**的子节（P+1，P = 最近的上层标题）。P+1 同时也是**吞得最少**的层级（该节会在下一个比 P 更深的标题处就结束）。
-    - ⚠️ **别把落点折叠到节末**。曾以「插入标题必然把后面内容划进新节」为由，把整节内容区的落点折到该节末尾，结果一篇「H1 + 两个 H2」的文档里除标题行外**全部指向文末**，用户只能拖到两处（2026-10-13 走查判定不可用）。**吞并是 markdown 的固有语义**（手打一个标题在那里也一样），不能用牺牲落点精度来回避。
-    - **主动作**：落在标题**下半区** = 放进该节**末尾**、成为它的最后一个子节（降一级，**整块高亮该标题**）。落节末而不是紧跟标题之后，是为了不把该节原有正文挤到新区块之下——这是唯一一处刻意不做「行间隙」的手势。
-    - **落在自己身上 = 不动**（`computeDropSlot` 里显式返回 null，判据是**间隙**落在 `[srcIndex, srcIndex+unitLength]`）：否则「拖歪一点、松手落在自己正文上」就会被降级。
-    - **升降级要整体平移**：被移动节内的**所有**标题按同一差值调整（`shiftHeadingLevels`），夹在 1..6。`###` 提到 `##` 时它下面的 `####` 也要跟着变 `###`，否则节内相对层级被压平。
-    - **不做横向拖动映射层级**——本编辑器标题不缩进（没有横向刻度可对齐），且手柄在左侧、指针自然落在文本右侧，横向映射会导致「永远最深层级」。
-    - **刻度起点 = 文档里最浅的「大于 `#`」的那一级**（`outlineBaseline`，纯逻辑 + 用例）：`#` 在笔记里是**文档标题**，`##` 及以下才是分节 → `##` = 第 0 格、**贴着内容列左边缘**，`###` = 1 格…；文档里没有 `##` 及以下时退化取 `##`。**这是绝对约定，不许看 `#` 出现了几次**：
-      - 最初用「绝对层级 − 1」→ `##` 落在第 2 格、圆点明显偏右（走查：视觉误导）。
-      - 改成「全篇恰好一个 `#` 才算文档标题」→ 用户那篇测试文档里 `# 测试` 与 `# Hello world!` 都是 H1（两个），判据直接不成立，刻度毫无变化（走查：**真机验收不通过**）。**踩过两次的计数判据不要再回去用。**
-    - **刻度只决定指示线画在哪，不改变落点层级**（`naturalLevelAtGap` **不**收口到起点）：否则拖动一个已有的 `#` 块会被强制降成 `##`。代价是 `#` 与 `##` 共用最左格——在「`#` 是文档标题」的文档里，落点在 `#` 之前的场景本就无意义。
-    - **指示线同时表达位置与层级**：线画在**它将要插入的那一块的顶边**（`gapY`；不用上一块的底边——标题自带 24px 下边距会让线浮在空白里），**左端缩进与圆点横向位置 = 落点层级**（每深一级 +22px，`INDENT_PX`，超出时不画在内容列左侧之外）；「放进某节」时 `lanmark-drop-parent` 高亮父标题块。算出来是「不动」时**线不画、高亮不出**。
+## 环境与平台笔记
 
-21. **「插入块」菜单（窄屏头部「+」）的两条不变量**（M8 批次 2 定）：执行层在 `src/milkdown/block-insert.ts`，逐条命令组合对齐 Crepe 同版本的斜杠菜单，**但有两处刻意不同**：
-    - **不许抄 `clearTextInCurrentBlockCommand`**。Crepe 斜杠菜单每条命令前都挂它（用来抹掉用户敲的 `/h2`），照抄会把**当前块的正文整段删掉**——我们的菜单是点按钮打开的，当前块里是用户的字。文本类用 `setBlockTypeCommand` / `wrapInBlockTypeCommand`（转换当前块、保留文字）。
-    - **块类（分割线/表格/公式）不要用 `addBlockTypeCommand`**（= `replaceSelectionWith`）：光标在「你好」中间时会得到 `你` + 块 + `好`，**把正文劈成两半**。它们走 `insertBlockAfterCurrent`（在当前顶层块**之后**新增一块），与桌面 hover「+」的「在下方插入」语义一致。
-    - 菜单只列**标题 1–3**：窄屏抽屉里 h1–h6 六项太长，而 h4–h6 极少用（需要时 `Ctrl+1..6` 或源码模式）。真机走查觉得不够再加。
-    - 浮层的关闭行为（Escape / 点外部 / 滚动 / 缩放）统一走 `src/components/useDismissable.ts`——块菜单、插入抽屉、模式抽屉三处**不要各写一份**，否则必然漂移成「某个菜单按 Esc 关不掉」。
+**`.cache/` 被清后重建（`scripts/env.sh` 承接不住的部分）**
 
-22. **荧光笔是 `==文字==`，解析不走 micromark**（M8 批次 3 定）：实现全在 `src/milkdown/highlight.ts`，注册进 `PRODUCT_PLUGINS`，工具条按钮在 `product.ts` 的 `PRODUCT_FEATURE_CONFIGS`。
-    - **别给 `==` 手写 micromark 分词器**。`~~删除~~` 那种要词法层识别，但荧光笔只要在 mdast 建好后**事后切分 `text` 节点**就够了（`remarkHighlight` 插件 → `lanmarkHighlight` mdast 节点 → mark 的 `parseMarkdown`/`toMarkdown` 双向映射）。手写分词器的定界符规则极易写错，而错了就是**往返损坏**（硬约定 3，本仓库最不能出的问题）。
-    - **正则的形状是有约束的**：分隔符必须用**反向引用**（`\1`）而不是第三个捕获组——`markRule` 取**最后一个捕获组**当「要加标记的内容」，多一个捕获组就会把分隔符当成内容。切分用第 1 组（内容）。
-    - **递归切分时必须跳过 `inlineCode` / `code` / `html` 子树**，否则代码块里的 `==x==` 会被当成语法吃掉。
-    - **已知边界**（有意接受，别当 bug 修）：不支持跨行内节点，所以 `==**粗**==` 不会高亮；`== 文字 ==`（内侧贴空格）与 `a == b` 都**不**判为高亮。
-    - **两个既有行为已用用例钉住**：① 段落行首的 `==文字==` 在没有本功能时会被 `remark-stringify` 加反斜杠转义（因为 `=` 可起 setext 下划线）——本功能**顺带修好了**它；② 行首 `\== 文字 ==`（不构成高亮的那种）仍会被转义，**非本功能引入**。
-    - **CSS 里的 `color: inherit` 不能删**：色值走 `--c-mark`，在 `:root` / `[data-scheme="dark"]` / `[data-scheme="paper"]` 三块各给一个（浅色暖黄 / 深色低饱和琥珀 / 纸页沙金）；规则用 `.editor-host .milkdown .ProseMirror mark` 压过 Crepe 默认（硬约定 7）。frame 给 `mark` 设了自己的文字色，不继承就是**深色下黑底黑字**。
+- **Android SDK 是 curl 手工组装的**，不是 sdkmanager 装的：本网络下 Java 直连 `dl.google.com` 会被重置（curl 正常）。流程：`repo.xml` 查文件名 → curl 取 zip（NDK r27d、cmdline-tools、platform-tools、build-tools 34、platform 34/36）→ 解压成 `platforms/`、`build-tools/`、`ndk/`、`cmdline-tools/`、`platform-tools/` 标准布局 → **手写 `licenses/`**（否则 AGP 报 license 未接受）。
+- **Gradle 镜像**：`.cache/gradle/init.d/mirrors.gradle` 把 `google()` / `mavenCentral()` 前置到阿里云（google/public；`buildscript` 另加 gradle-plugin）；分发包走腾讯镜像（`gen/android/gradle/wrapper/gradle-wrapper.properties`）。
+- **不要同时设 `ANDROID_USER_HOME` 与已弃用的 `ANDROID_SDK_HOME`**（路径语义不同，AGP 报 `AndroidLocationsException`）；只设前者。
+- 改了环境变量但 gradle 行为没变 → daemon 缓存旧环境：`cd src-tauri/gen/android && ./gradlew --stop`。
+- `app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`（AGP 8.11 默认 35，本网络下不下来）。
+- 桌面勿发 AppImage（本机 Intel Arc 上 WebKit 子进程 SIGABRT，`EGL_BAD_PARAMETER`）；走 `scripts/lanmark-desktop.sh`。
 
-23. **外部文件拖入：`dragover` 一律 `preventDefault`，绝不用 `types.includes("Files")` 判断**（M8 走查定）：这是**第二次**踩「拿 Chrome 的行为当所有平台的行为」。用户 Linux 桌面走查报「外部图片无法拖入」，而本机 Chrome 探针一切正常。
-    - **根因**：`dragover` 阶段 WebKit 系（Linux 的 WebKitGTK / Safari）**不暴露** `"Files"`——文件拖拽只报 `text/uri-list`，有时连 `types` 都是空的。只在 `types` 含 `"Files"` 时才 `preventDefault`，浏览器就判定「这里不接受拖放」，**`drop` 事件根本不派发**。Chrome 在 `dragover` 就会报 `types: ["Files"]`，所以探针看不见。
-    - **正确写法**：`dragover` 里 `e.dataTransfer && e.preventDefault()`（一律接受）。`dragover` 阶段**没有任何可靠办法**判断这次拖拽带不带文件，穷举 `types` 的取值只是又一次猜测；真正的过滤放在 `drop`——那里 `dataTransfer.files` 才可读。
-    - **判据同理**：`block-drag.ts` 里识别外部文件拖入用 `event.dataTransfer?.files?.length`，**不是** `types.includes("Files")`。
-    - **别只看 MIME**：Linux 拖进来的 `File.type` 常是空串，`src/lib/image.ts` 的 `isImageFile` 按 MIME **或**扩展名判（`image.test.ts` 钉住）。
-    - **本机怎么验**：Chrome 探针必须**自己伪造 WebKit 的形状**才复现得出（`dragover` 的 `types` 为空、`drop` 才带上 `files`），见 `.cache/probe-drop-and-icon.mjs`。
+**vault 目录结构（兼容 Obsidian，纯 md + 附件）**
 
-24. **Crepe 工具条的图标必须是「单条填充 path」，不是描边图标**（M8 走查定）：自带那套（粗体/斜体/删除线/公式/链接）全是 24×24 的**单条 `<path>` 纯填充形状**（无 stroke；部分带 `fill="currentColor"`，其余靠继承）。塞一个 stroke 版进去（比如 Lucide 的 highlighter）会明显**格格不入**——线宽、圆角、视觉重心全对不上（2026-10-13 走查：「图标太丑，和其他图标格格不入」）。
-    - 加按钮时**先照抄邻居的画法**（`fill="currentColor"` + 一条 `d`），别去图标库里找「语义对得上」的描边图标。
-    - **占位也要对齐**：自带那套字形只占约 **13×13** 格。自绘形状横跨 17×20 时，同样 24px 下会**显得大一号**（2026-10-13 走查：「主体明显更粗、色块更大，视觉上就显得大一号」）。修法是给形状套 `translate(24/2×(1−s)) scale(s)` 做**绕画布中心**缩放（当前 `s = 0.76`），不必重画路径。
-    - **不确定分量/占位是否匹配时，渲染候选并排截图对比**（`.cache/icon-candidates.html`；`.cache/screenshots/m8-24-icon-candidates.png` 选形状、`m8-25-icon-scale.png` 选缩放系数），别凭感觉定。
+```
+vault/
+├── 笔记本A/…/*.md        # 图片引用用相对路径 assets/xxx.png
+├── assets/               # 附件按原路径落盘（不强制内容寻址）
+└── .lanmark/             # 不参与同步
+    ├── sync.json         # 设备名、配对码、已发 token
+    ├── lanmark.db        # SQLite 索引（全文搜索 LIKE，非 FTS5）
+    ├── tombstones.json   # 删除传播账本（30 天 TTL）
+    ├── sync-<id>.json    # 客户端基线
+    └── trash/            # 回收站
+```
 
-25. **触屏长按唤块菜单：别依赖 `contextmenu`，但要自己起定时器；且浮层遮罩不能挂 `onClick`**（M8 真机走查定）：这三条都是「桌面 Chrome 永远绿、真机全废」的坑。
-    - **`contextmenu` 在编辑器正文上不派发**（Android WebView 把长按当选字手势）。硬约定 13 里「真机实测会派发该事件」只对**普通 DOM**（侧栏树行）成立，**对 ProseMirror 正文不成立**。做法：`touchstart` 起 480ms 定时器，`touchmove` 超过 10px 或 `touchend/touchcancel` 取消（`EditorPane` 的 `onTouchStart/onTouchMove`）。
-    - **与选字不冲突**：手机选字走**双击**（真机实测双击选中整段并弹出气泡条，高亮按钮可达）。分工＝「长按 = 块菜单、双击 = 选字」。
-    - **浮层的遮罩一律不挂 `onClick`**：`click` 会在「打开浮层那个手势」结束时补发一次，落在刚出现的遮罩上 → 长按唤出的菜单**只闪现几十毫秒**就被关掉（真机现象是「长按毫无反应」，因为肉眼看不到那一瞬）。「点外部关闭」只认 `useDismissable` 的 **`pointerdown`**（只在新手势开始时触发）。
-    - **抽屉不许监听 `scroll`/`resize`**（`useDismissable` 第三参 `anchored`，默认 false）：这两个逃生门只对「贴点击位置的浮层」有意义；抽屉贴屏幕底，而真机上长按残留的选区被清掉会触发滚动/布局事件 → 抽屉一开就被关。
+备份 = 直接复制 vault 目录（Obsidian/VSCode 可直接打开）。
 
-26. **真机走查的探针约束**（M8 定，全套在 `.cache/probe-mobile.mjs` + `.cache/cdp-lib.mjs`）：
-    - 交互一律 `Input.dispatchTouchEvent`（真触摸），**别用合成 MouseEvent**——触屏专属行为（长按、`pointercancel`）只有真触摸才复现。
-    - **触摸坐标要减 `visualViewport.offsetTop/Left`**：软键盘弹出时页面被上推（实测 69px）而 CDP 坐标是相对视觉视口的 → 不减的话「键盘弹出后头部按钮全部失灵」，是**探针假象**（真用户点屏幕正常）。
-    - **截图用 `adb exec-out screencap`，不要 `Page.captureScreenshot`**：后者在真机 WebView 上会**常年挂住**（不返回也不报错，表现为探针无输出地卡死，极难定位）。
-    - `adb` 要用**绝对路径**（探针不经 `scripts/env.sh`，裸 `"adb"` 会 ENOENT，而异常常被 `finally` 吞掉）。
-    - 探针假设文档里有 `<p>` 会脆断（前几轮测试会把段落转成标题）——按「任意顶层块」取。
-    - **Android 16（API 36）忽略 `windowSoftInputMode`**：manifest 里设了 `adjustResize` 也不生效（边到边强制）；键盘弹出时页面被上推、**顶栏会滚出可视区**，此时头部按钮既看不到也点不到（真用户也一样）。要修得在 web 层监听 `visualViewport` 做锚定，尚未做。
-      **`interactive-widget=resizes-content` 在 Android WebView 里无效**（2026-10-20 重建 APK 实测：光标在下方时仍是 `innerHeight=772 / visualViewport 454 / offsetTop=270`）——别再指望 viewport meta 解决，要么 web 层锚定，要么把入口放到键盘上方。
+**Android 平台约束（不是 bug，别当缺陷修）**
 
-27. **真机装 debug 版不要卸载 release 版**（M8 定，2026-10-16 教训）：release 资产是固定 keystore 签的，本地只能出 debug 签名，两者**无法互相覆盖**（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。而卸载会清掉应用私有存储——「应用目录」用户（`getExternalFilesDir`，**注意它按 applicationId 解析**）的笔记库就在那儿，卸载即丢。
-    做法：`applicationIdSuffix = ".debug"` + `app/src/debug/res/values/strings.xml`（应用名改「Lanmark Debug」，否则两个同名同图标的应用分不清）。**后缀写在根 `build.gradle.kts` 的 `subprojects` 钩子里**——写进 `app/build.gradle.kts` 会被 CLI 抹掉（硬约定 2），写在根文件里**标准构建命令就生效**（2026-10-16 实测：一次 `pnpm tauri android build --apk --debug` 直接产出 `com.lanmark.app.debug`）。
-    **别用 `pm uninstall -k` 赌数据能留下**。
-    首启页那句「应用目录：…」的路径必须**问插件**（`vaultPicker.appDir()` → `getExternalFilesDir`，按 applicationId 解析），**不要写死包名**——`.debug` 版会显示成另一个包的目录。
-
-28. **保存不做无变化写入；trailing 伪空段落永不落盘**（M10 定）：
-    - **根因**：Crepe 启用了 `@milkdown/plugin-trailing`。当笔记最后一个顶层块不是 heading/paragraph（列表/代码块/表格）时，它会在**第一次事务**（常常只是点进正文的选区事务）往文末插一个空段落；序列化成 markdown 就是多一个 `\n`，`markdownUpdated` 会把它当真实编辑。
-    - `EditorPane` 的 `markdownUpdated` 在 doc 基线之外再维护 `lastEmitted`：用 `trimDocTail` + `compareKey` 比较，只有尾空行变化时不置 dirty、不调 `onChange`。
-    - `vault.saveNow` 以 `savedContent` 为基线：`formatOnSave` 开则比较 `formatMarkdown`，关则比较 `trimDocTail`；等价就**不 `writeNote`、不触发同步**。`savedContent === null` 表示基线未知（测试/异常路径），此时照常写。所有切库/开笔记/远端重载/关笔记/删除路径都必须同步维护 `savedContent`。
-    - `formatMarkdown` **只动空白**（文末空行 / 行尾空格 / 连续空行 / ATX 标题内空格）；围栏代码块、frontmatter、4 空格缩进行、硬换行（行尾两个空格或 `\`）逐字保留。**不要引 markdownlint / prettier / remark-lint**：它们是 linter 或整篇 AST 重排，会破坏硬约定 3。
-    - 关闭 `formatOnSave` 仍执行 `trimDocTail`；源码模式不把整理结果回写进 CodeMirror（避免光标跳动），只更新 `savedContent`。
-29. **大纲单一来源；移动端用悬浮按钮 + 底部抽屉**（M10 定）：
-    - `src/lib/outline.ts` 的 `extractOutline` 是**唯一**提取点：只认行首 0 空格的 ATX h1–h3，跳过 frontmatter 与 ``` / ~~~ 围栏；`index` 对应 ProseMirror 顶层 heading 序号，`line` 对应源码行号。列表内/`> ##`/1–3 空格缩进的标题不列——宁可少列，也不能让索引错位。
-    - 桌面侧栏用「文件 / 大纲」切换（Typora 式，窄屏强制文件面板）；选择存 localStorage `lanmark:sidebar-panel`。跳转统一经 `useOutlineStore` 发请求，`EditorApi.gotoHeading` **只改选区/滚动、不 dispatch doc**；源码模式按行号走 CodeMirror。
-    - 移动端是「编辑区右下角 44px 悬浮按钮 + 底部抽屉」，**不要把大纲塞进 85vw 侧栏，也不要往窄屏头部加按钮**（硬约定 13）；抽屉关闭走 `useDismissable`、遮罩不挂 onClick（硬约定 25），不监听 scroll/resize。
-    - 当前标题高亮由 `useActiveHeading` 观察 `.editor-host` 滚动实现；源码模式 v1 不高亮。以后要支持引用内/缩进标题，先换 mdast，别在组件里另写一套正则。
-    - **窄屏长笔记必须由 `.editor-host` 内部滚动**：`App` 的 `flex min-w-0 flex-1 flex-col` 与 `EditorPane` 的 `main` 都必须带 `min-h-0`。漏掉时内容会把 `main` 撑到 8000px+、改由 window 滚动，`gotoHeading` 的 `scrollTop` 只能走 10px，表现成「点目录不跳」且悬浮按钮被撑出屏幕（2026-10-20 真机 385×772 实测）。
-    - `OutlineSheet` 打开时上报 `reportBackHandler("overlay")` 并监听 `lanmark:back`，返回键先关抽屉而不是退出 App。
+- 前台服务常驻通知绕不开（Android 8+ 后台限制）；Android 15 对 `dataSync` FGS 有 6h/24h 上限，已在用 `specialUse` 规避。
+- 国产 ROM（MIUI/HyperOS、EMUI、ColorOS）杀后台激进；熄屏可达依赖电池策略「不受限」，Doze 下 WifiLock 基本无效。MIUI 下 AppOps 授权后需冷启动一次才被 `isExternalStorageManager()` 识别。
+- **vault 目录必须 MANAGE_EXTERNAL_STORAGE**：SAF tree URI 能映射到 `/storage/emulated/0/<rel>`，但 Android 11+ FUSE 下 `.md` 直写 EACCES。SAF 选择器只当目录选择 UI，v1 只承诺内部存储（primary 卷）；Android 16 禁选 `Documents/`、`Download/` 根目录。
+- targetSdk 35+ 强制 edge-to-edge：删 `enableEdgeToEdge` 无效，必须在 `MainActivity` 对 decorView 做 insets 避让。
+- mDNS 收包需 MulticastLock（随 SyncService 生命周期）；WifiLock 无效。
+- 加 TLS 时 rustls 必须切 ring 后端（aws-lc-rs 在 Android 交叉编译会挂）。
+- 上滑划掉 Activity 会 `process::exit(0)` 连 FGS 一起杀（tauri#15671）→ `prevent_exit()` 保活；重建 Activity 后的白屏用 `ExitRequested` 置 `ACTIVITY_LOST` + 下次 `Resumed` 销毁旧窗口重建。零窗口时 wry 不分发 Resumed，所以 `patches/tauri-runtime-wry` 必须入库。
 
 ## 完成标准（DoD）
 
-- [ ] `pnpm test` 与 `cd src-tauri && cargo test` 全绿，成绩写进提交（命令与当前基线见硬约定 8）
+- [ ] `pnpm test` 与 `cd src-tauri && cargo test` 全绿，成绩写进提交
 - [ ] 动过往返链路 → `src/milkdown/roundtrip.test.ts` 与相关往返用例必须绿
-- [ ] 动过 UI → 先用 `scripts/cdp-eval.mjs` 核数值，再截图存档到 `.cache/screenshots/`（见「真机调试」）
+- [ ] 动过 UI → 用 `scripts/cdp-eval.mjs` 核数值，截图存档到 `.cache/screenshots/`
 - [ ] 移动端改动 / 里程碑收尾 → 附真机走查结论（机型 + Android 版本）
 - [ ] 改了构建、测试约定或目录结构 → 同一提交内更新本文
 - [ ] 涉及发版 → `.github/workflows` 三端全绿
 
-## 发版（v0.1 起）
+## 发版
 
-- **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`.github/workflows/release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis` 对应这个约定
-- **release 标题一律只写版本号**（`v0.6.0` / `v0.7.0` / `v0.7.1` 这样；notes 正文首行标题同此），**永远不加「— 描述」后缀**：releases 列表里只展示版本号，功能说明一律写进 notes 正文。`v0.6.0 — 外观系统 · 四套主题 · 内置字体` 那种写法不再使用（v0.6.1 起已改）
-- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`，`Cargo.lock` 里的 `lanmark` 版本随之更新）→ 提交推送 → **先** `gh release create vX.Y.Z --title vX.Y.Z --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
-- 坑：仓库默认 GITHUB_TOKEN 只读，`release.yml` 的 `permissions: contents: write` 不能删（缺了上传 403）
-- **Android release 资产走固定 release 签名（M4g，2026-09-24 起）**：`release.yml` 的 android job 解码 `RELEASE_KEYSTORE` secret → 真实 release 构建（**不再是 `--debug`**）→ `apksigner` 校验指纹后才上传；产物路径 `outputs/apk/universal/release/`。keystore 永不入库，4 个值来自 repo secrets，**缺失时 job 直接 fail**（不再静默产出 debug 签名的「release」）。
-  - 本地构建（无环境变量）**回退 debug 签名**，`build.gradle.kts` 里 `hasReleaseSigning=false` 时 `release` build type 用 debug signingConfig——所以本地 `--apk` 产物仍是 debuggable、CDP 可用；**看到 CDP 可用先确认产物路径是 `debug/` 还是本地回退，别误判 CI 配置**
-  - 一次性迁移：v0.2.1 及更早的存量 Android 用户还需**最后一次**卸载重装（签名从 CI debug 钥匙换成固定钥匙）；应用目录用户的笔记库在应用私有存储，卸载即丢，release notes 必须写明
-  - 真 release 包 **CDP 不可用**（`/proc/net/unix` 无 `webview_devtools` 记录）→ 走查回归本地 debug APK
+- **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis`。
+- **release 标题只写版本号**（`v0.7.0`），不加描述后缀；功能说明写进 notes 正文。
+- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`，`Cargo.lock` 随之更新）→ 提交推送 → **先** `gh release create vX.Y.Z --title vX.Y.Z --notes-file …` → `git tag vX.Y.Z && git push origin vX.Y.Z` → CI 三端构建并附产物。
+- `release.yml` 的 `permissions: contents: write` 不能删（默认 GITHUB_TOKEN 只读，缺了上传 403）。
+- **Android release 走固定签名**：`release.yml` 解码 `RELEASE_KEYSTORE` secret → 真实 release 构建 → `apksigner` 校验指纹后上传；keystore 永不入库，缺失时 job 直接 fail。本地无环境变量时回退 debug 签名，所以本地 `--apk` 产物仍可 CDP；真 release 包 CDP 不可用，走查回归本地 debug APK。
 
 ## 真机调试（手机 = 主验证场）
-
-debug APK 的 WebView 开 CDP（release 不行），比盲摸坐标准：
 
 ```bash
 source scripts/env.sh   # adb 进 PATH（.cache/android-sdk/platform-tools）
 adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.lanmark.app.debug | tr -d '\r')
-# 注意包名：本地 debug APK 是 com.lanmark.app.debug（见硬约定 27），不是 release 的 com.lanmark.app
-curl -s localhost:9222/json   # 拿 webSocketDebuggerUrl
-node scripts/cdp-eval.mjs "document.querySelector('.ProseMirror')?.clientWidth"   # 页面内执行 JS
+curl -s localhost:9222/json
+node scripts/cdp-eval.mjs "document.querySelector('.ProseMirror')?.clientWidth"
 ```
 
-`scripts/cdp-eval.mjs` 支持 `Runtime.evaluate` 读计算样式、查布局指标、触发 React 点击（`…click()`）——改完 UI 先用它核数值，再 `adb exec-out screencap -p` 截屏存档（放 `.cache/screenshots/`）。
-
-- 手机屏幕会休眠：黑截图 → `adb shell input keyevent KEYCODE_WAKEUP && adb shell wm dismiss-keyguard`；长构建期间屏幕必睡，装完重唤醒再截。
-- 应用重启后 pid 变，`adb forward` 要重做（或先 `adb forward --remove-all`）。
+- **debug 与 release 共存**：debug 包是 `com.lanmark.app.debug`（`applicationIdSuffix` 写在 `src-tauri/gen/android/build.gradle.kts` 的 `subprojects` 钩子，见硬约定 4），装它**不要卸载 release**——两者签名不同无法互相覆盖，卸载会清掉「应用目录」用户的笔记库。`app/src/debug/res/values/strings.xml` 改应用名「Lanmark Debug」；首启页「应用目录」路径要问插件（`vaultPicker.appDir()`），不要写死包名。
+- **探针必须用真触摸**：`Input.dispatchTouchEvent`，别用合成 MouseEvent；坐标要减 `visualViewport.offsetTop/Left`（软键盘弹出时页面被上推）。
+- **截图用 `adb exec-out screencap`**，不要 `Page.captureScreenshot`（真机 WebView 上会挂住）；`adb` 用绝对路径（探针不经 `env.sh`）。
+- 探针别假设文档里有 `<p>`（前几轮会把段落转成标题），按「任意顶层块」取。
+- **Android 16 忽略 `windowSoftInputMode`**：`adjustResize` 不生效（强制 edge-to-edge），键盘弹出时页面被上推、顶栏会滚出可视区；`interactive-widget=resizes-content` 也无效。要修得在 web 层监听 `visualViewport` 锚定，尚未做。
+- 屏幕会休眠：黑截图 → `adb shell input keyevent KEYCODE_WAKEUP && adb shell wm dismiss-keyguard`；应用重启后 pid 变，`adb forward` 要重做（或先 `adb forward --remove-all`）。

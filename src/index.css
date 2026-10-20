@@ -85,7 +85,7 @@
 
   /* ── 外观变量（M5 减法后只剩字号/行距可调）──
      `applyCssVars()`（src/lib/settings.ts）是唯一写入点，改字号只动这两个变量，
-     不重建编辑器实例（硬约定 3：重建会触发伪 markdownUpdated 重写文件）。
+     不重建编辑器实例（硬约定 1：重建会触发伪 markdownUpdated 重写文件）。
      这里给的值 = M3 的硬编码视觉，保证「默认设置下界面不变」。 */
   --lanmark-text-size: 16px;
   --lanmark-line-height: 1.75;
@@ -97,7 +97,7 @@
      data-scheme = light | dark | paper  → 只覆盖颜色 token（applyScheme）
      data-font   = sans  | serif | kai   → 只覆盖 --lanmark-font-text（applyFont）
    两者覆盖的属性不相交 ⇒ 任意 3×3 组合都成立；改一个 DOM 属性即换肤/换字，
-   Crepe / CodeMirror / 组件零改动、不重建实例（硬约定 11）。
+   Crepe / CodeMirror / 组件零改动、不重建实例（外观不进编辑器 key）。
    `light` / `sans` 故意不写块：`:root` 就是它们——属性缺失或运行时脏值
    自然落在默认视觉上，不会「未知主题打空全部变量」。
    ══════════════════════════════════════════════════════════ */
@@ -280,7 +280,7 @@ body {
 
 /* 正文排版：字号 / 行高 / 字体走变量（字体栈为常驻值）。
    选择器用 `.editor-host .milkdown .ProseMirror`：比 `.milkdown` 上的
-   --crepe-* 变量规则优先级更高，能盖住 crepe 自带排版（硬约定 7）。 */
+   --crepe-* 变量规则优先级更高，能盖住 crepe 自带排版（靠 specificity）。 */
 .editor-host .milkdown .ProseMirror {
   font-size: var(--lanmark-text-size);
   line-height: var(--lanmark-line-height);
@@ -336,7 +336,7 @@ body {
      ② 列表滚到边界不再把整页带着下拉（Chrome 的下拉刷新手势会让笔记列表
         跟着弹，编辑时误触尤其明显）。
      ③ 锁定文本随旋屏自动缩放：部分 WebView 旋屏时会放大字号，破坏按 px
-        定档的正文字号（硬约定 11 的字号档位）。 */
+        定档的正文字号（字号档位由 CSS 变量驱动）。 */
   body {
     -webkit-tap-highlight-color: transparent;
     text-size-adjust: 100%;
@@ -526,7 +526,7 @@ body {
 /* 拖拽「放进某节」时，高亮该节标题整块（M8）：让「会变成它的子节」这件事在落点之外
    还有第二处视觉确认——指示线说明「落在哪」，这块底说明「归谁管」。 */
 /* 荧光笔（`==文字==`，M8 批次 3）。加 `.editor-host .milkdown` 前缀是为压过 Crepe/
-   frame 的默认 mark 样式（硬约定 7：覆盖靠 specificity）。`color: inherit` 是必需的——
+   frame 的默认 mark 样式（覆盖靠 specificity）。`color: inherit` 是必需的——
    frame 给 mark 设了自己的文字色，深色下会变成黑底黑字 */
 .editor-host .milkdown .ProseMirror mark {
   background: var(--c-mark);

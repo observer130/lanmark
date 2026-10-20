@@ -2,7 +2,7 @@
 //!
 //! 灵感与语义对标 LocalSend 的 `alias`：设备列表、授权卡片全程只说代号，
 //! IP/端口退到兜底路径。代号是**设备级**偏好（换库不变），落
-//! `app_config_dir/config.json` 的 `AppConfig.deviceAlias`（硬约定 10 的分界）；
+//! `app_config_dir/config.json` 的 `AppConfig.deviceAlias`（硬约定 3 的分界）；
 //! vault 内 `.lanmark/sync.json` 的 `device_name` 保留不动（鉴权与身份仍随库），
 //! 展示层从代号读取，`sync.json` 的名字只作旧版回退。
 //!

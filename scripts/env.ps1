@@ -1,12 +1,12 @@
 # Lanmark Windows 构建环境（PowerShell 等价物，zsh/bash 用户继续用 scripts/env.sh）。
-# 与 env.sh 同一原则：工具链与缓存一律在仓库 .cache/，不污染 $HOME（硬约定 1）。
+# 与 env.sh 同一原则：工具链与缓存一律在仓库 .cache/，不污染 $HOME。
 # 用法：在 pwsh 中 `. D:\Projects\lanmark\scripts\env.ps1`，或让自动化直接 dot-source。
 #
 # 内容：
 #   - cargo/rustup（.cache\cargo、.cache\rustup）
 #   - MSVC 工具链环境（vs-buildtools 里的 vcvars64 捕获：INCLUDE/LIB/PATH）
 #   - TMP/TEMP 指向 .cache\tmp（沙箱与临时文件归位）
-# 本脚本不做任何安装；安装步骤见 AGENTS.md「Windows 本机构建」。
+# 本脚本不做任何安装；工具链一次性装到仓库 .cache/（rustup + VS Build Tools）。
 
 $ErrorActionPreference = "Stop"
 $ws = Split-Path -Parent $PSScriptRoot  # scripts/ 的上级 = 仓库根
