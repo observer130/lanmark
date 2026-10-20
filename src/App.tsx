@@ -225,7 +225,7 @@ function App() {
                 navOpen ? "translate-x-0" : "-translate-x-full"
               }`}
             >
-              <Sidebar onNavigate={() => setNavOpen(false)} />
+              <Sidebar narrow={narrow} onNavigate={() => setNavOpen(false)} />
             </div>
             {/* 悬浮抽屉按钮：占头部左侧 ~56px，EditorPane 窄屏头部需让出该宽度。
                 触控尺寸放大到 44px（M4i：原来只有 32px，手机上偏小） */}
@@ -237,14 +237,14 @@ function App() {
               <Menu size={18} />
             </button>
             {/* flex-col 接续高度链：让 EditorPane 的 flex-1 生效，编辑卡占满剩余高度 */}
-            <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <EditorPane narrow={narrow} />
             </div>
           </>
         ) : (
           <>
-            <Sidebar />
-            <EditorPane />
+            <Sidebar narrow={narrow} />
+            <EditorPane narrow={narrow} />
           </>
         )}
       </div>

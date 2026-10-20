@@ -4,6 +4,7 @@ import {
   Check,
   Code,
   Folder,
+  ListTree,
   NotebookText,
   PenLine,
   Plus,
@@ -15,7 +16,7 @@ import { editorViewCtx } from "@milkdown/kit/core";
 import { undo, undoDepth } from "@milkdown/kit/prose/history";
 import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
 import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 
 import { useVaultStore } from "../stores/vault";
@@ -30,7 +31,11 @@ import {
   vaultUrlsToRelative,
 } from "../lib/vault-url";
 import { parentDir } from "../lib/vault";
+import { compareKey, trimDocTail } from "../lib/markdown-format";
 import { useSettingsStore } from "../stores/settings";
+import { useOutlineStore } from "../stores/outline";
+import { useOutlineItems } from "./useOutline";
+import { OutlineSheet } from "./OutlineSheet";
 import { createProductCrepe } from "../milkdown/product";
 import {
   currentTopBlockIndex,
@@ -87,6 +92,8 @@ export interface EditorApi {
   undo: () => boolean;
   /** 是否还有可撤销的历史（按钮置灰用，只说「有没有」，不执行） */
   canUndo: () => boolean;
+  /** 跳到第 index 个顶层标题（0-based，只改选区/滚动，不改 doc） */
+  gotoHeading: (index: number) => boolean;
 }
 
 /**
@@ -157,6 +164,10 @@ function MilkdownHost({
     // （Crepe create 后会异步触发一次「同 doc 重序列化」事件——列表 - 会变 *、
     //  补尾行——若放行就会「打开笔记=重写文件」；见 docs/04 §9c）
     let lastKnownDoc: LMDoc | null = null;
+    // 最近一次**放行**的完整 markdown（含 frontmatter / wikilink 还原）。
+    // trailing 插件会在首次选区事务插一个空段落；doc 确实变了，但序列化结果只多一个尾空行。
+    // 与它做规范化比较，可避免「点一下笔记」就置 dirty / 触发自动保存。
+    let lastEmitted = content;
     (async () => {
       crepe = createProductCrepe({ root: inner, defaultValue: editorBody, readOnly });
       crepe.on((listener) => {
@@ -164,7 +175,15 @@ function MilkdownHost({
           if (!view || !lastKnownDoc) return; // 基线未建立（create/改写期间）：一律抑制
           if (view.state.doc.eq(lastKnownDoc)) return; // 同 doc 重序列化（伪事件）：抑制
           lastKnownDoc = view.state.doc; // 真实编辑：放行并刷新基线
-          onChange(joinFrontmatter(fm, vaultUrlsToRelative(restoreWikilinks(md, wikiMap), baseDir)));
+          const full = joinFrontmatter(
+            fm,
+            vaultUrlsToRelative(restoreWikilinks(md, wikiMap), baseDir),
+          );
+          const next = trimDocTail(full);
+          // 只有尾空行变化（trailing 插件的伪段落）：不置 dirty、不触发保存。
+          if (compareKey(next) === compareKey(lastEmitted)) return;
+          lastEmitted = next;
+          onChange(next);
         });
       });
       await crepe.create();
@@ -197,6 +216,16 @@ function MilkdownHost({
       // 窄屏「撤回」按钮一打开就是亮的，按下去还会把 src 改回去。
       if (changed) view.dispatch(tr.setMeta("addToHistory", false));
       lastKnownDoc = view.state.doc; // 基线建立：此后只放行真实 doc 变化
+      // 关键：基线取**编辑器自己的序列化结果**，而不是磁盘原文。
+      // Crepe 会把 `-` 列表写成 `*`、给表格补空格——若拿磁盘原文当基线，
+      // 「点进正文」触发 trailing 伪事件时，diff 里除了空行还混着这些风格差异，
+      // 规范化比较就会失败、照样置 dirty。用编辑器基线后，首次伪事件只剩尾空行。
+      lastEmitted = trimDocTail(
+        joinFrontmatter(
+          fm,
+          vaultUrlsToRelative(restoreWikilinks(crepe.getMarkdown(), wikiMap), baseDir),
+        ),
+      );
 
       // 图片落盘并插入（粘贴 / 拖入共用）：插入 vault 协议 URL（显示用），
       // 保存时 stripVaultPrefix 会还原为相对引用
@@ -283,6 +312,53 @@ function MilkdownHost({
           return undo(v.state, v.dispatch);
         },
         canUndo: () => (view ? undoDepth(view.state) > 0 : false),
+        /**
+         * 跳到第 index 个顶层标题。
+         *
+         * 只 dispatch 选区事务 + 手算滚动位置：
+         *  - 不建事务去改 doc，所以不会触发 markdownUpdated（硬约定 3）；
+         *  - 不用 `scrollIntoView`：WebKit 嵌套滚动容器上它会算错/静默失败，
+         *    这里按 `.editor-host` 的矩形差直接设 scrollTop（标题顶边留 12px）。
+         */
+        gotoHeading: (index) => {
+          const v = view;
+          if (!v) return false;
+          let seen = 0;
+          let pos = 0;
+          for (let i = 0; i < v.state.doc.childCount; i += 1) {
+            const node = v.state.doc.child(i);
+            if (node.type.name === "heading") {
+              if (seen === index) {
+                const dom = v.nodeDOM(pos) as HTMLElement | null;
+                if (!readOnly) {
+                  const target = Math.min(pos + 1, v.state.doc.content.size);
+                  v.dispatch(
+                    v.state.tr.setSelection(
+                      TextSelection.near(v.state.doc.resolve(target)),
+                    ),
+                  );
+                  // **不 focus**：目录跳转是导航，不是编辑。移动端一 focus 就弹键盘，
+                  // 既挡住正文，又让悬浮「目录」按钮按「键盘弹出」规则隐藏。
+                }
+                const host = v.dom.closest(".editor-host") as HTMLElement | null;
+                if (host && dom) {
+                  const delta =
+                    dom.getBoundingClientRect().top -
+                    host.getBoundingClientRect().top +
+                    host.scrollTop -
+                    12;
+                  host.scrollTop = Math.max(0, delta);
+                } else {
+                  dom?.scrollIntoView({ block: "start" });
+                }
+                return true;
+              }
+              seen += 1;
+            }
+            pos += node.nodeSize;
+          }
+          return false;
+        },
       };
       onReadyRef.current?.(api);
 
@@ -510,6 +586,28 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
    * 给编辑器装一个 update 回调，等于为了一个按钮改产品配置（见 product.ts 的约束）。
    */
   const [canUndo, setCanUndo] = useState(false);
+  /** 窄屏「笔记目录」抽屉 */
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  /**
+   * 软键盘是否弹出（Android 16 边到边 + 忽略 adjustResize：innerHeight 不变，
+   * 只有 visualViewport.height 缩）。键盘挡住的底部区域不放悬浮按钮。
+   */
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  /** 源码模式引用：大纲按行号跳转要直接操作 CodeMirror 的 view */
+  const sourceRef = useRef<ReactCodeMirrorRef>(null);
+  // 只有窄屏才需要大纲数据（桌面侧栏自己按需提取，见 OutlinePanel）
+  const outlineItems = useOutlineItems(narrow);
+  const outlineRequest = useOutlineStore((s) => s.request);
+
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () =>
+      setKeyboardOpen(vv.height < document.documentElement.clientHeight - 120);
+    update();
+    vv.addEventListener("resize", update);
+    return () => vv.removeEventListener("resize", update);
+  }, []);
 
   /**
    * 菜单的置灰状态。用 `planMove` **预演**而不是自己算索引：标题搬的是整节，
@@ -563,6 +661,45 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     setBlockMenu(null);
   }, [blockMenu]);
 
+  /** 源码模式按行号跳转：不改文档，只 dispatch 选区 + 手算 scrollTop。 */
+  const jumpSource = useCallback((line: number) => {
+    const view = sourceRef.current?.view;
+    if (!view) return false;
+    const n = Math.min(Math.max(1, line), view.state.doc.lines);
+    const info = view.state.doc.line(n);
+    view.dispatch({ selection: { anchor: info.from }, scrollIntoView: true });
+    view.focus();
+    const block = view.lineBlockAt(info.from);
+    view.scrollDOM.scrollTop = Math.max(0, block.top - 12);
+    return true;
+  }, []);
+
+  // 大纲跳转请求：Sidebar / 移动端抽屉只发请求，执行统一在这里。
+  // path 不匹配（旧请求）直接忽略；切笔记时清空，避免跳到新笔记的同序号标题。
+  useEffect(() => {
+    if (!outlineRequest || outlineRequest.path !== activePath) return;
+    let cancelled = false;
+    let timer = 0;
+    // 编辑器实例是异步 ready 的；刚切完笔记就点目录时可能还没挂好，短重试几次。
+    const run = (tries: number) => {
+      if (cancelled) return;
+      const ok =
+        editorMode === "source"
+          ? jumpSource(outlineRequest.item.line)
+          : (editorApiRef.current?.gotoHeading(outlineRequest.item.index) ?? false);
+      if (!ok && tries > 0) timer = window.setTimeout(() => run(tries - 1), 50);
+    };
+    timer = window.setTimeout(() => run(3), 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [outlineRequest, activePath, editorMode, jumpSource]);
+
+  useEffect(() => {
+    useOutlineStore.getState().clear();
+  }, [activePath]);
+
   // 切笔记 / 切模式会重建编辑器实例，旧实例的 ref 随即失效——菜单必须一起关，
   // 否则会对着已经销毁的编辑器执行命令（静默无反应）；撤销栈同理，属旧实例。
   useEffect(() => {
@@ -570,11 +707,12 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     setInsertMenu(false);
     setModeMenu(false);
     setCanUndo(false);
+    setOutlineOpen(false);
   }, [activePath, editorMode]);
 
   if (!activePath) {
     return (
-      <main className="flex min-w-0 flex-1 flex-col bg-canvas">
+      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
         {/* Linux 无边框窗口：未开笔记也要有拖拽区与窗控（验收修正：窗控必须永远可达）。
             padding 与有笔记时的头部保持一致，避免开笔记前后窗控横移 */}
         {isLinuxDesktop && (
@@ -607,7 +745,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   const isFav = favorites.some((f) => f.path === activePath);
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-canvas">
+    <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
       {/* 头部：窄屏时左侧让出悬浮抽屉按钮的宽度（按钮占 12→46px），避免遮挡标题。
           Linux 无边框窗口（decorations:false）：头部空白即拖拽区，双击最大化；
           右端是自绘窗控（方案 A · 头部融合，design/direction-approved.md）。 */}
@@ -799,6 +937,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           ) : (
             <CodeMirror
               key={editorKey(activePath, "source")}
+              ref={sourceRef}
               value={content}
               height="100%"
               style={{ height: "100%" }}
@@ -812,6 +951,20 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           )}
         </div>
       </div>
+
+      {/* 移动端「笔记目录」入口（M10）：不占窄屏头部（硬约定 13 已满），
+          悬浮在编辑卡右下角；标题少于 2 个时没有目录价值，直接不渲染。 */}
+      {narrow && !keyboardOpen && outlineItems.length >= 2 && (
+        <button
+          type="button"
+          title="笔记目录"
+          aria-label="笔记目录"
+          onClick={() => setOutlineOpen(true)}
+          className="fixed bottom-[calc(1rem_+_env(safe-area-inset-bottom))] right-3 z-10 flex h-11 w-11 items-center justify-center rounded-full border border-line bg-card/95 text-ink-2 shadow-card backdrop-blur active:bg-canvas"
+        >
+          <ListTree size={18} />
+        </button>
+      )}
 
       {/* 编辑模式抽屉（M8 批次 2，窄屏） */}
       {narrow && (
@@ -832,6 +985,19 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           open={insertMenu}
           onPick={handleInsertBlock}
           onClose={() => setInsertMenu(false)}
+        />
+      )}
+
+      {/* 笔记目录抽屉（M10，窄屏） */}
+      {narrow && (
+        <OutlineSheet
+          open={outlineOpen}
+          items={outlineItems}
+          onPick={(item) => {
+            useOutlineStore.getState().jump(activePath, item);
+            setOutlineOpen(false);
+          }}
+          onClose={() => setOutlineOpen(false)}
         />
       )}
 

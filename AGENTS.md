@@ -63,10 +63,10 @@ Android 相关的非显然几条：
 
 | 位置 | 内容 |
 |---|---|
-| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `BlockMenu`（块级操作浮层/底部抽屉：上移·下移·删除，三条触发路径见硬约定 13/17）· `InsertMenu` / `ModeMenu`（窄屏底部抽屉：插入块 / 编辑模式，见硬约定 13/21）· `useDismissable`（浮层统一关闭行为）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
-| `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量/外观属性 + 回滚）、`update.ts`（M5-4 更新检测：启动静默检查 + 手动检查，关于页展示）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）；每个 store 旁有同名 `*.test.ts` |
-| `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（vault 协议 ↔ 相对引用换算；前缀随平台不同，见硬约定 3）、`frontmatter.ts`、`wikilink.ts`、`image.ts`（+`isImageFile`/`pickImageFiles`：拖入/粘贴的图片筛选，见硬约定 23）、`sync.ts`、`settings.ts`（枚举→像素映射的**唯一来源** + `applyCssVars`/`applyScheme`/`applyFont`；外观 = 配色 + 编辑区字体 + 字号/行距，色值与字体栈在 index.css）、`ime-anchor.ts`（Windows 缩放后输入法候选框跑屏幕左上角的护栏，见硬约定 15）、`bridge.ts` |
-| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/行间隙天然层级/整体升降级/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、行间隙落点、层级、指示线与父标题高亮，见硬约定 17/19/20）· `block-insert.ts`（插入块命令，见硬约定 21）· `highlight.ts`（荧光笔 `==文字==`：remark 切分 + mark + 命令/输入规则/快捷键/图标，见硬约定 22）· `roundtrip.test.ts`（往返保真护栏，M1 决策门）· `insert.test.ts`（插入块护栏）· `history.test.ts`（撤销护栏：窄屏「撤回」按钮直接调的就是 prosemirror-history，见硬约定 13） |
+| `src/components` | 界面：`App.tsx` 装配 · `Sidebar`（搜索/收藏/最近/树/回收站（可恢复，v0.5.1）+ 收藏/回收站分区折叠 + 底部设置行 + 同步条）· `TreeView` · `EditorPane`（往返保真关键，见硬约定 3；`editorKey` 是外观不进 key 的护栏）· `BlockMenu`（块级操作浮层/底部抽屉：上移·下移·删除，三条触发路径见硬约定 13/17）· `InsertMenu` / `ModeMenu`（窄屏底部抽屉：插入块 / 编辑模式，见硬约定 13/21）· `OutlinePanel` / `OutlineSheet` / `OutlineList` / `useOutline`（M10 目录：桌面侧栏面板、移动端底部抽屉、共用行与当前标题高亮）· `useDismissable`（浮层统一关闭行为）· `SyncSection` · `SettingsDialog`（宽屏模态 / 窄屏全屏页）· `VaultPicker`（首启选库）· `CreateDialog` · `WindowControls`（Linux 无边框窗控）· `AppMark`（应用品牌标，见硬约定 12） |
+| `src/stores` | Zustand：`vault.ts`（目录树/编辑/防抖保存/搜索/切库）、`sync.ts`（配对/LAN 扫描/探测/自动循环）、`settings.ts`（乐观更新 + CSS 变量/外观属性 + 回滚）、`update.ts`（M5-4 更新检测：启动静默检查 + 手动检查，关于页展示）、`back.ts`（M4i 返回手势：上报浮层状态 / 监听 `lanmark:back` DOM 事件）、`bridge.ts`（Rust 事件日志）、`outline.ts`（M10 大纲跳转请求：path+item+seq，Sidebar/抽屉发请求，EditorPane 执行）；每个 store 旁有同名 `*.test.ts` |
+| `src/lib` | 纯逻辑 + 前端测试：`vault.ts`（IPC 封装）、`vault-url.ts`（vault 协议 ↔ 相对引用换算；前缀随平台不同，见硬约定 3）、`frontmatter.ts`、`wikilink.ts`、`image.ts`（+`isImageFile`/`pickImageFiles`：拖入/粘贴的图片筛选，见硬约定 23）、`sync.ts`、`settings.ts`（枚举→像素映射的**唯一来源** + `applyCssVars`/`applyScheme`/`applyFont`；外观 = 配色 + 编辑区字体 + 字号/行距，色值与字体栈在 index.css）、`ime-anchor.ts`（Windows 缩放后输入法候选框跑屏幕左上角的护栏，见硬约定 15）、`bridge.ts`、`markdown-format.ts`（M10 保存整理：只动空白 + trimDocTail/compareKey，见硬约定 28）、`outline.ts`（M10 大纲提取：行首 ATX h1–h3，见硬约定 29） |
+| `src/milkdown` | 编辑器纯逻辑（**唯一配置来源**）：`product.ts`（`PRODUCT_FEATURES` / `PRODUCT_PLUGINS` / `createProductCrepe`——`EditorPane` 与护栏测试共用，见硬约定 18）· `block-move.ts`（块定位 + 移动原语：单元长度/行间隙天然层级/整体升降级/上下移命令 + `Alt-↑/↓`，见硬约定 19/20）· `block-drag.ts`（**接管手柄拖放的落点**：拖拽源记录、行间隙落点、层级、指示线与父标题高亮，见硬约定 17/19/20）· `block-insert.ts`（插入块命令，见硬约定 21）· `highlight.ts`（荧光笔 `==文字==`：remark 切分 + mark + 命令/输入规则/快捷键/图标，见硬约定 22）· `roundtrip.test.ts`（往返保真护栏，M1 决策门）· `insert.test.ts`（插入块护栏）· `history.test.ts`（撤销护栏：窄屏「撤回」按钮直接调的就是 prosemirror-history，见硬约定 13）· `trailing.test.ts`（尾空段落护栏：trailing 插件首次选区事务会插空段落，规范化后不得产生落盘差异，见硬约定 28） |
 | `src/index.css` | 设计 token（`:root` = 浅色 + 默认字体；`:root[data-scheme=…]` 深色/纸页、`:root[data-font=…]` 宋体/楷体，再加 `@theme`）与**全部 Crepe / CodeMirror 主题覆盖**；顶部 `@import` 内置字体（见硬约定 16）；改编辑器外观或加配色/字体先来这里 |
 | `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `bridge.rs`（事件通道，纯逻辑不依赖运行时）· `fs_ops`（文件/回收站/**vault 统计与回收站清理**）· `db`（SQLite 索引 + 全文搜索；搜索是 LIKE 而非 FTS5——中文 2 字词用 FTS5 trigram 查不到）· `vault`（`AppConfig` 持久化）· `settings`/`settings_cmd`（M4a 设备级偏好：结构 + 归一化 + 白名单，与 vault 无关）· `alias`（M4h-4 设备代号：词表生成/归一化/AppConfig 持久化/进程内缓存，语义对标 LocalSend alias）· `protocol`（`vault://`）· `sync_server`/`sync_client`/`sync` · `lan_scan`（M4h-1 LAN 并发探测发现）· `update`（M5-4 GitHub release 更新检测：纯逻辑版本比较 + 24h 节流进 AppConfig，`update_check` 命令）· `mobile`（SAF 选库 + 授权）· `sanitize`（文件名规则） |
 | `src-tauri/gen/android` | **手工维护的 Android 工程**（`SyncService.kt` 前台服务、`MainActivity.kt`、`app/build.gradle.kts` 钉 `buildToolsVersion 34.0.0`），已入库，见硬约定 2 |
@@ -206,6 +206,20 @@ Android 相关的非显然几条：
     做法：`applicationIdSuffix = ".debug"` + `app/src/debug/res/values/strings.xml`（应用名改「Lanmark Debug」，否则两个同名同图标的应用分不清）。**后缀写在根 `build.gradle.kts` 的 `subprojects` 钩子里**——写进 `app/build.gradle.kts` 会被 CLI 抹掉（硬约定 2），写在根文件里**标准构建命令就生效**（2026-10-16 实测：一次 `pnpm tauri android build --apk --debug` 直接产出 `com.lanmark.app.debug`）。
     **别用 `pm uninstall -k` 赌数据能留下**。
     首启页那句「应用目录：…」的路径必须**问插件**（`vaultPicker.appDir()` → `getExternalFilesDir`，按 applicationId 解析），**不要写死包名**——`.debug` 版会显示成另一个包的目录。
+
+28. **保存不做无变化写入；trailing 伪空段落永不落盘**（M10 定）：
+    - **根因**：Crepe 启用了 `@milkdown/plugin-trailing`。当笔记最后一个顶层块不是 heading/paragraph（列表/代码块/表格）时，它会在**第一次事务**（常常只是点进正文的选区事务）往文末插一个空段落；序列化成 markdown 就是多一个 `\n`，`markdownUpdated` 会把它当真实编辑。
+    - `EditorPane` 的 `markdownUpdated` 在 doc 基线之外再维护 `lastEmitted`：用 `trimDocTail` + `compareKey` 比较，只有尾空行变化时不置 dirty、不调 `onChange`。
+    - `vault.saveNow` 以 `savedContent` 为基线：`formatOnSave` 开则比较 `formatMarkdown`，关则比较 `trimDocTail`；等价就**不 `writeNote`、不触发同步**。`savedContent === null` 表示基线未知（测试/异常路径），此时照常写。所有切库/开笔记/远端重载/关笔记/删除路径都必须同步维护 `savedContent`。
+    - `formatMarkdown` **只动空白**（文末空行 / 行尾空格 / 连续空行 / ATX 标题内空格）；围栏代码块、frontmatter、4 空格缩进行、硬换行（行尾两个空格或 `\`）逐字保留。**不要引 markdownlint / prettier / remark-lint**：它们是 linter 或整篇 AST 重排，会破坏硬约定 3。
+    - 关闭 `formatOnSave` 仍执行 `trimDocTail`；源码模式不把整理结果回写进 CodeMirror（避免光标跳动），只更新 `savedContent`。
+29. **大纲单一来源；移动端用悬浮按钮 + 底部抽屉**（M10 定）：
+    - `src/lib/outline.ts` 的 `extractOutline` 是**唯一**提取点：只认行首 0 空格的 ATX h1–h3，跳过 frontmatter 与 ``` / ~~~ 围栏；`index` 对应 ProseMirror 顶层 heading 序号，`line` 对应源码行号。列表内/`> ##`/1–3 空格缩进的标题不列——宁可少列，也不能让索引错位。
+    - 桌面侧栏用「文件 / 大纲」切换（Typora 式，窄屏强制文件面板）；选择存 localStorage `lanmark:sidebar-panel`。跳转统一经 `useOutlineStore` 发请求，`EditorApi.gotoHeading` **只改选区/滚动、不 dispatch doc**；源码模式按行号走 CodeMirror。
+    - 移动端是「编辑区右下角 44px 悬浮按钮 + 底部抽屉」，**不要把大纲塞进 85vw 侧栏，也不要往窄屏头部加按钮**（硬约定 13）；抽屉关闭走 `useDismissable`、遮罩不挂 onClick（硬约定 25），不监听 scroll/resize。
+    - 当前标题高亮由 `useActiveHeading` 观察 `.editor-host` 滚动实现；源码模式 v1 不高亮。以后要支持引用内/缩进标题，先换 mdast，别在组件里另写一套正则。
+    - **窄屏长笔记必须由 `.editor-host` 内部滚动**：`App` 的 `flex min-w-0 flex-1 flex-col` 与 `EditorPane` 的 `main` 都必须带 `min-h-0`。漏掉时内容会把 `main` 撑到 8000px+、改由 window 滚动，`gotoHeading` 的 `scrollTop` 只能走 10px，表现成「点目录不跳」且悬浮按钮被撑出屏幕（2026-10-20 真机 385×772 实测）。
+    - `OutlineSheet` 打开时上报 `reportBackHandler("overlay")` 并监听 `lanmark:back`，返回键先关抽屉而不是退出 App。
 
 ## 完成标准（DoD）
 

@@ -133,7 +133,7 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     useSettingsStore.setState({
       settings: {
         appearance: DEFAULT_APPEARANCE,
-        editor: { defaultMode: "wysiwyg", autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" },
+        editor: { defaultMode: "wysiwyg", autosaveMs: 3000, formatOnSave: true, sourceLineNumbers: true, newNoteLocation: "root" },
         storage: { trashRetentionDays: 30 },
         update: { autoCheck: true },
       },
@@ -145,7 +145,7 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
   it("load → 写入 CSS 变量", async () => {
     invoke.mockResolvedValueOnce({
       appearance: { ...DEFAULT_APPEARANCE, textSize: "lg" },
-      editor: { defaultMode: "source", autosaveMs: 1500, sourceLineNumbers: false, newNoteLocation: "last" },
+      editor: { defaultMode: "source", autosaveMs: 1500, formatOnSave: true, sourceLineNumbers: false, newNoteLocation: "last" },
       storage: { trashRetentionDays: 7 },
     });
     await useSettingsStore.getState().load();
@@ -302,14 +302,14 @@ describe("E4：恢复默认设置只重置设置小节", () => {
   it("reset 走 IPC 并以返回值为准", async () => {
     invoke.mockResolvedValueOnce({
       appearance: DEFAULT_APPEARANCE,
-      editor: { defaultMode: "wysiwyg", autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" },
+      editor: { defaultMode: "wysiwyg", autosaveMs: 3000, formatOnSave: true, sourceLineNumbers: true, newNoteLocation: "root" },
       storage: { trashRetentionDays: 30 },
       update: { autoCheck: true },
     });
     useSettingsStore.setState({
       settings: {
         appearance: { ...DEFAULT_APPEARANCE, textSize: "xl", lineHeight: "relaxed" },
-        editor: { defaultMode: "source", autosaveMs: 3000, sourceLineNumbers: false, newNoteLocation: "last" },
+        editor: { defaultMode: "source", autosaveMs: 3000, formatOnSave: true, sourceLineNumbers: false, newNoteLocation: "last" },
         storage: { trashRetentionDays: 7 },
         update: { autoCheck: true },
       },
@@ -327,7 +327,7 @@ describe("E4：恢复默认设置只重置设置小节", () => {
   it("reset 失败 → 回滚到上一版设置与变量", async () => {
     const prev = {
       appearance: { ...DEFAULT_APPEARANCE, textSize: "lg" as const },
-      editor: { defaultMode: "wysiwyg" as const, autosaveMs: 3000, sourceLineNumbers: true, newNoteLocation: "root" as const },
+      editor: { defaultMode: "wysiwyg" as const, autosaveMs: 3000, formatOnSave: true, sourceLineNumbers: true, newNoteLocation: "root" as const },
       storage: { trashRetentionDays: 30 },
       update: { autoCheck: true },
     };

@@ -4,7 +4,9 @@ import {
   FileText,
   Folder,
   FolderPlus,
+  FolderTree,
   History,
+  ListTree,
   Plus,
   RotateCcw,
   Search,
@@ -16,12 +18,33 @@ import { TreeView } from "./TreeView";
 import { SyncSection } from "./SyncSection";
 import { useSettingsStore } from "../stores/settings";
 import { CreateDialog } from "./CreateDialog";
+import { OutlinePanel } from "./OutlinePanel";
 import { AppMark } from "./AppMark";
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
 import type { PathTitle, TrashEntry } from "../lib/vault";
 
 /** 收藏/回收站收起时的预览条数（v0.5.1：默认 3 条 + 窄展开栏） */
 const SECTION_PREVIEW = 3;
+
+/** 侧栏面板（桌面端）：文件目录 / 当前笔记大纲。窄屏始终回到文件面板。 */
+type SidebarPanel = "files" | "outline";
+const PANEL_KEY = "lanmark:sidebar-panel";
+
+function loadPanel(): SidebarPanel {
+  try {
+    return localStorage.getItem(PANEL_KEY) === "outline" ? "outline" : "files";
+  } catch {
+    return "files";
+  }
+}
+
+function savePanel(panel: SidebarPanel): void {
+  try {
+    localStorage.setItem(PANEL_KEY, panel);
+  } catch {
+    /* 存储不可用时只本次会话生效 */
+  }
+}
 
 function SectionLabel({ children }: { children: string }) {
   return (
@@ -190,7 +213,7 @@ function TrashSection({
   );
 }
 
-export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
+export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => void; narrow?: boolean }) {
   const {
     tree,
     vaultPath,
@@ -207,6 +230,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     restoreFromTrash,
   } = useVaultStore();
   const [q, setQ] = useState(searchQuery);
+  const [panel, setPanel] = useState<SidebarPanel>(loadPanel);
+  // 窄屏不做侧栏大纲（移动端走悬浮按钮 + 底部抽屉）；但不覆盖用户桌面端的选择。
+  const effectivePanel: SidebarPanel = narrow ? "files" : panel;
+
+  useEffect(() => {
+    if (!narrow) savePanel(panel);
+  }, [panel, narrow]);
 
   /** 恢复回收站条目（store 里会刷新树/meta 并展开祖先目录） */
   const restore = (trashPath: string) => {
@@ -271,103 +301,154 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         </button>
       </div>
 
-      {/* 搜索框：白卡 + focus 靛蓝柔 ring */}
-      <div className="px-3 pt-1">
-        <div className="relative">
-          <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-3">
-            <Search size={14} />
-          </span>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="搜索笔记…"
-            className="w-full min-h-[44px] rounded-[10px] border border-line bg-card py-1.5 pl-8 pr-3 text-sm text-ink shadow-card outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20 md:min-h-0"
-          />
+      {/* 桌面侧栏面板切换（Typora 式）：文件 / 大纲。
+          窄屏强制文件面板——移动端的大纲入口是编辑器右下角悬浮按钮 + 底部抽屉，
+          不把目录藏进 85vw 抽屉（调研见 AGENTS / OutlineSheet 注释）。 */}
+      {!narrow && (
+        <div className="px-3 pt-1">
+          <div
+            className="flex rounded-lg bg-ink/5 p-0.5 text-xs"
+            role="tablist"
+            aria-label="侧栏面板"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={effectivePanel === "files"}
+              onClick={() => setPanel("files")}
+              className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 ${
+                effectivePanel === "files"
+                  ? "bg-card text-ink shadow-slider"
+                  : "text-ink-3 hover:text-ink"
+              }`}
+            >
+              <FolderTree size={12} />
+              文件
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={effectivePanel === "outline"}
+              onClick={() => setPanel("outline")}
+              className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 ${
+                effectivePanel === "outline"
+                  ? "bg-card text-ink shadow-slider"
+                  : "text-ink-3 hover:text-ink"
+              }`}
+            >
+              <ListTree size={12} />
+              大纲
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className="mt-1 flex-1 overflow-y-auto px-2 pb-3">
-        {q.trim() ? (
-          /* 搜索结果 */
-          <ul className="space-y-0.5">
-            {searchResults.map((r) => (
-              <li key={r.path}>
-                <button
-                  onClick={() => {
-                    openNoteAndClose(r.path);
-                    setQ("");
-                  }}
-                  className="w-full rounded-lg px-2.5 py-2 text-left hover:bg-canvas"
-                >
-                  <div className="truncate text-sm text-ink">{r.title}</div>
-                  <div className="mt-0.5 line-clamp-2 text-xs text-ink-3">
-                    {r.snippet || r.path}
-                  </div>
-                </button>
-              </li>
-            ))}
-            {searchResults.length === 0 && (
-              <li className="px-3 py-4 text-center text-xs text-ink-3">
-                没有匹配「{q}」的笔记
-              </li>
-            )}
-          </ul>
-        ) : (
-          <>
-            {/* 收藏（v0.5.1 起可折叠：默认 3 条 + 展开栏） */}
-            <FavoritesSection
-              items={favorites}
-              expanded={expandedSections.has("favorites")}
-              onToggle={() => toggleMetaSection("favorites")}
-              onOpen={openNoteAndClose}
+      {effectivePanel === "files" ? (
+        <>
+        {/* 搜索框：白卡 + focus 靛蓝柔 ring */}
+        <div className="px-3 pt-1">
+          <div className="relative">
+            <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-3">
+              <Search size={14} />
+            </span>
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="搜索笔记…"
+              className="w-full min-h-[44px] rounded-[10px] border border-line bg-card py-1.5 pl-8 pr-3 text-sm text-ink shadow-card outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20 md:min-h-0"
             />
+          </div>
+        </div>
 
-            {/* 最近：固定 3 条（store 已截断），不折叠（v0.5.1 定版） */}
-            <SectionLabel>最近</SectionLabel>
-            <MetaList items={recents} onOpen={openNoteAndClose} />
+        <div className="mt-1 flex-1 overflow-y-auto px-2 pb-3">
+          {q.trim() ? (
+            /* 搜索结果 */
+            <ul className="space-y-0.5">
+              {searchResults.map((r) => (
+                <li key={r.path}>
+                  <button
+                    onClick={() => {
+                      openNoteAndClose(r.path);
+                      setQ("");
+                    }}
+                    className="w-full rounded-lg px-2.5 py-2 text-left hover:bg-canvas"
+                  >
+                    <div className="truncate text-sm text-ink">{r.title}</div>
+                    <div className="mt-0.5 line-clamp-2 text-xs text-ink-3">
+                      {r.snippet || r.path}
+                    </div>
+                  </button>
+                </li>
+              ))}
+              {searchResults.length === 0 && (
+                <li className="px-3 py-4 text-center text-xs text-ink-3">
+                  没有匹配「{q}」的笔记
+                </li>
+              )}
+            </ul>
+          ) : (
+            <>
+              {/* 收藏（v0.5.1 起可折叠：默认 3 条 + 展开栏） */}
+              <FavoritesSection
+                items={favorites}
+                expanded={expandedSections.has("favorites")}
+                onToggle={() => toggleMetaSection("favorites")}
+                onOpen={openNoteAndClose}
+              />
 
-            {/* 笔记本树：新建入口统一在标题右侧。
-                点击弹对话框（命名 + 选位置），不再「先建默认名再内联重命名」。
-                M4i：手机上这里是**唯一**的新建入口 —— 曾加过编辑器右下角的
-                悬浮按钮（FAB），但它悬在正文上挡字，且「新建」是导航/管理动作，
-                属于侧栏而非编辑器，已移除。按钮触控尺寸 44px（硬约定 13）。 */}
-            <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
-              <span className="text-[11px] font-medium text-ink-3">笔记本</span>
-              <span className="flex gap-0.5">
-                <button
-                  title="新建笔记"
-                  aria-label="新建笔记"
-                  className="flex h-11 items-center gap-1 rounded-md px-2 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink md:h-7 md:px-1.5 md:py-0.5"
-                  onClick={() => openCreate("note", "")}
-                >
-                  <Plus size={12} />
-                  笔记
-                </button>
-                <button
-                  title="新建文件夹"
-                  aria-label="新建文件夹"
-                  className="flex h-11 items-center gap-1 rounded-md px-2 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink md:h-7 md:px-1.5 md:py-0.5"
-                  onClick={() => openCreate("folder", "")}
-                >
-                  <FolderPlus size={12} />
-                  文件夹
-                </button>
-              </span>
-            </div>
-            <TreeView tree={tree} onNavigate={onNavigate} />
+              {/* 最近：固定 3 条（store 已截断），不折叠（v0.5.1 定版） */}
+              <SectionLabel>最近</SectionLabel>
+              <MetaList items={recents} onOpen={openNoteAndClose} />
 
-            {/* 回收站（v0.5.1）：`.lanmark/trash` 的条目，可恢复到删除前位置。
-                放在笔记本树之后（顺序：收藏—最近—笔记本—回收站）。
-                条目不可打开（trash 里的笔记不属于工作区），只提供恢复。 */}
-            <TrashSection
-              items={trash}
-              expanded={expandedSections.has("trash")}
-              onToggle={() => toggleMetaSection("trash")}
-              onRestore={restore}
-            />
-          </>
-        )}
-      </div>
+              {/* 笔记本树：新建入口统一在标题右侧。
+                  点击弹对话框（命名 + 选位置），不再「先建默认名再内联重命名」。
+                  M4i：手机上这里是**唯一**的新建入口 —— 曾加过编辑器右下角的
+                  悬浮按钮（FAB），但它悬在正文上挡字，且「新建」是导航/管理动作，
+                  属于侧栏而非编辑器，已移除。按钮触控尺寸 44px（硬约定 13）。 */}
+              <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
+                <span className="text-[11px] font-medium text-ink-3">笔记本</span>
+                <span className="flex gap-0.5">
+                  <button
+                    title="新建笔记"
+                    aria-label="新建笔记"
+                    className="flex h-11 items-center gap-1 rounded-md px-2 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink md:h-7 md:px-1.5 md:py-0.5"
+                    onClick={() => openCreate("note", "")}
+                  >
+                    <Plus size={12} />
+                    笔记
+                  </button>
+                  <button
+                    title="新建文件夹"
+                    aria-label="新建文件夹"
+                    className="flex h-11 items-center gap-1 rounded-md px-2 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink md:h-7 md:px-1.5 md:py-0.5"
+                    onClick={() => openCreate("folder", "")}
+                  >
+                    <FolderPlus size={12} />
+                    文件夹
+                  </button>
+                </span>
+              </div>
+              <TreeView tree={tree} onNavigate={onNavigate} />
+
+              {/* 回收站（v0.5.1）：`.lanmark/trash` 的条目，可恢复到删除前位置。
+                  放在笔记本树之后（顺序：收藏—最近—笔记本—回收站）。
+                  条目不可打开（trash 里的笔记不属于工作区），只提供恢复。 */}
+              <TrashSection
+                items={trash}
+                expanded={expandedSections.has("trash")}
+                onToggle={() => toggleMetaSection("trash")}
+                onRestore={restore}
+              />
+            </>
+          )}
+        </div>
+
+        </>
+      ) : (
+        <div className="mt-1 flex-1 overflow-y-auto px-2 pb-3">
+          <OutlinePanel />
+        </div>
+      )}
 
       {/* M2 同步（方案 B 收纳，design/direction-approved.md）：
           常驻只剩一行（状态+开关+同步），管理/配对在点击行后的上拉面板里 */}

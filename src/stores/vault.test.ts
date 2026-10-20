@@ -58,6 +58,7 @@ vi.mock("./sync", () => ({
 const stopAutoLoopMock = vi.fn();
 
 import { useVaultStore } from "./vault";
+import { useSettingsStore } from "./settings";
 
 const { readNote, writeNote, recents, favorites, trashList, tree, search, rename, move } = m;
 
@@ -68,6 +69,7 @@ function baseState() {
     tree: [],
     activePath: null,
     content: "",
+    savedContent: null,
     dirty: false,
     savedAt: null,
     editorMode: "wysiwyg",
@@ -157,6 +159,83 @@ describe("openNote/closeNote 守卫", () => {
   });
 });
 
+describe("保存 no-op 守卫（trailing 伪空段落 / 点一下不写盘）", () => {
+  it("内容只多一个尾空行 → 不写盘，dirty 清掉", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "甲\n\n乙\n\n",
+      savedContent: "甲\n\n乙\n",
+      dirty: true,
+    });
+
+    const ok = await useVaultStore.getState().saveNow();
+
+    expect(ok).toBe(true);
+    expect(writeNote).not.toHaveBeenCalled();
+    expect(useVaultStore.getState().dirty).toBe(false);
+    expect(useVaultStore.getState().content).toBe("甲\n\n乙\n");
+  });
+
+  it("真实编辑 → 写格式化后的内容并更新基线", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "甲\n\n乙\n\n丙 \n\n",
+      savedContent: "甲\n\n乙\n",
+      dirty: true,
+    });
+
+    await useVaultStore.getState().saveNow();
+
+    expect(writeNote).toHaveBeenCalledTimes(1);
+    expect(writeNote).toHaveBeenCalledWith("a.md", "甲\n\n乙\n\n丙\n");
+    expect(useVaultStore.getState().savedContent).toBe("甲\n\n乙\n\n丙\n");
+    expect(useVaultStore.getState().dirty).toBe(false);
+  });
+
+  it("formatOnSave 关闭：仍裁尾空行，但保留中间空行", async () => {
+    const prev = useSettingsStore.getState().settings;
+    useSettingsStore.setState({
+      settings: { ...prev, editor: { ...prev.editor, formatOnSave: false } },
+    });
+    try {
+      // 只多尾空行 → 规范化后等价，不写
+      useVaultStore.setState({
+        activePath: "a.md",
+        content: "甲\n\n乙\n\n\n",
+        savedContent: "甲\n\n乙\n",
+        dirty: true,
+      });
+      await useVaultStore.getState().saveNow();
+      expect(writeNote).not.toHaveBeenCalled();
+
+      // 中间多空行 → 关闭整理时按 trimDocTail 只裁尾，内容仍不同 ⇒ 写
+      useVaultStore.setState({
+        activePath: "a.md",
+        content: "甲\n\n\n\n乙\n",
+        savedContent: "甲\n\n乙\n",
+        dirty: true,
+      });
+      await useVaultStore.getState().saveNow();
+      expect(writeNote).toHaveBeenCalledWith("a.md", "甲\n\n\n\n乙\n");
+    } finally {
+      useSettingsStore.setState({ settings: prev });
+    }
+  });
+
+  it("基线未知（null）时照常写，避免测试/异常路径误判", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "甲\n",
+      savedContent: null,
+      dirty: true,
+    });
+
+    await useVaultStore.getState().saveNow();
+
+    expect(writeNote).toHaveBeenCalledWith("a.md", "甲\n");
+  });
+});
+
 describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
   it("防抖为尾沿：连续输入在停止输入后才落盘一次", async () => {
     vi.useFakeTimers();
@@ -175,7 +254,7 @@ describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
       // t=3100 = 最后一次输入(100) + 3000（M5-3 默认档）
       await vi.advanceTimersByTimeAsync(2300);
       expect(writeNote).toHaveBeenCalledTimes(1);
-      expect(writeNote).toHaveBeenCalledWith("a.md", "ab");
+      expect(writeNote).toHaveBeenCalledWith("a.md", "ab\n");
     } finally {
       vi.useRealTimers();
     }
@@ -320,7 +399,7 @@ describe("switchVault：切换笔记库", () => {
 
     const ok = await useVaultStore.getState().switchVault("/v2", "open");
 
-    expect(writeNote).toHaveBeenCalledWith("a.md", "未保存");
+    expect(writeNote).toHaveBeenCalledWith("a.md", "未保存\n");
     expect(ok).toBe(true);
     const s = useVaultStore.getState();
     expect(s.vaultPath).toBe("/v2");

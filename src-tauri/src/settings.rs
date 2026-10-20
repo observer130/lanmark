@@ -61,6 +61,9 @@ pub struct EditorPrefs {
     pub default_mode: String,
     /// 自动保存防抖时长 ms
     pub autosave_ms: u32,
+    /// 保存时整理空白（文末空行 / 行尾空格 / 连续空行 / ATX 标题内空格）。
+    /// 只动空白，代码块 / frontmatter / 硬换行不动；默认开。
+    pub format_on_save: bool,
     /// 源码模式是否显示行号
     pub source_line_numbers: bool,
     /// 新建笔记的默认位置：`root` 固定根目录 / `last` 上次所在目录（前端会话内，不落库）
@@ -112,6 +115,7 @@ impl Default for EditorPrefs {
             default_mode: "wysiwyg".into(),
             // M5-3：默认 3s（原 700ms；档位整体调大，用户仍可选手动档）
             autosave_ms: 3000,
+            format_on_save: true,
             source_line_numbers: true,
             new_note_location: "root".into(),
         }
@@ -253,6 +257,7 @@ mod tests {
         let e = EditorPrefs::default();
         assert_eq!(e.default_mode, "wysiwyg");
         assert_eq!(e.autosave_ms, 3000); // M5-3 默认档（原 SAVE_DEBOUNCE_MS 700）
+        assert!(e.format_on_save, "保存整理默认开");
         assert!(e.source_line_numbers);
         assert_eq!(e.new_note_location, "root");
         assert_eq!(StoragePrefs::default().trash_retention_days, 30);
@@ -353,6 +358,7 @@ mod tests {
         assert!(json.contains("\"font\""), "M7 字体字段进 JSON: {json}");
         assert!(!json.contains("\"theme\""), "M6 的捆绑 theme 字段不再写回: {json}");
         assert!(json.contains("\"textSize\""), "前端按 camelCase 读: {json}");
+        assert!(json.contains("\"formatOnSave\""), "保存整理开关进 JSON: {json}");
         assert!(json.contains("\"trashRetentionDays\""));
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
@@ -401,6 +407,7 @@ mod tests {
         assert_eq!(s.appearance.clone().normalize().font, "sans");
         assert_eq!(s.appearance.line_height, "normal");
         assert_eq!(s.editor.autosave_ms, 3000);
+        assert!(s.editor.format_on_save, "旧配置缺字段 ⇒ 默认开启");
         // 完全空对象
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());

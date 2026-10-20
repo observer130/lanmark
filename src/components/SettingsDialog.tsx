@@ -201,6 +201,16 @@ function EditorSection() {
           onChange={(k) => set({ autosaveMs: k })}
         />
       </Row>
+      <Row
+        label="保存时整理格式"
+        hint="去掉多余空行与行尾空格；代码块、frontmatter、硬换行不动"
+      >
+        <Switch
+          on={e.formatOnSave}
+          label="保存时整理格式"
+          onToggle={() => set({ formatOnSave: !e.formatOnSave })}
+        />
+      </Row>
       <Row label="源码模式显示行号">
         <Switch
           on={e.sourceLineNumbers}
@@ -943,7 +953,7 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
     `回收站: ${i.stats ? `${i.stats.trashEntries} 项 · ${fmtBytes(i.stats.trashBytes)}` : "未知"}`,
     ...syncLines,
     `外观: 配色=${a.scheme} 字体=${a.font} 字号=${a.textSize} 行距=${a.lineHeight}`,
-    `编辑器: 默认模式=${i.settings.editor.defaultMode} 自动保存=${i.settings.editor.autosaveMs}ms`,
+    `编辑器: 默认模式=${i.settings.editor.defaultMode} 自动保存=${i.settings.editor.autosaveMs}ms 整理=${i.settings.editor.formatOnSave ? "开" : "关"}`,
     `配置目录: ${i.info?.configDir ?? "?"}`,
     `日志目录: ${i.info?.logDir ?? "?"}`,
   ].join("\n");

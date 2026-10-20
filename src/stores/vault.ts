@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { vault, remapPath, type VaultNode, type SearchHit, type PathTitle, type TrashEntry } from "../lib/vault";
 import { vaultPicker } from "../lib/sync";
 import { useSettingsStore } from "./settings";
+import { compareKey, formatMarkdown, trimDocTail } from "../lib/markdown-format";
 
 /** 「最近」固定 3 条（v0.5.1 用户定版：不折叠，多出的不看） */
 const RECENTS_SHOWN = 3;
@@ -12,6 +13,8 @@ interface VaultStore {
   tree: VaultNode[];
   activePath: string | null;
   content: string;
+  /** 上次读取/落盘的文件原文；null = 基线未知（此时不启用 no-op 守卫） */
+  savedContent: string | null;
   dirty: boolean;
   savedAt: number | null;
   editorMode: "read" | "wysiwyg" | "source";
@@ -154,6 +157,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   tree: [],
   activePath: null,
   content: "",
+  savedContent: null,
   dirty: false,
   savedAt: null,
   // M4c：初值取「默认打开模式」设置（设置 store 未加载时 = wysiwyg，与 M3 一致）
@@ -198,7 +202,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   pickVault: async (mode) => {
     try {
       const path = await vault.pickAndSet(mode);
-      set({ status: "ready", vaultPath: path, activePath: null, content: "", dirty: false });
+      set({ status: "ready", vaultPath: path, activePath: null, content: "", savedContent: null, dirty: false });
       await get().refreshTree();
       await get().refreshMeta();
     } catch (e) {
@@ -211,7 +215,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       const path = await vaultPicker.pickFolder();
       if (!path) return; // 用户取消
       const ready = await vault.setPath(path, mode);
-      set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
+      set({ status: "ready", vaultPath: ready, activePath: null, content: "", savedContent: null, dirty: false });
       await get().refreshTree();
       await get().refreshMeta();
     } catch (e) {
@@ -229,7 +233,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       const root = (base ?? "/storage/emulated/0/Android/data/com.lanmark.app/files").replace(/\/+$/, "");
       const path = `${root}/lanmark-vault`;
       const ready = await vault.setPathWithCreate(path, mode);
-      set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
+      set({ status: "ready", vaultPath: ready, activePath: null, content: "", savedContent: null, dirty: false });
       await get().refreshTree();
       await get().refreshMeta();
     } catch (e) {
@@ -250,7 +254,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         if (!String(openErr).includes("目录不存在")) throw openErr;
         ready = await vault.setPathWithCreate(path, "create");
       }
-      set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
+      set({ status: "ready", vaultPath: ready, activePath: null, content: "", savedContent: null, dirty: false });
       await get().refreshTree();
       await get().refreshMeta();
     } catch (e) {
@@ -317,7 +321,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       try {
         const { content } = await vault.readNote(s.activePath);
         if (content !== s.content) {
-          set({ content, dirty: false, savedAt: Date.now() });
+          set({ content, savedContent: content, dirty: false, savedAt: Date.now() });
         }
       } catch {
         // 笔记被远端删除：保留当前状态
@@ -345,6 +349,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       set({
         activePath: path,
         content,
+        savedContent: content,
         dirty: false,
         savedAt: null,
         renamingPath: null,
@@ -368,7 +373,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    set({ activePath: null, content: "", dirty: false, savedAt: null });
+    set({ activePath: null, content: "", savedContent: null, dirty: false, savedAt: null });
   },
 
   setContent: (content) => {
@@ -387,16 +392,47 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     }, prefs().autosaveMs);
   },
 
+  /**
+   * 落盘前先做「规范化比较」：内容与磁盘等价就**不写**。
+   *
+   * 为什么必须有这一层：Milkdown 的 trailing 插件会在首次选区事务往文末插一个空段落，
+   * 序列化成 markdown 就是多一个 `\n`。只在格式化层处理不够——`writeNote` 仍会被调用，
+   * 文件 mtime / 同步版本号照样变。这里用 `savedContent`（上次读/写的原文）做基线：
+   *  - `trimDocTail` 永远执行（修尾空行，即使 formatOnSave 关闭）；
+   *  - `formatMarkdown` 仅在设置开启时执行（整理中间空白）；
+   *  - `savedContent === null` 表示基线未知（测试/异常路径），此时照常写。
+   *
+   * 源码模式不把整理结果回写进 `content`：CodeMirror 是受控组件，外部改 value 会动光标。
+   * 只更新 `savedContent` 基线；下一次输入仍按规范化比较，不会重复写盘。
+   */
   saveNow: async () => {
-    const { activePath, content, dirty } = get();
+    const { activePath, content, dirty, savedContent, editorMode } = get();
     if (!activePath || !dirty) return true;
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
+
+    const format = prefs().formatOnSave;
+    const next = format ? formatMarkdown(content) : trimDocTail(content);
+
+    if (savedContent !== null) {
+      const base = format ? formatMarkdown(savedContent) : trimDocTail(savedContent);
+      if (compareKey(next) === compareKey(base)) {
+        // 伪变更（点一下 / 只差尾空行）：清 dirty，但不写盘、不触发同步。
+        set(editorMode === "source" ? { dirty: false } : { dirty: false, content: next });
+        return true;
+      }
+    }
+
     try {
-      await vault.writeNote(activePath, content);
-      set({ dirty: false, savedAt: Date.now() });
+      await vault.writeNote(activePath, next);
+      set({
+        dirty: false,
+        savedAt: Date.now(),
+        savedContent: next,
+        ...(editorMode === "source" ? {} : { content: next }),
+      });
       // M3d 触发 C：保存完成 → 通知自动同步循环（轻量 CustomEvent，避免两 store 循环依赖；
       // 循环侧 5s 尾沿后回合，docs/07 §7）
       window.dispatchEvent(new CustomEvent("lanmark:vault-saved"));
@@ -484,6 +520,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         vaultPath: ready,
         activePath: null,
         content: "",
+        savedContent: null,
         dirty: false,
         savedAt: null,
         tree: [],
@@ -587,7 +624,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       }
       // 保存失败则中止删除（未保存编辑不丢铁律）
       if (!(await s.saveNow())) return;
-      set({ activePath: null, content: "", dirty: false });
+      set({ activePath: null, content: "", savedContent: null, dirty: false });
     } else {
       if (!window.confirm(`确定删除「${path.split("/").pop()}」？（移入回收站）`)) {
         return;

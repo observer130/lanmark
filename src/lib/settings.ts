@@ -41,6 +41,8 @@ export interface Appearance {
 export interface EditorPrefs {
   defaultMode: EditorMode;
   autosaveMs: number;
+  /** 保存时整理空白（只动空白；代码块/frontmatter/硬换行不动） */
+  formatOnSave: boolean;
   sourceLineNumbers: boolean;
   newNoteLocation: NewNoteLocation;
 }

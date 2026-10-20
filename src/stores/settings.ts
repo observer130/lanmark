@@ -35,6 +35,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
 export const DEFAULT_EDITOR: EditorPrefs = {
   defaultMode: "wysiwyg",
   autosaveMs: 3000,
+  formatOnSave: true,
   sourceLineNumbers: true,
   newNoteLocation: "root",
 };

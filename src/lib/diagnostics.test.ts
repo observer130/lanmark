@@ -18,6 +18,7 @@ const SETTINGS: Settings = {
   editor: {
     defaultMode: "wysiwyg",
     autosaveMs: 3000,
+    formatOnSave: true,
     sourceLineNumbers: true,
     newNoteLocation: "root",
   },
