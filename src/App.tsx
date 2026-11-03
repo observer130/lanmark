@@ -236,7 +236,9 @@ function App() {
             >
               <Menu size={18} />
             </button>
-            {/* flex-col 接续高度链：让 EditorPane 的 flex-1 生效，编辑卡占满剩余高度 */}
+            {/* flex-col 接续高度链：让 EditorPane 的 flex-1 生效，编辑卡占满剩余高度。
+                `min-h-0` 同样不能删：列向 flex 项默认 min-height:auto 会按内容撑高，
+                长笔记下整列长出屏幕，编辑区就没有滚动范围了（详见 EditorPane 的 main）。 */}
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <EditorPane narrow={narrow} />
             </div>

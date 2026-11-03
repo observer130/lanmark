@@ -745,6 +745,11 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   const isFav = favorites.some((f) => f.path === activePath);
 
   return (
+    // ⚠️ `min-h-0` 是承重墙，别删（v0.7.0 的「只能显示一屏、无法下拉」就栽在这）：
+    // `<main>` 是列向 flex 项，默认 `min-height: auto` 等于内容高度 —— 长笔记会把整列
+    // 撑到内容高，编辑卡 `h-full` 随之变高，而 `.editor-host` 的 `height: 100%` 也等于
+    // 内容高 ⇒ 滚动容器没有可滚范围，内容被屏幕裁掉。窄屏（手机 / <768px 窗口）才走这条
+    // 层级（宽屏 main 是行向 item，交叉轴拉伸，不受影响）。
     <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
       {/* 头部：窄屏时左侧让出悬浮抽屉按钮的宽度（按钮占 12→46px），避免遮挡标题。
           Linux 无边框窗口（decorations:false）：头部空白即拖拽区，双击最大化；
