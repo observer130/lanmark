@@ -112,6 +112,7 @@ vault/
 - targetSdk 35+ 强制 edge-to-edge：删 `enableEdgeToEdge` 无效，必须在 `MainActivity` 对 decorView 做 insets 避让。
 - mDNS 收包需 MulticastLock（随 SyncService 生命周期）；WifiLock 无效。
 - 加 TLS 时 rustls 必须切 ring 后端（aws-lc-rs 在 Android 交叉编译会挂）。
+- **原生库必须 16KB 页对齐**：Android 15+ 的 16KB 页设备上，`.so` 的 `LOAD` 段不是 16KB 对齐会在安装时弹「此应用不符合 16KB 对齐要求」，这类设备还可能加载失败。NDK r27 的 lld 默认只对齐 4KB，所以 `src-tauri/build.rs` 对 Android 目标显式加 `-Wl,-z,max-page-size=16384`（NDK r28 起默认对齐，可删）。改完用 `llvm-readelf -l liblanmark_lib.so` 核 `LOAD` 的 `Align` 应为 `0x4000`。
 - 上滑划掉 Activity 会 `process::exit(0)` 连 FGS 一起杀（tauri#15671）→ `prevent_exit()` 保活；重建 Activity 后的白屏用 `ExitRequested` 置 `ACTIVITY_LOST` + 下次 `Resumed` 销毁旧窗口重建。零窗口时 wry 不分发 Resumed，所以 `patches/tauri-runtime-wry` 必须入库。
 
 ## 完成标准（DoD）
