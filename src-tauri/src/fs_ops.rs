@@ -452,14 +452,6 @@ fn write_tombstones(vault: &Path, snapshot: &[(String, String)]) {
     }
 }
 
-/// M3b：为条目下全部同步单元立即记 tombstone（hash 以磁盘为准，时间 = 现在）。
-/// 保留原入口与语义；rename/move 不能直接用它——它们必须先快照、
-/// 等 rename 成功后再 `write_tombstones`。
-#[allow(dead_code)]
-fn record_tombstones_for_entry(vault: &Path, rel: &str, conn: &Connection) {
-    write_tombstones(vault, &snapshot_tombstones_for_entry(vault, rel, conn));
-}
-
 /// M3b D4：清除条目下全部同步单元的 tombstone
 fn clear_tombstones_for_entry(vault: &Path, rel: &str, conn: &Connection) {
     if let Ok(files) = entry_file_list(vault, rel, conn) {
