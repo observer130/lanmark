@@ -331,6 +331,11 @@ fn delete_batch(
 /// 把拉取内容落到本地（笔记走 write_note 进索引；附件校验内容寻址）。
 /// 返回错误信息（None = 成功）。
 fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::PullFile) -> Option<String> {
+    // 与服务器 push 对称：明文 HTTP 下冒充服务器可下发 .lanmark/ 路径，
+    // 写坏 tombstone / 基线 / 索引库 → 必须统一拒绝。
+    if fs_ops::has_dot_segment(&f.path) {
+        return Some(format!("{}: 点目录路径禁止同步", f.path));
+    }
     let bytes = match b64_decode(&f.content_base64) {
         Ok(b) => b,
         Err(e) => return Some(format!("{}: {e}", f.path)),
@@ -341,6 +346,10 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
     }
     match f.kind.as_str() {
         "note" => {
+            // 与服务器 push 对称：笔记必须 .md（此前任意扩展名都会被写进索引）
+            if !f.path.ends_with(".md") {
+                return Some(format!("{}: 笔记必须以 .md 结尾", f.path));
+            }
             // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）
             if let Some(parent) = fs_ops::safe_join(vault, &f.path)
                 .map_err(|e| e.to_string())
@@ -2893,6 +2902,55 @@ mod tests {
         assert_eq!(batches[1].len(), 1);
 
         assert!(split_push_batches(Vec::new(), &HashMap::new()).is_empty());
+    }
+
+    /// 回归（R2）：pull 落盘与服务端 push 不对称——冒充服务器可把
+    /// `.lanmark/tombstones.json` 等元数据写坏；note 也不校验扩展名。
+    #[test]
+    fn store_pulled_rejects_dot_paths_and_non_md_notes() {
+        let (dir, state) = client_vault();
+        let conn_guard = state.db.lock().unwrap();
+        let conn = conn_guard.as_ref().unwrap();
+
+        // 已存在的账本必须原样保留（不得创建/覆盖）
+        let tomb = dir.path().join(".lanmark/tombstones.json");
+        std::fs::write(&tomb, "keep-me").unwrap();
+        let evil = br#"{"version":1,"entries":[]}"#;
+        let pf = crate::sync::PullFile {
+            path: ".lanmark/tombstones.json".into(),
+            kind: "note".into(),
+            content_base64: b64_encode(evil),
+            hash: fs_ops::content_hash(evil),
+            mtime_ms: 1_700_000_000_000,
+        };
+        let err = store_pulled(dir.path(), conn, &pf).expect("点目录必须返回错误");
+        assert!(err.contains("点目录"), "点目录必须拒绝: {err}");
+        assert_eq!(std::fs::read(&tomb).unwrap(), b"keep-me", "不得覆盖元数据");
+
+        // note 必须是 .md
+        let txt = b"hello";
+        let pf = crate::sync::PullFile {
+            path: "a.txt".into(),
+            kind: "note".into(),
+            content_base64: b64_encode(txt),
+            hash: fs_ops::content_hash(txt),
+            mtime_ms: 1_700_000_000_000,
+        };
+        let err = store_pulled(dir.path(), conn, &pf).expect("非 markdown 必须返回错误");
+        assert!(err.contains(".md"), "非 markdown 笔记必须拒绝: {err}");
+        assert!(!dir.path().join("a.txt").exists(), "拒绝时不得落盘");
+
+        // 正常 .md 仍成功（父目录自动创建）
+        let body = b"# ok";
+        let pf = crate::sync::PullFile {
+            path: "子目录/正常.md".into(),
+            kind: "note".into(),
+            content_base64: b64_encode(body),
+            hash: fs_ops::content_hash(body),
+            mtime_ms: 1_700_000_000_000,
+        };
+        assert_eq!(store_pulled(dir.path(), conn, &pf), None);
+        assert_eq!(std::fs::read(dir.path().join("子目录/正常.md")).unwrap(), body);
     }
 
     /// S5 回归：pull 附件落盘必须是 tmp+rename（替换目标本身），而不是就地
