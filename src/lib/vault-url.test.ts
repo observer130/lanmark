@@ -1,5 +1,6 @@
 import { afterEach, describe, it, expect } from "vitest";
 import {
+  decodeRefPath,
   isExternal,
   resolveFrom,
   relativeFrom,
@@ -84,7 +85,8 @@ describe("特殊字符文件名（' ( ) !——此前 URL 在这些字符处被�
 
   it("图片引用正确还原（回归：截断路径曾产出错误的 .. 层数）", () => {
     const md = `![](${toVaultUrl("a/b'c/x.png")})`;
-    expect(vaultUrlsToRelative(md, "a/b")).toBe("![](../b'c/x.png)");
+    // 生成端把 ' 编码为 %27，保存侧再编码回去（裸 ' 会被 title 解析误伤）
+    expect(vaultUrlsToRelative(md, "a/b")).toBe("![](../b%27c/x.png)");
   });
 
   it("正文手写的 vault:// 文本不得被改写（回归：此前全局正则静默改写）", () => {
@@ -116,6 +118,149 @@ describe("vaultUrlsToRelative（保存时 URL → 笔记相对引用）", () => 
     const md = `![](${toVaultUrl("assets/a.png")})\n![](${toVaultUrl("assets/b.png")})`;
     const out = vaultUrlsToRelative(md, "a/b");
     expect(out).toBe("![](../../assets/a.png)\n![](../../assets/b.png)");
+  });
+});
+
+/**
+ * 保存侧扫描器（替代 `]\([^()\s]+\)` 正则）：
+ * 旧正则的三类硬伤——title 导致整条失配、alt 里的 `\]` 截断、代码区域被误改。
+ */
+describe("vaultUrlsToRelative 扫描器（title / 转义 / 代码区域 / 空格）", () => {
+  it("带 title 的图片：URL 还原，title 原样保留", () => {
+    expect(vaultUrlsToRelative('![a](vault://localhost/assets/x.png "标题")', "")).toBe(
+      '![a](assets/x.png "标题")',
+    );
+    expect(vaultUrlsToRelative("![a](vault://localhost/assets/x.png '标题')", "")).toBe(
+      "![a](assets/x.png '标题')",
+    );
+    expect(vaultUrlsToRelative("![a](vault://localhost/assets/x.png (标题))", "")).toBe(
+      "![a](assets/x.png (标题))",
+    );
+    expect(vaultUrlsToRelative('![a](vault://localhost/a.md "标题 (v2)")', "工作")).toBe(
+      '![a](../a.md "标题 (v2)")',
+    );
+  });
+
+  it("alt 含转义 `\\]`：标签配对不被截断", () => {
+    const md = "![截图 \\[1\\]](vault://localhost/assets/x.png)";
+    expect(vaultUrlsToRelative(md, "")).toBe("![截图 \\[1\\]](assets/x.png)");
+  });
+
+  it("alt 含嵌套 [ ]：按平衡配对", () => {
+    const md = "[![图 [1]](vault://localhost/assets/x.png)](https://x.com)";
+    expect(vaultUrlsToRelative(md, "")).toBe("[![图 [1]](assets/x.png)](https://x.com)");
+  });
+
+  it("链接里嵌图片：两处 vault URL 都还原（编辑顺序不串位）", () => {
+    const md = "[![a](vault://localhost/assets/x.png)](vault://localhost/b.md)";
+    expect(vaultUrlsToRelative(md, "")).toBe("[![a](assets/x.png)](b.md)");
+  });
+
+  it("同一篇里非 vault 目标原样保留（含空格 / title）", () => {
+    const md = '[x](assets/a b.md "标题") ![y](vault://localhost/assets/y.png)';
+    expect(vaultUrlsToRelative(md, "")).toBe('[x](assets/a b.md "标题") ![y](assets/y.png)');
+  });
+
+  it("空格：URL 里 %20 → 相对引用仍写 %20（CommonMark 合法）", () => {
+    expect(vaultUrlsToRelative("![a](vault://localhost/assets/my%20pic.png)", "")).toBe(
+      "![a](assets/my%20pic.png)",
+    );
+    // 中文 + 空格 + 百分号：先解码再编码，且 % 不双重编码
+    const url = "vault://localhost/assets/100%25%20%E5%9B%BE.png";
+    // 中文不强制编码（CommonMark 允许；落盘后与既有中文引用一致）
+    expect(vaultUrlsToRelative(`![a](${url})`, "")).toBe("![a](assets/100%25%20图.png)");
+  });
+
+  it("跨级：笔记在 工作/ 下 → ../assets/x.png", () => {
+    expect(vaultUrlsToRelative("![a](vault://localhost/assets/x.png)", "工作")).toBe(
+      "![a](../assets/x.png)",
+    );
+    expect(vaultUrlsToRelative("![a](vault://localhost/assets/x.png)", "工作/读书")).toBe(
+      "![a](../../assets/x.png)",
+    );
+  });
+
+  it("fenced code / 行内 code 里的 vault:// 不动", () => {
+    const md = [
+      "```md",
+      "![a](vault://localhost/assets/x.png)",
+      "```",
+      "",
+      "~~~~",
+      "![b](http://vault.localhost/assets/y.png)",
+      "~~~~",
+      "",
+      "行内 `![c](vault://localhost/assets/z.png)` 与 ``vault://localhost/a b``。",
+    ].join("\n");
+    expect(vaultUrlsToRelative(md, "")).toBe(md);
+    // 代码块之外的引用照常还原（扫描器不能因第一个围栏就停摆）
+    expect(vaultUrlsToRelative(`![ok](vault://localhost/assets/ok.png)\n\n${md}`, "")).toBe(
+      `![ok](assets/ok.png)\n\n${md}`,
+    );
+  });
+
+  it("围栏长度必须匹配（4 个反引号包围 3 个反引号的代码块）", () => {
+    const inside = "```js\n![a](vault://localhost/assets/x.png)\n```";
+    const md = ["````md", inside, "````", "", "![b](vault://localhost/assets/y.png)"].join("\n");
+    expect(vaultUrlsToRelative(md, "")).toBe(
+      ["````md", inside, "````", "", "![b](assets/y.png)"].join("\n"),
+    );
+  });
+
+  it("CRLF 换行的围栏同样跳过", () => {
+    const md =
+      "```\r\n![a](vault://localhost/assets/x.png)\r\n```\r\n\r\n![b](vault://localhost/assets/y.png)\r\n";
+    expect(vaultUrlsToRelative(md, "")).toBe(
+      "```\r\n![a](vault://localhost/assets/x.png)\r\n```\r\n\r\n![b](assets/y.png)\r\n",
+    );
+  });
+
+  it("普通链接（非图片）仍还原", () => {
+    expect(vaultUrlsToRelative("[x](vault://localhost/a.md)", "")).toBe("[x](a.md)");
+    expect(vaultUrlsToRelative("[x](vault://localhost/a.md)", "工作")).toBe("[x](../a.md)");
+  });
+
+  it("无 vault 前缀的 md 逐字节不变（含空格/中文/%20 的既有引用）", () => {
+    const md = [
+      "![a](assets/my pic.png)",
+      "[b](工作/图%20表.md)",
+      "![c](<assets/a b.png>)",
+      "[d](a\\)b.md)",
+      "正文里的 vault://localhost 只是文字，没有 `](` 形态。",
+    ].join("\n");
+    expect(vaultUrlsToRelative(md, "工作")).toBe(md);
+  });
+
+  it("<...> 包裹的 destination：只改尖括号内的内容，包裹语法保留", () => {
+    expect(
+      vaultUrlsToRelative('![a](<vault://localhost/assets/my pic.png> "标题")', ""),
+    ).toBe('![a](<assets/my%20pic.png> "标题")');
+  });
+
+  it("`\\)` 不结束 destination（转义还原后再编码）", () => {
+    expect(vaultUrlsToRelative("[x](vault://localhost/a\\)b.md)", "")).toBe("[x](a%29b.md)");
+  });
+
+  it("参考式定义 `[x]: url` 不处理", () => {
+    const md = "[x]: vault://localhost/a.md\n\n正文。";
+    expect(vaultUrlsToRelative(md, "工作")).toBe(md);
+  });
+});
+
+describe("decodeRefPath（显示侧逐段解码）", () => {
+  it("空格编码还原", () => {
+    expect(decodeRefPath("assets/my%20pic.png")).toBe("assets/my pic.png");
+  });
+  it("中文 / 多级路径逐段解码，.. 与空段保留", () => {
+    expect(decodeRefPath("../assets/%E4%B8%AD%E6%96%87.png")).toBe("../assets/中文.png");
+    expect(decodeRefPath("a//b/../c%20d.png")).toBe("a//b/../c d.png");
+    expect(decodeRefPath("")).toBe("");
+    expect(decodeRefPath("..")).toBe("..");
+  });
+  it("非法转义原样返回（不能让一张坏图抛异常）", () => {
+    expect(decodeRefPath("assets/100%.png")).toBe("assets/100%.png");
+    expect(decodeRefPath("assets/%E0%A4%A.png")).toBe("assets/%E0%A4%A.png");
+    expect(decodeRefPath("assets/%ZZ.png")).toBe("assets/%ZZ.png");
   });
 });
 
@@ -163,6 +308,13 @@ describe("Android 协议前缀（跨平台 URL 生成 / 保存还原）", () => 
     expect(vaultUrlsToRelative(`![](${androidUrl})`, "工作")).not.toContain("vault.localhost");
     // 桌面 UA 下同样要能剥（跨端读到 Android 写过的内容）
     expect(vaultUrlsToRelative(md, "工作")).toBe("![](../assets/x.png)");
+  });
+
+  it("Android 前缀 + title / 普通链接也走同一扫描器", () => {
+    expect(vaultUrlsToRelative('![a](http://vault.localhost/assets/x.png "标题")', "工作")).toBe(
+      '![a](../assets/x.png "标题")',
+    );
+    expect(vaultUrlsToRelative("[x](http://vault.localhost/a.md)", "工作")).toBe("[x](../a.md)");
   });
 
   it("isExternal 认两种前缀", () => {

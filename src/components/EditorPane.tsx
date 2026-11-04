@@ -26,6 +26,7 @@ import { dragWindow, isLinuxDesktop, WindowControls } from "./WindowControls";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
 import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
 import {
+  decodeRefPath,
   isExternal,
   resolveFrom,
   toVaultUrl,
@@ -244,7 +245,9 @@ export function MilkdownHost({
           if (node.type.name === "image") {
             const src = (node.attrs.src as string) ?? "";
             if (src && !isExternal(src)) {
-              const vaultRel = resolveFrom(baseDir, src);
+              // 磁盘里的引用可能带 percent-encoding（assets/my%20pic.png）：
+              // 先解码再进 vault 协议，否则 toVaultUrl 会把 `%` 再编码成 `%25`（双击编码 404）。
+              const vaultRel = resolveFrom(baseDir, decodeRefPath(src));
               const url = toVaultUrl(vaultRel);
               if (url !== src) {
                 tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: url });
