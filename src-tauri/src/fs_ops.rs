@@ -220,6 +220,27 @@ fn unique_target_with_cap(dir: &Path, file_name: &str, cap: u32) -> std::io::Res
     ))
 }
 
+/// 两个路径是否指向同一个文件（纯大小写重命名的目标判定用）。
+///
+/// Unix 比 dev+ino；Windows/macOS 的默认卷大小写不敏感，`todo.md` 与 `TODO.md`
+/// 的 `exists()` 都成立，canonicalize 后可能仍保留输入的大小写 → 忽略大小写比较。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca.to_string_lossy().eq_ignore_ascii_case(&cb.to_string_lossy()),
+        _ => false,
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        _ => false,
+    }
+}
+
 /// 解析出「目标目录 + 规范化后的名字」，供 create/rename 复用
 fn resolve_target(
     vault: &Path,
@@ -314,7 +335,21 @@ pub fn rename_entry(
     if new_name == old_name {
         return Ok(rel_path.to_string());
     }
-    let target = unique_target(&parent, &new_name)?;
+    // 纯大小写重命名（todo.md → TODO.md）：大小写不敏感卷上
+    // `candidate.exists()` 会命中条目自身，走 unique_target 会变成 TODO-2.md。
+    // 仅当候选不存在、或候选就是同一个文件时才直接使用新名字；
+    // 候选是另一个文件时仍走 unique_target 让位（不覆盖）。
+    let case_only = old_name != new_name && old_name.eq_ignore_ascii_case(&new_name);
+    let target = if case_only {
+        let candidate = parent.join(&new_name);
+        if !candidate.exists() || is_same_file(&candidate, &old_abs) {
+            candidate
+        } else {
+            unique_target(&parent, &new_name)?
+        }
+    } else {
+        unique_target(&parent, &new_name)?
+    };
     // M3b：重命名 = 旧路径消失 → 记旧路径 tombstone（文件夹展开），
     // 对端收敛为「旧路径删除 + 新路径推送」，内容在新路径保留（铁律）。
     // 顺序硬约定：先只读快照（路径 + hash），fs::rename 成功后才写墓碑。
@@ -1850,6 +1885,37 @@ mod tests {
         assert_eq!(after, before, "读失败不得覆盖既有索引");
         assert_eq!(after.1, body);
         assert_eq!(after.3, content_hash(body.as_bytes()));
+    }
+
+    /// 回归：纯大小写重命名（todo.md → TODO.md）在大小写不敏感文件系统上
+    /// 命中条目自身 → 被改成 TODO-2.md。
+    #[test]
+    fn case_only_rename_keeps_requested_case() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        fs::write(vault.join("todo.md"), "内容不变").unwrap();
+
+        let new_path = rename_entry(vault, "todo.md", "TODO.md", &conn).unwrap();
+        assert_eq!(new_path, "TODO.md");
+        assert_eq!(fs::read_to_string(vault.join("TODO.md")).unwrap(), "内容不变");
+        assert!(!vault.join("TODO-2.md").exists(), "不得退化成 -2 副本");
+    }
+
+    /// 用符号链接在 Linux 上模拟「候选名已存在但指向同一文件」：
+    /// Windows/macOS 大小写不敏感时 `TODO.md` 就是 `todo.md` 本身。
+    #[cfg(unix)]
+    #[test]
+    fn case_only_rename_treats_same_file_target_as_self() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        fs::write(vault.join("todo.md"), "内容不变").unwrap();
+        std::os::unix::fs::symlink("todo.md", vault.join("TODO.md")).unwrap();
+
+        let new_path = rename_entry(vault, "todo.md", "TODO.md", &conn).unwrap();
+        assert_eq!(new_path, "TODO.md", "同文件候选应直接用作目标，而不是 -2");
+        assert_eq!(fs::read_to_string(vault.join("TODO.md")).unwrap(), "内容不变");
+        assert!(!vault.join("todo.md").exists());
+        assert!(!vault.join("TODO-2.md").exists());
     }
 
     /// 来源索引不是条目：usage 不计；prune 清过期条目时自愈索引；
