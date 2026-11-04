@@ -52,6 +52,16 @@ pub fn safe_join(vault: &Path, rel: &str) -> std::io::Result<PathBuf> {
     Ok(vault.join(rel))
 }
 
+/// 路径任一段以 `.` 开头（`.lanmark`、`.obsidian`…）。
+///
+/// 用户路径入口（IPC / vault 协议 / 同步 push & pull）据此拒绝点目录：
+/// `.lanmark/` 里有索引库（含全部正文缓存）、配对码与 token，不能被普通
+/// 笔记读写链路碰到。注意回收站内部路径本身就位于 `.lanmark/trash/`，
+/// 走 `fs_ops` 内部的回收站函数，不经过该判定。
+pub fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(|seg| seg.starts_with('.'))
+}
+
 /// 解析 vault 相对路径并校验不越出 vault（防符号链接逃逸）。
 ///
 /// `safe_join` 只挡字符串层面的 `..`/绝对路径，挡不住 vault 内的符号链接：

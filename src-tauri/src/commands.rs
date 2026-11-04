@@ -27,6 +27,16 @@ pub(crate) fn with_vault<T>(state: &Arc<AppState>, f: impl FnOnce(&PathBuf) -> C
     f(vault)
 }
 
+/// 用户路径入口的点目录门禁：与 vault 协议 / 同步 push & pull 一致，
+/// 拒绝 `.lanmark/` 等点目录（索引库、配对码与 token 不得经 IPC 读写/删除）。
+/// 回收站函数（`.lanmark/trash/…`）不走这里。
+fn reject_dot_path(path: &str) -> CmdResult<()> {
+    if fs_ops::has_dot_segment(path) {
+        return Err(format!("点目录路径禁止访问: {path}"));
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
@@ -220,6 +230,7 @@ pub fn folder_create_op(state: &Arc<AppState>, dir: &str, name: &str) -> CmdResu
 }
 
 pub fn entry_rename_op(state: &Arc<AppState>, path: &str, new_name: &str) -> CmdResult<String> {
+    reject_dot_path(path)?;
     with_vault(state, |vault| {
         with_db(state, |conn| {
             fs_ops::rename_entry(vault, path, new_name, conn).map_err(|e| e.to_string())
@@ -228,6 +239,8 @@ pub fn entry_rename_op(state: &Arc<AppState>, path: &str, new_name: &str) -> Cmd
 }
 
 pub fn entry_move_op(state: &Arc<AppState>, path: &str, new_dir: &str) -> CmdResult<String> {
+    reject_dot_path(path)?;
+    reject_dot_path(new_dir)?;
     with_vault(state, |vault| {
         with_db(state, |conn| {
             fs_ops::move_entry(vault, path, new_dir, conn).map_err(|e| e.to_string())
@@ -236,6 +249,7 @@ pub fn entry_move_op(state: &Arc<AppState>, path: &str, new_dir: &str) -> CmdRes
 }
 
 pub fn entry_delete_op(state: &Arc<AppState>, path: &str) -> CmdResult<String> {
+    reject_dot_path(path)?;
     with_vault(state, |vault| {
         with_db(state, |conn| {
             // M3b：删除前记 tombstone（文件夹 = 展开其下全部同步单元；hash 以磁盘为准），
@@ -266,6 +280,7 @@ pub struct NoteContent {
 
 /// 读取笔记内容，同时记入「最近」
 pub fn note_read_op(state: &Arc<AppState>, path: &str) -> CmdResult<NoteContent> {
+    reject_dot_path(path)?;
     with_vault(state, |vault| {
         let content = fs_ops::read_note(vault, path).map_err(|e| e.to_string())?;
         with_db(state, |conn| {
@@ -284,6 +299,7 @@ pub struct WriteResult {
 }
 
 pub fn note_write_op(state: &Arc<AppState>, path: &str, content: &str) -> CmdResult<WriteResult> {
+    reject_dot_path(path)?;
     with_vault(state, |vault| {
         with_db(state, |conn| {
             let (mtime_ms, hash) = fs_ops::write_note(vault, path, content, conn).map_err(|e| e.to_string())?;
@@ -320,6 +336,7 @@ pub fn favorites_list_op(state: &Arc<AppState>) -> CmdResult<Vec<(String, String
 
 /// 返回切换后的状态（true=已收藏）
 pub fn favorite_toggle_op(state: &Arc<AppState>, path: &str) -> CmdResult<bool> {
+    reject_dot_path(path)?;
     with_db(state, |conn| db::favorite_toggle(conn, path, fs_ops::now_ms()).map_err(|e| e.to_string()))
 }
 
@@ -852,6 +869,53 @@ mod e2e_tests {
         trash_clear_op(s).unwrap();
         assert!(tomb.exists(), "清回收站不得动 tombstone");
         assert_eq!(std::fs::read_to_string(&tomb).unwrap(), r#"{"version":1,"entries":[]}"#);
+    }
+
+    /// 回归（R1）：IPC 用户路径入口必须与 vault 协议 / 同步侧一致地拒绝点目录，
+    /// 否则前端任一命令即可读走 sync.json（配对码 + 全部 token）或删除索引库。
+    #[test]
+    fn dot_directory_read_and_delete_rejected() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        let sync_json = dir.path().join(".lanmark/sync.json");
+        let original = r#"{"pairCode":"123456","tokens":["t"]}"#;
+        std::fs::write(&sync_json, original).unwrap();
+
+        let err = note_read_op(s, ".lanmark/sync.json").err().expect("读取必须返回错误");
+        assert!(err.contains("点目录"), "读取必须拒绝: {err}");
+        let err = entry_delete_op(s, ".lanmark/sync.json").unwrap_err();
+        assert!(err.contains("点目录"), "删除必须拒绝: {err}");
+
+        // 文件仍在且内容未变；也不得留下回收站条目
+        assert!(sync_json.exists(), "点目录文件不得被删除");
+        assert_eq!(std::fs::read_to_string(&sync_json).unwrap(), original);
+        assert!(trash_list_op(s).unwrap().is_empty(), "拒绝删除时不得进回收站");
+
+        // 正常路径行为不变
+        let note = note_create_op(s, "", "正常").unwrap();
+        note_write_op(s, &note.path, "正常内容").unwrap();
+        assert_eq!(note_read_op(s, &note.path).unwrap().content, "正常内容");
+    }
+
+    /// R1 其余用户路径入口：写 / 改名 / 移动（源与目标目录）/ 收藏
+    #[test]
+    fn dot_directory_user_entries_rejected() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        let sync_json = dir.path().join(".lanmark/sync.json");
+        std::fs::write(&sync_json, "keep-me").unwrap();
+        let note = note_create_op(s, "", "正常").unwrap();
+
+        assert!(note_write_op(s, ".lanmark/sync.json", "pwn").is_err());
+        assert!(entry_rename_op(s, ".lanmark/sync.json", "x.json").is_err());
+        assert!(entry_move_op(s, ".lanmark/sync.json", "assets").is_err());
+        assert!(entry_move_op(s, &note.path, ".lanmark").is_err());
+        assert!(favorite_toggle_op(s, ".lanmark/sync.json").is_err());
+
+        assert_eq!(std::fs::read_to_string(&sync_json).unwrap(), "keep-me", "不得改内容");
+        assert!(sync_json.exists());
+        assert!(dir.path().join(&note.path).exists(), "正常笔记不得被移走");
+        assert!(!dir.path().join(".lanmark/x.json").exists());
     }
 
     /// 侧栏「回收站」链路：删除 → trash_list_op 可见（含来源）→ trash_restore_op

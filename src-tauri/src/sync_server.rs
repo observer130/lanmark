@@ -775,7 +775,7 @@ fn write_pushed_file(
 ) -> Result<Landed, String> {
     // 点目录（.lanmark/ 等）禁止写入：否则远程可写 .lanmark/evil.md 进索引
     // 并每回合重复拉取，或污染元数据目录
-    if has_dot_segment(&pf.path) {
+    if fs_ops::has_dot_segment(&pf.path) {
         return Err("点目录路径禁止同步".into());
     }
     let bytes = b64_decode(&pf.content_base64)?;
@@ -871,11 +871,6 @@ fn write_pushed_file(
     }
 }
 
-/// 路径任一段以 `.` 开头（.lanmark、.obsidian…）
-fn has_dot_segment(path: &str) -> bool {
-    path.split('/').any(|seg| seg.starts_with('.'))
-}
-
 /// GET /api/v1/tombstones —— 删除墓碑列表（需鉴权；docs/07 §3）。
 /// 旧服务器无此端点 → 404，客户端按空列表处理（删除传播静默关闭，退化 M2 行为）。
 /// 顺带做 TTL 清理（30 天，惰性执行）。
@@ -937,7 +932,7 @@ fn delete_blocking(app: &Arc<AppState>, paths: &[String]) -> Vec<PushResult> {
     for path in paths {
         // 点目录禁止删除：.lanmark/lanmark.db（索引事实）与 sync.json（全体凭据）
         // 被删 = 同步体系自我 DoS
-        if has_dot_segment(path) {
+        if fs_ops::has_dot_segment(path) {
             results.push(PushResult {
                 path: path.clone(),
                 ok: false,

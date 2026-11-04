@@ -20,7 +20,7 @@ pub fn resolve(state: &Arc<AppState>, raw_path: &str) -> Option<(String, Vec<u8>
     }
     // 点目录禁止服务：.lanmark/lanmark.db 含全部正文缓存，
     // .lanmark/sync.json 含配对码与全部 token——webview 内任何 JS 可 fetch
-    if rel.split('/').any(|seg| seg.starts_with('.')) {
+    if crate::fs_ops::has_dot_segment(&rel) {
         return None;
     }
     let vault = state.vault.lock().ok()?.as_ref().cloned()?;
