@@ -377,8 +377,11 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         // 该残余窗口以「同步前已 flush」为主防线
         try {
           const { content } = await vault.readNote(active);
-          if (content !== s.content) {
-            useVaultStore.setState({ content, dirty: false, savedAt: Date.now() });
+          // readNote 期间用户可能已开始输入 / 切到别的笔记 → 重新取状态再判定，
+          // 由 applyExternalContent 统一校验并把 externalRev 自增（编辑器据此换文档）
+          const now = useVaultStore.getState();
+          if (now.activePath === active && !now.dirty && content !== now.content) {
+            now.applyExternalContent(active, content);
           }
         } catch {
           // 文件被对端删除等：保留当前状态

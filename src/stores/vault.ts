@@ -3,6 +3,7 @@ import { vault, remapPath, type VaultNode, type SearchHit, type PathTitle, type 
 import { vaultPicker } from "../lib/sync";
 import { useSettingsStore } from "./settings";
 import { compareKey, formatMarkdown, trimDocTail } from "../lib/markdown-format";
+import { flushEditorContent } from "../lib/editor-flush";
 
 /** 「最近」固定 3 条（v0.5.1 用户定版：不折叠，多出的不看） */
 const RECENTS_SHOWN = 3;
@@ -13,6 +14,16 @@ interface VaultStore {
   tree: VaultNode[];
   activePath: string | null;
   content: string;
+  /**
+   * 外部修订号：**只**在「远端内容真的替换了当前笔记」时自增
+   * （`remoteChanged` 拉到新内容 / 同步回合后重载）。
+   *
+   * 编辑器（`MilkdownHost`）订阅它：变化时把 store 内容灌进已挂载的 Crepe，
+   * 否则已挂载的实例仍显示旧文档，用户下一次输入会把「旧文档 + 按键」写回去，
+   * 覆盖刚拉取/推送的新版本（S3）。
+   * 普通保存也会 `set({ content })`，但**不会**动这个号 ⇒ 不重置编辑器、不跳光标。
+   */
+  externalRev: number;
   /** 上次读取/落盘的文件原文；null = 基线未知（此时不启用 no-op 守卫） */
   savedContent: string | null;
   dirty: boolean;
@@ -49,6 +60,14 @@ interface VaultStore {
   reindex: () => Promise<void>;
   /** M3f：远端同步改动后刷新（服务器侧 push 落盘 / delete 生效 → Rust 推事件） */
   remoteChanged: () => Promise<void>;
+  /**
+   * 把「外部来源」（同步拉取 / 远端推送）的新内容应用到当前笔记：
+   * 更新 content + savedContent，清 dirty，并自增 `externalRev` 让编辑器替换文档。
+   *
+   * 只在 `activePath === path` 且当前无未保存编辑时生效（返回是否应用）。
+   * **普通保存路径不要调用**——它就是 S3 的「外部内容替换」入口。
+   */
+  applyExternalContent: (path: string, content: string) => boolean;
   openNote: (path: string, silent?: boolean) => Promise<void>;
   closeNote: () => Promise<void>;
   setContent: (content: string) => void;
@@ -151,12 +170,30 @@ let openSeq = 0;
 // 搜索请求序号：连续搜索时慢的旧响应不得覆盖新结果
 let searchSeq = 0;
 
+/**
+ * 把编辑器里仍在 200ms 防抖中的输入同步刷回 store（S6）。
+ *
+ * 必须在「改变 activePath / editorMode」**之前**调用：`markdownUpdated` 是尾沿防抖，
+ * 而 `crepe.destroy()` 会 cancel 掉未触发的回调——不刷就会丢掉最后 ≤200ms 的输入。
+ * 返回是否刷出了新内容（null = 无变化，不制造伪 dirty）。
+ */
+function flushEditorToStore(): boolean {
+  const md = flushEditorContent();
+  if (md === null) return false;
+  const before = useVaultStore.getState().content;
+  useVaultStore.getState().setContent(md);
+  // 返回值语义：store 里的内容**真的**变了（flush 出来的内容偶尔与 store 相同，
+  // 比如保存路径刚把规范化的内容写回），调用方据此区分「有未保存输入」与「无变化」。
+  return useVaultStore.getState().content !== before;
+}
+
 export const useVaultStore = create<VaultStore>((set, get) => ({
   status: "loading",
   vaultPath: null,
   tree: [],
   activePath: null,
   content: "",
+  externalRev: 0,
   savedContent: null,
   dirty: false,
   savedAt: null,
@@ -320,16 +357,42 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     if (s.activePath && !s.dirty) {
       try {
         const { content } = await vault.readNote(s.activePath);
-        if (content !== s.content) {
-          set({ content, savedContent: content, dirty: false, savedAt: Date.now() });
-        }
+        // applyExternalContent 会再校验一次 activePath / dirty：
+        // readNote 期间用户可能已开始输入或切到别的笔记，绝不能把这份内容写错笔记。
+        get().applyExternalContent(s.activePath, content);
       } catch {
         // 笔记被远端删除：保留当前状态
       }
     }
   },
 
+  applyExternalContent: (path, content) => {
+    // 同步重载是异步的：store 可能还没收到编辑器最后 ≤200ms 的输入（dirty=false，
+    // 但编辑器里已经有字）。先把编辑器刷回 store；一旦刷出真实变化，就按
+    // 「用户正在编辑」处理、放弃这次外部替换——与 dirty 守卫同一语义，
+    // 只是把判据从「防抖已触发」提前到「编辑器里真有内容」。
+    if (flushEditorToStore()) return false;
+    const s = get();
+    if (s.activePath !== path || s.dirty) return false;
+    if (content === s.content) {
+      // 内容没变但基线可能滞后：只补 savedContent，避免下次保存误判
+      if (s.savedContent !== content) set({ savedContent: content });
+      return false;
+    }
+    set({
+      content,
+      savedContent: content,
+      dirty: false,
+      savedAt: Date.now(),
+      // 只有真正替换内容才自增：编辑器据此把新文档灌进已挂载实例（S3）
+      externalRev: s.externalRev + 1,
+    });
+    return true;
+  },
+
   openNote: async (path, silent = false) => {
+    // 切走之前先 flush（S6）：此时 activePath 仍是旧笔记，写回的是旧笔记
+    flushEditorToStore();
     const seq = ++openSeq;
     // 切换前先把未保存的旧笔记落盘；失败则中止切换（未保存编辑不丢铁律，
     // 与 deleteNode 同守卫——error 已由 saveNow 提示）
@@ -363,6 +426,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   closeNote: async () => {
+    // 关闭前先 flush（S6）：activePath 仍是当前笔记，最后 ≤200ms 的输入不会丢
+    flushEditorToStore();
     openSeq++; // 使在途 openNote 失效（关了就不该被慢响应重新打开）
     // 关闭前落盘（数据不丢铁律）；失败则保留笔记打开，内容不丢
     if (get().dirty && get().activePath) {
@@ -444,6 +509,10 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   setEditorMode: (m) => {
+    if (m === get().editorMode) return;
+    // 切走 wysiwyg/read 之前先 flush（S6）：今天的编辑器实例即将被 key 重建，
+    // 防抖中的最后输入必须先进 store（随后由 scheduleSave 落盘）。
+    flushEditorToStore();
     if (m === "wysiwyg" && get().editorMode === "source") {
       // 从源码切回：内容已是最新，直接重建编辑器
       set({ editorMode: m });
@@ -503,6 +572,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
    * （端口可能 +1），配对码不变 ⇒ 桌面无需重新配对。
    */
   switchVault: async (path, mode) => {
+    // 停循环 / 换库之前先 flush（S6）：编辑器实例随 activePath 一起被丢弃
+    flushEditorToStore();
     const s = get();
     if (s.dirty && s.activePath) {
       const ok = await s.saveNow();
@@ -587,6 +658,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   commitRename: async (path, newName) => {
+    // 改名会让 activePath 被 remap、编辑器 key 随之重建 —— 先 flush，别丢最后输入
+    flushEditorToStore();
     set({ renamingPath: null });
     if (!newName.trim() || newName.trim() === get().tree.find((n) => n.path === path)?.name) {
       return;
@@ -623,6 +696,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         return;
       }
       // 保存失败则中止删除（未保存编辑不丢铁律）
+      // 先 flush：编辑器防抖里最后 ≤200ms 的输入也要进回收站副本
+      flushEditorToStore();
       if (!(await s.saveNow())) return;
       set({ activePath: null, content: "", savedContent: null, dirty: false });
     } else {
@@ -640,6 +715,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   moveNode: async (path, newDir) => {
+    // 移动会让 activePath 被 remap、编辑器 key 随之重建 —— 先 flush
+    flushEditorToStore();
     try {
       const newPath = await vault.move(path, newDir);
       set((s) => ({ activePath: remapPath(s.activePath, path, newPath) }));

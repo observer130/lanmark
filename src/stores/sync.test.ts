@@ -21,6 +21,7 @@ const m = vi.hoisted(() => ({
     saveNow: vi.fn(),
     refreshTree: vi.fn(),
     refreshMeta: vi.fn(),
+    applyExternalContent: vi.fn(() => true),
   },
 }));
 
@@ -60,6 +61,7 @@ function setVaultState(patch: Partial<typeof m.vaultState>) {
     saveNow: vi.fn(async () => true),
     refreshTree: vi.fn(async () => {}),
     refreshMeta: vi.fn(async () => {}),
+    applyExternalContent: vi.fn(() => true),
   });
   Object.assign(m.vaultState, patch);
 }
@@ -82,9 +84,9 @@ describe("syncNow 与 vault store 衔接", () => {
     expect(m.syncNow).toHaveBeenCalledWith("s1");
     expect(m.vaultState.refreshTree).toHaveBeenCalled();
     expect(m.vaultState.refreshMeta).toHaveBeenCalled();
-    expect(m.vaultSetState).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "拉取的新版" }),
-    );
+    // 走 store 动作（更新 savedContent + externalRev，编辑器据此换文档），
+    // 不再直接 setState 只改 content
+    expect(m.vaultState.applyExternalContent).toHaveBeenCalledWith("a.md", "拉取的新版");
     expect(useSyncStore.getState().lastReport).toEqual(REPORT);
   });
 
@@ -93,7 +95,7 @@ describe("syncNow 与 vault store 衔接", () => {
 
     await useSyncStore.getState().syncNow("s1");
 
-    expect(m.vaultSetState).not.toHaveBeenCalled();
+    expect(m.vaultState.applyExternalContent).not.toHaveBeenCalled();
   });
 
   it("同步前有未保存编辑 → 先落盘再同步", async () => {
@@ -132,8 +134,22 @@ describe("syncNow 与 vault store 衔接", () => {
 
     await useSyncStore.getState().syncNow("s1");
 
-    expect(m.vaultSetState).not.toHaveBeenCalled();
+    expect(m.vaultState.applyExternalContent).not.toHaveBeenCalled();
     expect(m.vaultState.content).toBe("旧 + 用户新输入");
+  });
+
+  it("readNote 期间切到别的笔记 → 不把旧笔记内容应用过去", async () => {
+    setVaultState({ activePath: "a.md", content: "旧" });
+    m.readNote.mockImplementation(async () => {
+      m.vaultState.activePath = "b.md";
+      m.vaultState.content = "B 的内容";
+      return { content: "A 的远端新版", title: "a.md" };
+    });
+
+    await useSyncStore.getState().syncNow("s1");
+
+    expect(m.vaultState.applyExternalContent).not.toHaveBeenCalled();
+    expect(m.vaultState.content).toBe("B 的内容");
   });
 
   it("当前笔记被对端删除 → 保留当前状态不报错", async () => {
@@ -142,7 +158,7 @@ describe("syncNow 与 vault store 衔接", () => {
 
     await useSyncStore.getState().syncNow("s1");
 
-    expect(m.vaultSetState).not.toHaveBeenCalled();
+    expect(m.vaultState.applyExternalContent).not.toHaveBeenCalled();
     expect(useSyncStore.getState().error).toBeNull();
   });
 });

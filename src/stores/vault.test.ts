@@ -19,6 +19,7 @@ const m = vi.hoisted(() => ({
   setPath: vi.fn(),
   setPathWithCreate: vi.fn(),
   appDir: vi.fn(),
+  flushEditorContent: vi.fn(),
 }));
 
 vi.mock("../lib/vault", () => ({
@@ -51,6 +52,8 @@ vi.mock("../lib/vault", () => ({
 vi.mock("../lib/sync", () => ({
   vaultPicker: { pickFolder: vi.fn(), appDir: m.appDir },
 }));
+// S6：切笔记/切模式前会先 flush 编辑器；这里用 mock 控制「防抖里还有没有内容」
+vi.mock("../lib/editor-flush", () => ({ flushEditorContent: m.flushEditorContent }));
 // switchVault 会停自动同步循环（先停再切，防止回合打到半切换状态）→ 桩掉 sync store
 vi.mock("./sync", () => ({
   useSyncStore: { getState: () => ({ stopAutoLoop: stopAutoLoopMock }) },
@@ -69,6 +72,7 @@ function baseState() {
     tree: [],
     activePath: null,
     content: "",
+    externalRev: 0,
     savedContent: null,
     dirty: false,
     savedAt: null,
@@ -94,8 +98,9 @@ beforeEach(() => {
   favorites.mockResolvedValue([]);
   trashList.mockResolvedValue([]);
   tree.mockResolvedValue([]);
+  // 默认「编辑器无待 flush 内容」；用例按需 mockReturnValue 注入
+  m.flushEditorContent.mockReturnValue(null);
 });
-
 describe("openNote/closeNote 守卫", () => {
   it("openNote 前保存失败 → 中止切换，未保存内容保留", async () => {
     useVaultStore.setState({ activePath: "a.md", content: "未保存的旧内容", dirty: true });
@@ -286,6 +291,7 @@ describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
     rename.mockResolvedValueOnce("b.md");
     await useVaultStore.getState().commitRename("a.md", "b");
     expect(rename).toHaveBeenCalledWith("a.md", "b");
+    expect(m.flushEditorContent).toHaveBeenCalled(); // activePath 改名前先 flush
     expect(recents).toHaveBeenCalled();
     expect(favorites).toHaveBeenCalled();
   });
@@ -293,6 +299,7 @@ describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
   it("move 后刷新 recents/favorites", async () => {
     move.mockResolvedValueOnce("d/a.md");
     await useVaultStore.getState().moveNode("a.md", "d");
+    expect(m.flushEditorContent).toHaveBeenCalled(); // activePath 改路径前先 flush
     expect(recents).toHaveBeenCalled();
     expect(favorites).toHaveBeenCalled();
   });
@@ -340,6 +347,201 @@ describe("M3f 远端同步改动刷新（remoteChanged）", () => {
     expect(s.activePath).toBe("a.md");
     expect(s.content).toBe("最后内容");
     expect(s.error).toBeNull();
+  });
+});
+
+/* ── S3：外部内容替换的 store 侧契约 ── */
+
+describe("externalRev / savedContent（S3）", () => {
+  it("远端重载内容变化 → externalRev 自增，savedContent 同步更新", async () => {
+    useVaultStore.setState({ activePath: "a.md", content: "旧版", savedContent: "旧版" });
+    readNote.mockResolvedValueOnce({ content: "新版", title: "a.md" });
+
+    await useVaultStore.getState().remoteChanged();
+
+    const s = useVaultStore.getState();
+    expect(s.content).toBe("新版");
+    expect(s.savedContent).toBe("新版");
+    expect(s.externalRev).toBe(1);
+  });
+
+  it("远端内容与当前一致 → externalRev 不动（不触发编辑器替换），只补基线", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "同一版",
+      savedContent: "旧基线",
+      externalRev: 0,
+    });
+    readNote.mockResolvedValueOnce({ content: "同一版", title: "a.md" });
+
+    await useVaultStore.getState().remoteChanged();
+
+    const s = useVaultStore.getState();
+    expect(s.externalRev).toBe(0);
+    expect(s.savedContent).toBe("同一版");
+  });
+
+  it("普通保存路径 setContent 不改变 externalRev（保存不得重置编辑器）", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "旧",
+      savedContent: "旧",
+      externalRev: 3,
+    });
+
+    useVaultStore.getState().setContent("用户新输入");
+
+    expect(useVaultStore.getState().externalRev).toBe(3);
+    // 收掉 setContent 排的尾沿定时器，避免影响后续用例
+    await useVaultStore.getState().saveNow();
+  });
+
+  it("applyExternalContent：path 不匹配 / dirty / 内容相同都不自增", () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "当前",
+      savedContent: "当前",
+      dirty: false,
+      externalRev: 0,
+    });
+    const st = useVaultStore.getState();
+
+    expect(st.applyExternalContent("b.md", "别处内容")).toBe(false);
+    expect(st.applyExternalContent("a.md", "当前")).toBe(false);
+
+    useVaultStore.setState({ dirty: true });
+    expect(useVaultStore.getState().applyExternalContent("a.md", "远端内容")).toBe(false);
+
+    expect(useVaultStore.getState().externalRev).toBe(0);
+    expect(useVaultStore.getState().content).toBe("当前");
+  });
+
+  it("applyExternalContent 成功后 dirty 清零、基线对齐", () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "旧",
+      savedContent: "旧",
+      dirty: false,
+      externalRev: 7,
+    });
+
+    expect(useVaultStore.getState().applyExternalContent("a.md", "远端新版")).toBe(true);
+    const s = useVaultStore.getState();
+    expect(s.content).toBe("远端新版");
+    expect(s.savedContent).toBe("远端新版");
+    expect(s.externalRev).toBe(8);
+    expect(s.dirty).toBe(false);
+  });
+
+  it("applyExternalContent：编辑器里还有未进 store 的输入 → 先 flush 并放弃替换", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "当前",
+      savedContent: "当前",
+      dirty: false,
+      externalRev: 0,
+    });
+    m.flushEditorContent.mockReturnValueOnce("当前 + 最后 200ms 输入");
+
+    expect(useVaultStore.getState().applyExternalContent("a.md", "远端新版")).toBe(false);
+    const s = useVaultStore.getState();
+    expect(s.content).toBe("当前 + 最后 200ms 输入");
+    expect(s.dirty).toBe(true);
+    expect(s.externalRev).toBe(0); // 不替换编辑器，用户输入保住
+    await useVaultStore.getState().saveNow(); // 收掉尾沿定时器
+  });
+});
+
+/* ── S6：切 activePath / mode 之前必须 flush ── */
+
+describe("切换前 flush 编辑器（S6）", () => {
+  it("openNote：flush 在 dirty 保存与 readNote 之前，内容写回旧笔记", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "旧内容",
+      savedContent: "旧内容",
+      dirty: false,
+    });
+    m.flushEditorContent.mockReturnValueOnce("旧内容 + 最后 200ms 输入");
+
+    await useVaultStore.getState().openNote("b.md");
+
+    // 最后一段输入写进了 a.md，而不是新打开的 b.md
+    expect(writeNote).toHaveBeenCalledWith("a.md", "旧内容 + 最后 200ms 输入\n");
+    expect(useVaultStore.getState().activePath).toBe("b.md");
+    expect(useVaultStore.getState().content).toBe("内容b.md");
+    const flushOrder = m.flushEditorContent.mock.invocationCallOrder[0];
+    expect(flushOrder).toBeLessThan(readNote.mock.invocationCallOrder[0]);
+    expect(flushOrder).toBeLessThan(writeNote.mock.invocationCallOrder[0]);
+  });
+
+  it("closeNote：flush 后落盘旧笔记，再清空", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "旧内容",
+      savedContent: "旧内容",
+      dirty: false,
+    });
+    m.flushEditorContent.mockReturnValueOnce("最后输入");
+
+    await useVaultStore.getState().closeNote();
+
+    expect(writeNote).toHaveBeenCalledWith("a.md", "最后输入\n");
+    expect(useVaultStore.getState().activePath).toBeNull();
+    expect(useVaultStore.getState().dirty).toBe(false);
+  });
+
+  it("switchVault：flush 在停循环与换库之前", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "旧内容",
+      savedContent: "旧内容",
+      dirty: false,
+    });
+    m.setPathWithCreate.mockResolvedValueOnce("/v2");
+    m.flushEditorContent.mockReturnValueOnce("最后输入");
+
+    await useVaultStore.getState().switchVault("/v2", "open");
+
+    expect(writeNote).toHaveBeenCalledWith("a.md", "最后输入\n");
+    const flushOrder = m.flushEditorContent.mock.invocationCallOrder[0];
+    expect(flushOrder).toBeLessThan(stopAutoLoopMock.mock.invocationCallOrder[0]);
+    expect(flushOrder).toBeLessThan(m.setPathWithCreate.mock.invocationCallOrder[0]);
+  });
+
+  it("setEditorMode：切模式前 flush，内容进 store（随后由自动保存落盘）", () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "旧内容",
+      savedContent: "旧内容",
+      dirty: false,
+      editorMode: "wysiwyg",
+    });
+    m.flushEditorContent.mockReturnValueOnce("最后输入");
+
+    useVaultStore.getState().setEditorMode("source");
+
+    const s = useVaultStore.getState();
+    expect(s.content).toBe("最后输入");
+    expect(s.dirty).toBe(true);
+    expect(s.editorMode).toBe("source");
+    // 收掉尾沿定时器（本用例只关心同步 flush 的即时结果）
+    void useVaultStore.getState().saveNow();
+  });
+
+  it("flush 返回 null（无变化）→ 不制造伪 dirty、不写盘", async () => {
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "稳定内容",
+      savedContent: "稳定内容",
+      dirty: false,
+    });
+    m.flushEditorContent.mockReturnValueOnce(null);
+
+    await useVaultStore.getState().closeNote();
+
+    expect(writeNote).not.toHaveBeenCalled();
+    expect(useVaultStore.getState().activePath).toBeNull();
   });
 });
 

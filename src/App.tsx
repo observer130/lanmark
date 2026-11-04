@@ -7,6 +7,7 @@ import { useSettingsStore } from "./stores/settings";
 import { useUpdateStore } from "./stores/update";
 import { isAndroid } from "./lib/sync";
 import { installImeAnchorGuard } from "./lib/ime-anchor";
+import { flushEditorContent } from "./lib/editor-flush";
 import { ResizeEdges, WindowControls, dragWindow, isLinuxDesktop } from "./components/WindowControls";
 import { listenBackPress, reportBackHandler } from "./stores/back";
 import { VaultPicker } from "./components/VaultPicker";
@@ -114,7 +115,14 @@ function App() {
     // 只靠 beforeunload 不够：Android 返回退出/划掉时 WebView 常不发 beforeunload，
     // 但会先走 visibilitychange → hidden。saveNow 在非 dirty 时是幂等 no-op，
     // 切后台多触发几次没有副作用，反而把「待保存窗口」压到最短。
-    const flush = () => void useVaultStore.getState().saveNow();
+    //
+    // 先 flush 编辑器（S6）：markdownUpdated 是 200ms 尾沿防抖，退出时可能还没触发；
+    // 只 saveNow 会漏掉最后一段输入。flush 返回 null = 无变化，不制造伪 dirty。
+    const flush = () => {
+      const md = flushEditorContent();
+      if (md !== null) useVaultStore.getState().setContent(md);
+      void useVaultStore.getState().saveNow();
+    };
     const flushOnHide = () => {
       if (document.visibilityState === "hidden") flush();
     };

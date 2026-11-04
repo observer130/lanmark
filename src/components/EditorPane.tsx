@@ -12,8 +12,9 @@ import {
   Undo2,
 } from "lucide-react";
 import type { Crepe } from "@milkdown/crepe";
-import { editorViewCtx } from "@milkdown/kit/core";
+import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import { undo, undoDepth } from "@milkdown/kit/prose/history";
+import { Slice } from "@milkdown/kit/prose/model";
 import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
 import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
@@ -32,6 +33,7 @@ import {
 } from "../lib/vault-url";
 import { parentDir } from "../lib/vault";
 import { compareKey, trimDocTail } from "../lib/markdown-format";
+import { registerEditorFlush } from "../lib/editor-flush";
 import { useSettingsStore } from "../stores/settings";
 import { useOutlineStore } from "../stores/outline";
 import { useOutlineItems } from "./useOutline";
@@ -114,10 +116,12 @@ function selectTopBlock(view: LMView, index: number): boolean {
 
 /** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留。
  *  readOnly=true 时为「阅读模式」：关掉斜杠菜单/块手柄/链接浮层等交互特性，
- *  并将 ProseMirror 设为不可编辑（粘贴/拖入监听也一并跳过）。 */
-function MilkdownHost({
+ *  并将 ProseMirror 设为不可编辑（粘贴/拖入监听也一并跳过）。
+ *  （导出供组件级测试直接挂载，见 EditorPane.external.test.ts。） */
+export function MilkdownHost({
   content,
   notePath,
+  externalRev,
   onChange,
   readOnly = false,
   narrow = false,
@@ -126,6 +130,8 @@ function MilkdownHost({
 }: {
   content: string;
   notePath: string;
+  /** store 的外部修订号：变化时把新内容替换进已挂载实例（S3），普通保存不会动它 */
+  externalRev: number;
   onChange: (md: string) => void;
   readOnly?: boolean;
   narrow?: boolean;
@@ -142,23 +148,56 @@ function MilkdownHost({
   onBlockMenuRef.current = onBlockMenu;
   const narrowRef = useRef(narrow);
   narrowRef.current = narrow;
+  // 外部替换要读「最新内容」：挂载 effect 的闭包只拿得到首次渲染的 content，
+  // 而外部修订号变化时父组件已带新 content 重渲染过。
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const externalRevRef = useRef(externalRev);
+  externalRevRef.current = externalRev;
+  /** 由挂载 effect 赋值：把 store 里的外部内容灌进已挂载的 Crepe（基线未建立时置 pending） */
+  const applyExternalRef = useRef<() => void>(() => {});
+
+  // 外部内容替换（S3）：只有 externalRev 真正变化才动编辑器。
+  // 保存路径（saveNow）也会 set content，但不碰 externalRev ⇒ 不会重置文档/跳光标。
+  // 首次跳过：挂载时内容本来就是最新的。
+  const externalRevSeen = useRef(externalRev);
+  useEffect(() => {
+    if (externalRev === externalRevSeen.current) return;
+    externalRevSeen.current = externalRev;
+    applyExternalRef.current();
+  }, [externalRev]);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     let cancelled = false;
     let crepe: Crepe | null = null;
+    // 挂载时的外部修订号：create 是异步的，期间若来了一次外部重载，
+    // 基线建立后要补一次替换（见 applyExternalContent 的调用点）。
+    const revAtMount = externalRevRef.current;
+    let unregisterFlush: (() => void) | null = null;
     // 每次挂载用专属 inner root：即便 effect 重跑（双挂载/热更新），
     // 旧实例的残留 DOM 随 root 一起移除，不与新实例互相踩踏
     const inner = document.createElement("div");
     inner.className = "editor-inner";
     host.appendChild(inner);
 
-    // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填
-    const { fm, body } = splitFrontmatter(content);
+    // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填。
+    // 用 let：外部重载可能带来不同的 frontmatter / wikilink，基线必须跟着换，
+    // 否则用户下一次编辑会把旧 frontmatter 写回去。
+    let { fm, body } = splitFrontmatter(content);
     // wikilink 不进编辑器（CommonMark 会破坏 [[...]] 语义），保存时还原
-    const { body: editorBody, map: wikiMap } = protectWikilinks(body);
+    let { body: editorBody, map: wikiMap } = protectWikilinks(body);
     const baseDir = parentDir(notePath);
+    /**
+     * 编辑器序列化 → 落盘用的完整 markdown。
+     * `markdownUpdated` / teardown flush / 外部替换**必须共用这一条管线**，
+     * 否则 flush 出来的内容与放行基线不一致，会制造伪 dirty。
+     */
+    const serialize = (md: string): string =>
+      trimDocTail(
+        joinFrontmatter(fm, vaultUrlsToRelative(restoreWikilinks(md, wikiMap), baseDir)),
+      );
     let view: LMView | null = null;
     // 基线文档：只有 doc 树真正相对基线变化过，才放行 markdownUpdated。
     // （Crepe create 后会异步触发一次「同 doc 重序列化」事件——列表 - 会变 *、
@@ -175,11 +214,7 @@ function MilkdownHost({
           if (!view || !lastKnownDoc) return; // 基线未建立（create/改写期间）：一律抑制
           if (view.state.doc.eq(lastKnownDoc)) return; // 同 doc 重序列化（伪事件）：抑制
           lastKnownDoc = view.state.doc; // 真实编辑：放行并刷新基线
-          const full = joinFrontmatter(
-            fm,
-            vaultUrlsToRelative(restoreWikilinks(md, wikiMap), baseDir),
-          );
-          const next = trimDocTail(full);
+          const next = serialize(md);
           // 只有尾空行变化（trailing 插件的伪段落）：不置 dirty、不触发保存。
           if (compareKey(next) === compareKey(lastEmitted)) return;
           lastEmitted = next;
@@ -196,36 +231,55 @@ function MilkdownHost({
       view = await getEditorView(crepe);
       // 阅读模式：ProseMirror 设为不可编辑（命令式插入仍可能绕过，故监听器也一并跳过）
       if (readOnly) view.setProps({ editable: () => false });
-      const tr = view.state.tr;
-      let changed = false;
-      view.state.doc.descendants((node, pos) => {
-        if (node.type.name === "image") {
-          const src = (node.attrs.src as string) ?? "";
-          if (src && !isExternal(src)) {
-            const vaultRel = resolveFrom(baseDir, src);
-            const url = toVaultUrl(vaultRel);
-            if (url !== src) {
-              tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: url });
-              changed = true;
+      /**
+       * 显示层改写：相对图片 src → vault 协议 URL。
+       * 打开笔记与外部内容替换后都要跑一次，否则换进来的新文档图片会裂。
+       * 只改显示，不改源文件；addToHistory=false 避免「打开笔记」垫一步历史。
+       */
+      const applyImageDisplay = () => {
+        if (!view) return;
+        const tr = view.state.tr;
+        let changed = false;
+        view.state.doc.descendants((node, pos) => {
+          if (node.type.name === "image") {
+            const src = (node.attrs.src as string) ?? "";
+            if (src && !isExternal(src)) {
+              const vaultRel = resolveFrom(baseDir, src);
+              const url = toVaultUrl(vaultRel);
+              if (url !== src) {
+                tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: url });
+                changed = true;
+              }
             }
           }
-        }
-      });
-      // 这一步只是**显示层**改写（相对引用 → vault://），不是用户编辑：
-      // 必须标 addToHistory=false，否则「打开一篇带图片的笔记」就等于垫了一步历史，
-      // 窄屏「撤回」按钮一打开就是亮的，按下去还会把 src 改回去。
-      if (changed) view.dispatch(tr.setMeta("addToHistory", false));
+        });
+        if (changed) view.dispatch(tr.setMeta("addToHistory", false));
+      };
+      applyImageDisplay();
       lastKnownDoc = view.state.doc; // 基线建立：此后只放行真实 doc 变化
       // 关键：基线取**编辑器自己的序列化结果**，而不是磁盘原文。
       // Crepe 会把 `-` 列表写成 `*`、给表格补空格——若拿磁盘原文当基线，
       // 「点进正文」触发 trailing 伪事件时，diff 里除了空行还混着这些风格差异，
       // 规范化比较就会失败、照样置 dirty。用编辑器基线后，首次伪事件只剩尾空行。
-      lastEmitted = trimDocTail(
-        joinFrontmatter(
-          fm,
-          vaultUrlsToRelative(restoreWikilinks(crepe.getMarkdown(), wikiMap), baseDir),
-        ),
-      );
+      lastEmitted = serialize(crepe.getMarkdown());
+
+      // teardown 前 flush（S6）：`crepe.destroy()` 会 cancel listener 的 200ms 防抖，
+      // 最后一段输入只能靠这里**同步**取走。与 markdownUpdated 共用 serialize 管线，
+      // 与 lastEmitted 做规范化比较；无变化返回 null（不制造伪 dirty）。
+      // ⚠️ 这里只把内容交给调用方，**绝不写 store**：cleanup 时 activePath 可能
+      // 已经是新笔记，写进去就会把旧文档灌进新文件。
+      unregisterFlush = registerEditorFlush(() => {
+        // 身份校验：cleanup 与 React 提交之间有一个窗口，若 store 的 activePath
+        // 已经切到新笔记，这份 markdown 属于旧笔记 —— 必须返回 null，
+        // 否则异步的同步重载 / beforeunload 会把旧内容写进新笔记。
+        if (useVaultStore.getState().activePath !== notePath) return null;
+        if (!crepe || !view || !lastKnownDoc) return null;
+        const next = serialize(crepe.getMarkdown());
+        if (compareKey(next) === compareKey(lastEmitted)) return null;
+        lastEmitted = next;
+        lastKnownDoc = view.state.doc; // 压住仍在排队的防抖回调
+        return next;
+      });
 
       // 图片落盘并插入（粘贴 / 拖入共用）：插入 vault 协议 URL（显示用），
       // 保存时 stripVaultPrefix 会还原为相对引用
@@ -255,6 +309,50 @@ function MilkdownHost({
 
       // ctx 供「插入块」用（命令都挂在 ctx 上）。与 view 同生命周期，捕获一次即可。
       const ctx = await crepe.editor.action((c) => c);
+
+      /**
+       * 外部内容替换（S3）：同步/远端重载后，把新正文灌进**已挂载**的实例。
+       *
+       * 为什么不能只 `set({content})`：Crepe 只在挂载时读 content（挂载 effect 依赖
+       * `[]`），已挂载实例不会自己更新；用户下一次按键会把「旧文档 + 改动」写回，
+       * 覆盖刚拉取/推送的新版本，而且没有冲突副本。
+       *
+       * 用 Milkdown `replaceAll` 宏的同一原语（parser 解析 → 整篇 replace），但显式带
+       * `addToHistory=false`：
+       *  - listener 插件的 `apply()` 见到该 meta 直接 return，**不会排 200ms 防抖**，
+       *    因此不会触发 onChange、不会写文件；
+       *  - 不进撤销栈：换的是「服务器上的文档」，不是用户的一步编辑。
+       * （`@milkdown/kit/utils` 的 `replaceAll` 宏没有 meta 通道，这里是它 4 行核心
+       *  + meta，语义等价；见提交说明里的取舍。）
+       */
+      let appliedExternalRev = revAtMount;
+      const applyExternalContent = () => {
+        const rev = externalRevRef.current;
+        if (rev === appliedExternalRev) return;
+        if (!crepe || !view || !lastKnownDoc) return; // 基线未建立：挂载末尾会补
+        const { fm: nextFm, body: nextBody } = splitFrontmatter(contentRef.current);
+        const { body: nextEditorBody, map: nextWikiMap } = protectWikilinks(nextBody);
+        const parsed = ctx.get(parserCtx)(nextEditorBody);
+        if (!parsed) return;
+        appliedExternalRev = rev;
+        fm = nextFm;
+        wikiMap = nextWikiMap;
+        const tr = view.state.tr.replace(
+          0,
+          view.state.doc.content.size,
+          new Slice(parsed.content, 0, 0),
+        );
+        tr.setMeta("addToHistory", false);
+        view.dispatch(tr);
+        applyImageDisplay();
+        // 立即刷新两个基线：排队中的防抖回调会因 doc.eq 被抑制；
+        // lastEmitted 取新文档的编辑器序列化结果，后续真实编辑不会误判成伪变更。
+        lastKnownDoc = view.state.doc;
+        lastEmitted = serialize(crepe.getMarkdown());
+      };
+      applyExternalRef.current = applyExternalContent;
+      // create 期间就来了外部重载（revAtMount 之后）：基线刚建立，补一次
+      if (externalRevRef.current !== revAtMount) applyExternalContent();
 
       // ── 块级操作面（M8：不依赖拖拽的通路，拖放落点也走同一个原语）──────────
       const api: EditorApi = {
@@ -514,6 +612,10 @@ function MilkdownHost({
     return () => {
       cancelled = true;
       onReadyRef.current?.(null);
+      // 只注销，**绝不写 store**：cleanup 可能发生在 activePath 已切到新笔记之后，
+      // 在这里 setContent 会把旧文档写进新笔记（S3/S6 的共同红线）。
+      unregisterFlush?.();
+      unregisterFlush = null;
       const h = host as HTMLDivElement & { __lanmarkCleanup?: () => void };
       h.__lanmarkCleanup?.();
       try {
@@ -560,6 +662,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   const {
     activePath,
     content,
+    externalRev,
     editorMode,
     dirty,
     savedAt,
@@ -915,6 +1018,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
               key={editorKey(activePath, "read")}
               content={content}
               notePath={activePath}
+              externalRev={externalRev}
               onChange={(md) => {
                 setContent(md);
                 scheduleSave();
@@ -926,6 +1030,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
               key={editorKey(activePath, "wysiwyg")}
               content={content}
               notePath={activePath}
+              externalRev={externalRev}
               narrow={narrow}
               onReady={(api) => {
                 editorApiRef.current = api;
