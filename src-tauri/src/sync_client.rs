@@ -18,6 +18,9 @@ use crate::vault::AppState;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 const PULL_BATCH: usize = 32;
 const PUSH_BATCH: usize = 8;
+/// 单批推送的原始字节上限（base64 后膨胀 4/3）：避免 8 张大图挤进一个请求，
+/// 顶到服务端体限后整批 413。单个文件超限时独占一批。
+const PUSH_MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 /// pull 一批的返回：文件内容 + 缺失/拒绝清单
 type PullBatch = (Vec<crate::sync::PullFile>, Vec<(String, String)>);
@@ -374,7 +377,15 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
                 Ok(a) => a,
                 Err(e) => return Some(format!("{}: 路径非法: {e}", f.path)),
             };
-            if let Err(e) = std::fs::write(&abs, &bytes) {
+            // 同步场景父目录可能尚不存在（对端先建的附件在其目录里）
+            if let Some(parent) = abs.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return Some(format!("{}: 创建目录失败: {e}", f.path));
+                }
+            }
+            // S5：tmp+rename 原子落盘（与笔记分支/服务器 push 同纪律）——
+            // 直接 write 崩溃时会留半截附件，下回合按「hash 不同」被当成服务器新版本。
+            if let Err(e) = fs_ops::atomic_write(&abs, &bytes) {
                 return Some(format!("{}: 附件写入失败: {e}", f.path));
             }
             // LWW 时间源保真（docs/07 §2）：同笔记分支
@@ -786,7 +797,14 @@ impl RoundCore {
                             loser_mtime_ms: sm.mtime_ms,
                         });
                     }
-                    Err(e) => self.report.errors.push(format!("冲突副本落盘失败 {path}: {e}")),
+                    Err(e) => {
+                        self.report.errors.push(format!("冲突副本落盘失败 {path}: {e}"));
+                        // S4：副本没落盘就绝不能推送——服务器当前版本是它唯一副本，
+                        // 而 base_hash 与现状一致会被干净覆盖。同时移除基线：否则
+                        // 下回合会被判成「仅本地改」，绕过冲突裁决直接推送。
+                        self.baseline.remove(&path);
+                        continue;
+                    }
                 }
                 self.to_push.push((path, sm.hash));
             }
@@ -823,9 +841,9 @@ impl RoundCore {
     fn push_phase(&mut self) -> Result<(), String> {
         // take 出来再分块：块内 corrective_pull 要 &mut self，与 to_push 借用冲突
         let to_push = std::mem::take(&mut self.to_push);
-        for chunk in to_push.chunks(PUSH_BATCH) {
+        for chunk in split_push_batches(to_push, &self.local_map) {
             let mut batch = Vec::new();
-            for (path, base_hash) in chunk {
+            for (path, base_hash) in &chunk {
                 let Some(lm) = self.local_map.get(path).cloned() else { continue };
                 let Some(pf) = read_push_file(&self.vault, path, &lm.kind, base_hash) else {
                     self.report.errors.push(format!("推送读取失败: {path}"));
@@ -836,7 +854,20 @@ impl RoundCore {
             if batch.is_empty() {
                 continue;
             }
-            let results = push_batch(&self.c, &self.url, &self.profile.token, &batch)?;
+            // S1：单批失败（413/超时/500）只作废这一批——记错误、跳过、继续后续批；
+            // 失败路径不写基线（基线里仍是服务器旧 hash），下回合自然重试。
+            let results = match push_batch(&self.c, &self.url, &self.profile.token, &batch) {
+                Ok(r) => r,
+                Err(e) => {
+                    let paths: Vec<&str> = batch.iter().map(|f| f.path.as_str()).collect();
+                    self.report.errors.push(format!(
+                        "推送失败（本批 {} 个文件，下回合重试）: {}: {e}",
+                        batch.len(),
+                        paths.join(", ")
+                    ));
+                    continue;
+                }
+            };
             for r in results {
                 let Some(pf) = batch.iter().find(|f| f.path == r.path) else {
                     continue;
@@ -934,6 +965,37 @@ impl RoundCore {
         save_sync_state(&self.vault, &self.profile.id, &self.baseline)?;
         Ok(self.report)
     }
+}
+
+/// 按「文件数 ≤ PUSH_BATCH 且单批原始字节 ≤ PUSH_MAX_BATCH_BYTES」切批。
+/// 小文件（累计未超限）行为与原先 `.chunks(PUSH_BATCH)` 一致；base64 让请求体
+/// 膨胀 4/3，按累计原始字节切批可避免 8 张大图挤进一个请求。单个文件超限时
+/// 独占一批（仍受服务端 64 MiB 体限兜底，失败也只会隔离这一批）。
+fn split_push_batches(
+    items: Vec<(String, String)>,
+    local_map: &HashMap<String, FileMeta>,
+) -> Vec<Vec<(String, String)>> {
+    let mut batches = Vec::new();
+    let mut current: Vec<(String, String)> = Vec::new();
+    let mut current_bytes = 0usize;
+    for item in items {
+        let size = local_map
+            .get(&item.0)
+            .map(|m| m.size.max(0) as usize)
+            .unwrap_or(0);
+        if !current.is_empty()
+            && (current.len() >= PUSH_BATCH || current_bytes + size > PUSH_MAX_BATCH_BYTES)
+        {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current_bytes += size;
+        current.push(item);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 /// 一个完整同步回合（docs/07 §5 回合语义 v2 的 M3a+M3b 子集：M2 + serverHash 基线修复
@@ -1519,6 +1581,86 @@ mod tests {
             .unwrap();
     }
 
+    /// 确定性伪随机字节（大文件回归用；不引入 rand）
+    fn pseudo_random_bytes(n: usize) -> Vec<u8> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x & 0xff) as u8
+            })
+            .collect()
+    }
+
+    /// 递归找 `.lanmark-tmp` 残留（file_type 不跟随符号链接）
+    fn tmp_leftovers(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_dir() {
+                    stack.push(p);
+                } else if e.file_name().to_string_lossy().contains("lanmark-tmp") {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// 极简 mock 服务器：manifest/tombstones 空、push 恒 500。
+    /// 返回 (base, push 请求计数)——计数用来证明首批失败后仍在推进后续批。
+    fn start_rejecting_push_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&hits);
+        let app = Router::new()
+            .route("/api/v1/manifest", get(|| async { Json(serde_json::json!([])) }))
+            .route("/api/v1/tombstones", get(|| async { Json(serde_json::json!([])) }))
+            .route(
+                "/api/v1/push",
+                post(move || {
+                    let h = Arc::clone(&h);
+                    async move {
+                        h.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                }),
+            );
+        let (port, listener) = crate::sync_server::bind_listener().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let l = tokio::net::TcpListener::from_std(listener).unwrap();
+                let _ = axum::serve(l, app).await;
+            });
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::blocking::Client::new();
+        for _ in 0..40 {
+            if c.get(format!("{base}/api/v1/manifest"))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        (base, hits)
+    }
+
     /// 测试：vault 全量快照（相对路径 → 内容 hash；跳过点目录与孤儿 tmp）
     fn vault_snapshot(vault: &Path) -> std::collections::BTreeMap<String, String> {
         fn walk(dir: &Path, vault: &Path, out: &mut std::collections::BTreeMap<String, String>) {
@@ -1658,6 +1800,55 @@ mod tests {
         let r3 = sync_round(&desk, &profile).unwrap();
         assert!(r3.pulled.is_empty() && r3.pushed.is_empty());
         assert_eq!(r3.skipped, 2);
+    }
+
+    /// S4 回归：本地赢分支的冲突副本写失败（超长文件名 → NAME_MAX）后不得继续
+    /// 推送——否则服务器唯一版本会被干净覆盖（baseHash 与现状一致，无需仲裁）。
+    /// 失败路径还必须从基线移除，否则下回合会退化成「仅本地改」直接推送。
+    /// 依赖 POSIX 单段文件名 255 字节上限，非 Unix 平台跳过。
+    #[cfg(unix)]
+    #[test]
+    fn conflict_copy_failure_does_not_overwrite_server_version() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        // 220 字节 stem：原名 223 + tmp 后缀（pid+序号）仍可写；
+        // 冲突名 = 220 + "-冲突MMDD-HHMM" + ".md" = 239，再加 tmp 后缀必然 > NAME_MAX(255)
+        let rel = format!("{}.md", "a".repeat(220));
+        std::fs::write(phone_dir.path().join(&rel), "服务器版本一").unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+
+        let (desk_dir, desk) = client_vault();
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile = ServerProfile { id: "s-long".into(), name: "phone".into(), url: base, token, last_success_at: None, ..Default::default() };
+        let r0 = sync_round(&desk, &profile).unwrap();
+        assert_eq!(r0.pulled, vec![rel.clone()], "首次应拉回长名笔记: {r0:?}");
+        assert_eq!(std::fs::read_to_string(desk_dir.path().join(&rel)).unwrap(), "服务器版本一");
+
+        // 双方都改；本地 mtime 更新 → 本地赢，冲突副本（服务器版本）落盘失败
+        std::fs::write(desk_dir.path().join(&rel), "桌面版本").unwrap();
+        set_mtime(&desk, &rel, fs_ops::now_ms() + 3_600_000);
+        std::fs::write(phone_dir.path().join(&rel), "服务器版本二").unwrap();
+        set_mtime(&phone, &rel, fs_ops::now_ms() - 3_600_000);
+
+        let r1 = sync_round(&desk, &profile).unwrap();
+        assert!(r1.pushed.is_empty(), "副本失败不得推送: {r1:?}");
+        assert!(r1.merges.is_empty(), "副本失败不算合并: {r1:?}");
+        assert!(r1.errors.iter().any(|e| e.contains("冲突副本落盘失败")), "{:?}", r1.errors);
+        assert_eq!(
+            std::fs::read_to_string(phone_dir.path().join(&rel)).unwrap(),
+            "服务器版本二",
+            "服务器唯一版本不得被覆盖"
+        );
+        assert_eq!(std::fs::read_to_string(desk_dir.path().join(&rel)).unwrap(), "桌面版本");
+
+        // finish() 后基线里不得有该路径 → 下回合仍走冲突裁决（重试副本落盘）
+        let baseline = load_sync_state(desk_dir.path(), &profile.id);
+        assert!(!baseline.contains_key(&rel), "失败路径必须从基线移除: {baseline:?}");
+        let r2 = sync_round(&desk, &profile).unwrap();
+        assert!(r2.pushed.is_empty(), "重试仍失败时不得推送: {r2:?}");
+        assert!(r2.errors.iter().any(|e| e.contains("冲突副本落盘失败")), "{:?}", r2.errors);
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&rel)).unwrap(), "服务器版本二");
     }
 
     #[test]
@@ -2585,6 +2776,149 @@ mod tests {
             std::fs::read(desk_dir.path().join(&asset)).unwrap(),
             b"binary-image-data".to_vec()
         );
+    }
+
+    /// S1 回归：axum 0.8 `Json` 默认体限 2 MiB，而 `push_batch` 把整批文件
+    /// base64 进一个 POST——3.5 MB 附件必然 413，`push_phase` 的 `?` 会让整回合
+    /// 在 `finish()` 前 Err（基线不落盘，下回合同批再失败）。
+    #[test]
+    fn push_large_asset_beyond_default_body_limit_succeeds() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+
+        let (_desk_dir, desk) = client_vault();
+        let bytes = pseudo_random_bytes(3_500_000);
+        let asset = asset_save_op(&desk, &b64_encode(&bytes), "bin").unwrap();
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile = ServerProfile { id: "s-big".into(), name: "phone".into(), url: base, token, last_success_at: None, ..Default::default() };
+
+        let r = sync_round(&desk, &profile).expect("3.5 MB 附件不应因默认 2 MiB 体限失败");
+        assert_eq!(r.pushed, vec![asset.clone()], "{r:?}");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+
+        let landed = std::fs::read(phone_dir.path().join(&asset)).unwrap();
+        assert_eq!(landed, bytes, "服务端文件字节必须与源一致");
+        assert_eq!(fs_ops::content_hash(&landed), fs_ops::content_hash(&bytes));
+        assert_eq!(std::fs::metadata(phone_dir.path().join(&asset)).unwrap().len(), 3_500_000);
+        assert!(tmp_leftovers(phone_dir.path()).is_empty(), "附件落盘不得留 tmp");
+
+        // 下回合：基线已落盘 → 不再重复推送
+        let r2 = sync_round(&desk, &profile).unwrap();
+        assert!(r2.pushed.is_empty(), "{r2:?}");
+        assert_eq!(r2.skipped, 1, "{r2:?}");
+    }
+
+    /// S1 回归：某一批 push 整体失败（HTTP 500/413）不得让整回合 Err——
+    /// 失败批记 errors、继续后续批、失败路径不写基线（下回合重试）。
+    #[test]
+    fn push_batch_failure_is_isolated_and_round_completes() {
+        let (base, hits) = start_rejecting_push_server();
+        let (desk_dir, desk) = client_vault();
+        let mut paths = Vec::new();
+        for i in 0..9 {
+            let n = note_create_op(&desk, "", &format!("批失败笔记{i}")).unwrap();
+            note_write_op(&desk, &n.path, &format!("内容 {i}")).unwrap();
+            paths.push(n.path);
+        }
+        let profile = ServerProfile { id: "s-reject".into(), name: "mock".into(), url: base, token: "t".into(), last_success_at: None, ..Default::default() };
+
+        let r = sync_round(&desk, &profile).expect("单批失败不应让整回合返回 Err");
+        assert!(r.pushed.is_empty(), "{r:?}");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "9 篇 = 8+1 两批，首批失败后必须继续第二批"
+        );
+        let joined = r.errors.join("\n");
+        assert!(joined.contains(&paths[0]), "首批路径需记录: {joined}");
+        assert!(joined.contains(&paths[8]), "第二批路径需记录: {joined}");
+
+        let baseline = load_sync_state(desk_dir.path(), &profile.id);
+        assert!(baseline.is_empty(), "失败批不得写基线（下回合重试）: {baseline:?}");
+        for p in &paths {
+            assert!(desk_dir.path().join(p).is_file(), "本地文件不得因推送失败被删: {p}");
+        }
+    }
+
+    /// S1 配套：按累计原始字节切批（8 MiB）——小文件仍按 8 个一批，
+    /// 大文件不挤在同一请求里；单文件超限独占一批。
+    #[test]
+    fn split_push_batches_respects_count_and_byte_cap() {
+        let meta = |p: &str, size: i64| FileMeta {
+            path: p.into(),
+            kind: "note".into(),
+            hash: String::new(),
+            mtime_ms: 0,
+            size,
+        };
+        let small: Vec<(String, String)> =
+            (0..20).map(|i| (format!("n{i}.md"), String::new())).collect();
+        let map: HashMap<String, FileMeta> = small
+            .iter()
+            .map(|(p, _)| (p.clone(), meta(p, 10)))
+            .collect();
+        let batches = split_push_batches(small, &map);
+        assert_eq!(
+            batches.iter().map(|b| b.len()).collect::<Vec<_>>(),
+            vec![8, 8, 4],
+            "小文件切批与 PUSH_BATCH 一致"
+        );
+
+        let big: Vec<(String, String)> =
+            (0..3).map(|i| (format!("big{i}.bin"), String::new())).collect();
+        let map: HashMap<String, FileMeta> = big
+            .iter()
+            .map(|(p, _)| (p.clone(), meta(p, 6 * 1024 * 1024)))
+            .collect();
+        let batches = split_push_batches(big, &map);
+        assert_eq!(batches.len(), 3, "6 MiB × 3 不能塞进 8 MiB 单批");
+        assert!(batches.iter().all(|b| b.len() == 1));
+
+        let mixed: Vec<(String, String)> = vec![
+            ("huge.bin".into(), String::new()),
+            ("tiny.md".into(), String::new()),
+        ];
+        let map: HashMap<String, FileMeta> = mixed
+            .iter()
+            .map(|(p, _)| {
+                let size = if p == "huge.bin" { 9 * 1024 * 1024 } else { 10 };
+                (p.clone(), meta(p, size))
+            })
+            .collect();
+        let batches = split_push_batches(mixed, &map);
+        assert_eq!(batches.len(), 2, "单个超限文件独占一批");
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[1].len(), 1);
+
+        assert!(split_push_batches(Vec::new(), &HashMap::new()).is_empty());
+    }
+
+    /// S5 回归：pull 附件落盘必须是 tmp+rename（替换目标本身），而不是就地
+    /// `std::fs::write`。用「指向目录的符号链接」做确定性探针：就地写会 EISDIR，
+    /// tmp+rename 才能成功替换链接；顺带验证无 tmp 残留。
+    #[cfg(unix)]
+    #[test]
+    fn pulled_asset_is_written_atomically_not_in_place() {
+        let (dir, state) = client_vault();
+        let assets = dir.path().join("assets");
+        let target = assets.join("sym.png");
+        std::os::unix::fs::symlink(&assets, &target).unwrap();
+        let bytes = pseudo_random_bytes(256 * 1024);
+        let pf = crate::sync::PullFile {
+            path: "assets/sym.png".into(),
+            kind: "asset".into(),
+            content_base64: b64_encode(&bytes),
+            hash: fs_ops::content_hash(&bytes),
+            mtime_ms: 1_700_000_000_000,
+        };
+        let conn_guard = state.db.lock().unwrap();
+        let conn = conn_guard.as_ref().unwrap();
+        assert_eq!(store_pulled(dir.path(), conn, &pf), None, "附件落盘应成功");
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert!(!target.is_symlink(), "必须替换链接本身，不得跟着链接就地写");
+        assert!(tmp_leftovers(dir.path()).is_empty(), "不得残留 tmp");
     }
 
     #[test]

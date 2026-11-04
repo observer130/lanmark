@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -29,6 +29,11 @@ use crate::vault::AppState;
 
 pub const SERVICE_TYPE: &str = "_lanmark._tcp.local.";
 pub const DEFAULT_PORT: u16 = 4180;
+/// push 请求体上限（S1）：axum 0.8 对 `Json` 的默认体限是 2 MiB，而客户端把
+/// 一整批文件 base64 进一个请求（膨胀 4/3）——3 MB 附件就会 413。
+/// 客户端按 ≤8 MiB 原始字节切批后，64 MiB 有约 6 倍余量，同时给异常大请求兜底。
+/// 只放宽 push：pair/pull/delete 的请求体都很小，保持默认 2 MiB 限制。
+pub const PUSH_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// 生产单实例下 10 个足够；测试并行各起常驻服务器（无停机机制），
 /// 范围太窄会 AddrInUse（M3 测试矩阵扩到 80+ 后 4180..4200 已不够，再放宽）
 const MAX_PORT_TRIES: u16 = 60;
@@ -847,7 +852,10 @@ fn write_pushed_file(
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
             }
-            std::fs::write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
+            // S5：tmp+rename 原子落盘（与笔记分支同纪律）。直接 write 在崩溃/断电时
+            // 会留下半截附件，下一回合按「内容 hash 不同」被当成服务器新版本，
+            // 反向覆盖对端完整副本。
+            fs_ops::atomic_write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
             // LWW 时间源保真（docs/07 §2）：同笔记分支
             fs_ops::set_file_mtime(&abs, pf.mtime_ms);
             // M3b D4：push 干净落盘/仲裁获胜 → 清除该路径 tombstone（笔记分支经 write_note 自动清）
@@ -967,7 +975,10 @@ pub fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/api/v1/pair-status", get(pair_status))
         .route("/api/v1/manifest", get(manifest))
         .route("/api/v1/pull", post(pull))
-        .route("/api/v1/push", post(push))
+        .route(
+            "/api/v1/push",
+            post(push).layer(DefaultBodyLimit::max(PUSH_BODY_LIMIT_BYTES)),
+        )
         .route("/api/v1/delete", post(delete_files))
         .route("/api/v1/tombstones", get(tombstones))
         .with_state(ctx)
@@ -1755,6 +1766,44 @@ mod tests {
             .unwrap();
         assert!(!deleted2[0].ok && !deleted2[1].ok, "点目录 delete 必须拒绝");
         assert!(dir.path().join(".lanmark/lanmark.db").exists(), "索引库必须还在");
+    }
+
+    /// S5 回归：push 附件落盘必须是 tmp+rename（替换目标本身），而不是就地
+    /// `std::fs::write`。用「指向目录的符号链接」做确定性探针：就地写会 EISDIR，
+    /// tmp+rename 才能成功替换链接；顺带验证无 tmp 残留。
+    #[cfg(unix)]
+    #[test]
+    fn pushed_asset_is_written_atomically_not_in_place() {
+        use crate::commands::open_vault_at;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let vault = dir.path();
+        let assets = vault.join(fs_ops::ASSETS_DIR);
+        let target = assets.join("sym.png");
+        std::os::unix::fs::symlink(&assets, &target).unwrap();
+
+        let bytes: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let pf = PushFile {
+            path: "assets/sym.png".into(),
+            kind: "asset".into(),
+            content_base64: b64_encode(&bytes),
+            hash: fs_ops::content_hash(&bytes),
+            mtime_ms: fs_ops::now_ms(),
+            base_hash: String::new(),
+        };
+        let ctx = Arc::new(ServerCtx::new(Arc::clone(&app), load_sync_config(vault)));
+        let landed = write_pushed_file(&ctx, vault, &pf).unwrap();
+        assert_eq!(landed.server_hash, pf.hash);
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert!(!target.is_symlink(), "必须替换链接本身，不得跟着链接就地写");
+        let leftovers: Vec<_> = std::fs::read_dir(&assets)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("lanmark-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不得残留 tmp: {leftovers:?}");
     }
 
     /// M3a 仲裁单测（docs/07 §9：来件新 / 来件旧 / 平手三向）。
