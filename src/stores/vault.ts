@@ -492,20 +492,31 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
     try {
       await vault.writeNote(activePath, next);
-      set({
-        dirty: false,
-        savedAt: Date.now(),
-        savedContent: next,
-        ...(editorMode === "source" ? {} : { content: next }),
-      });
-      // M3d 触发 C：保存完成 → 通知自动同步循环（轻量 CustomEvent，避免两 store 循环依赖；
-      // 循环侧 5s 尾沿后回合，docs/07 §7）
-      window.dispatchEvent(new CustomEvent("lanmark:vault-saved"));
-      return true;
     } catch (e) {
       set({ error: String(e) });
       return false;
     }
+    // 写入是异步的：期间用户可能继续输入，甚至切到别的笔记。完成时必须复核，
+    // 不能拿旧快照无条件覆盖 store（否则新输入被清 dirty 后再也不落盘；
+    // 切走后旧笔记内容还会写进新笔记的 content）。
+    const s = get();
+    if (s.activePath === activePath) {
+      if (s.content === content) {
+        set({
+          dirty: false,
+          savedAt: Date.now(),
+          savedContent: next,
+          ...(s.editorMode === "source" ? {} : { content: next }),
+        });
+      } else {
+        // 同一路径但有新输入：只记录磁盘真实基线，保留 dirty 与最新内容
+        set({ savedContent: next, savedAt: Date.now() });
+      }
+    }
+    // 写盘已成功（哪怕中途切走）都要通知：M3d 触发 C → 自动同步循环
+    // （轻量 CustomEvent，避免两 store 循环依赖；循环侧 5s 尾沿后回合，docs/07 §7）
+    window.dispatchEvent(new CustomEvent("lanmark:vault-saved"));
+    return true;
   },
 
   setEditorMode: (m) => {

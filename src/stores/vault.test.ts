@@ -741,3 +741,97 @@ describe("v0.5.1 分区折叠状态（按 vault 持久化）", () => {
     expect(useVaultStore.getState().expandedSections.has("favorites")).toBe(false);
   });
 });
+
+/* ── T1：保存完成不得覆盖在途输入 / 污染已切走的笔记 ── */
+
+describe("saveNow：陈旧完成不覆盖新输入", () => {
+  it("写入期间继续输入 → 完成只更新基线，保留新内容与 dirty", async () => {
+    let resolveWrite: () => void = () => {};
+    writeNote.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "第一版",
+      savedContent: "磁盘基线",
+      dirty: true,
+      savedAt: null,
+    });
+
+    const saving = useVaultStore.getState().saveNow();
+    expect(writeNote).toHaveBeenCalledWith("a.md", "第一版\n");
+
+    // 写入在途时用户继续输入（store 收到新内容，dirty 保持）
+    useVaultStore.getState().setContent("第二版");
+    expect(useVaultStore.getState().dirty).toBe(true);
+
+    resolveWrite();
+    expect(await saving).toBe(true);
+
+    const s = useVaultStore.getState();
+    expect(s.content).toBe("第二版"); // 旧快照不得覆盖新输入
+    expect(s.dirty).toBe(true); // 新输入还没落盘
+    expect(s.savedContent).toBe("第一版\n"); // 基线 = 磁盘真实内容
+    expect(s.savedAt).not.toBeNull();
+
+    // 收掉 setContent 排的尾沿定时器，避免影响后续用例
+    await useVaultStore.getState().saveNow();
+  });
+
+  it("写入期间切到另一篇笔记 → 完成不得污染 B 的状态", async () => {
+    let resolveWrite: () => void = () => {};
+    writeNote.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveWrite = resolve; }),
+    );
+    useVaultStore.setState({
+      activePath: "a.md",
+      content: "A 未保存内容",
+      savedContent: "A 磁盘基线",
+      dirty: true,
+      savedAt: null,
+    });
+
+    const saving = useVaultStore.getState().saveNow();
+    // 写入在途时切到 b.md（openNote 会先落盘旧笔记，第二次 write 走默认成功实现）
+    await useVaultStore.getState().openNote("b.md");
+    expect(useVaultStore.getState().activePath).toBe("b.md");
+
+    resolveWrite();
+    expect(await saving).toBe(true);
+
+    const s = useVaultStore.getState();
+    expect(s.activePath).toBe("b.md");
+    expect(s.content).toBe("内容b.md");
+    expect(s.savedContent).toBe("内容b.md");
+    expect(s.dirty).toBe(false);
+    expect(s.savedAt).toBeNull(); // 旧笔记的完成时间不得写进 B
+  });
+
+  it("无并发时照常清 dirty、回写规范内容并派发保存事件", async () => {
+    const onSaved = vi.fn();
+    window.addEventListener("lanmark:vault-saved", onSaved);
+    try {
+      useVaultStore.setState({
+        activePath: "a.md",
+        content: "第一版 ",
+        savedContent: "磁盘基线",
+        dirty: true,
+        savedAt: null,
+      });
+
+      expect(await useVaultStore.getState().saveNow()).toBe(true);
+
+      const s = useVaultStore.getState();
+      expect(s.content).toBe("第一版\n");
+      expect(s.savedContent).toBe("第一版\n");
+      expect(s.dirty).toBe(false);
+      expect(s.savedAt).not.toBeNull();
+      expect(onSaved).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("lanmark:vault-saved", onSaved);
+    }
+  });
+});
