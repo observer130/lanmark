@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 pub const TRASH_DIR: &str = ".lanmark/trash";
 pub const ASSETS_DIR: &str = "assets";
 pub const META_DIR: &str = ".lanmark";
+/// 原子写临时文件后缀。**遍历磁盘的清单/统计必须过滤它**：tmp 只在
+/// rename 前存在一瞬，失败时也可能残留；把半成品当资产同步出去会让对端
+/// 收到一个永远修不好的孤儿文件（改名/删除都不会传播它）。
+pub const TMP_SUFFIX: &str = ".lanmark-tmp";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -946,7 +950,7 @@ fn tmp_path_for(abs: &Path) -> PathBuf {
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let parent = abs.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(format!("{name}.{}.{}.lanmark-tmp", std::process::id(), seq))
+    parent.join(format!("{name}.{}.{}{TMP_SUFFIX}", std::process::id(), seq))
 }
 
 /// 设定文件 mtime（LWW 时间源跨端保真，docs/07 §2：裁决按「文件 mtime」而非
@@ -974,10 +978,19 @@ pub fn set_file_mtime(abs: &Path, ms: i64) {
 }
 
 /// 原子写（tmp+rename）。崩溃最多留一个孤儿 tmp，绝不产生截断的正式文件。
+/// 失败时清掉 tmp：assets/ 下的残留会被 `asset_walk` 当附件同步出去
+/// （见 `TMP_SUFFIX`），所以失败路径也必须收尾。
 pub fn atomic_write(abs: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = tmp_path_for(abs);
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, abs)
+    if let Err(e) = fs::write(&tmp, bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp, abs) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// 写入（tmp+rename 原子落盘），更新索引。返回 (mtime_ms, hash)。
@@ -1409,6 +1422,30 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".lanmark-tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    /// 原子写失败必须清掉 tmp：assets/ 下残留的半成品会被 asset_walk 当附件
+    /// 同步给对端（见 `TMP_SUFFIX`），且改名/删除都不会传播它，永远修不好。
+    /// 用「目标是非空目录」构造确定性 rename 失败（file→dir 必败）。
+    #[test]
+    fn atomic_write_failure_cleans_tmp() {
+        let (tmp, _conn) = setup();
+        let vault = tmp.path();
+        let target = vault.join("target-dir");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.txt"), "x").unwrap();
+
+        let err = atomic_write(&target, b"new").unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound, "应是 rename 失败: {err}");
+        assert!(target.is_dir(), "目标目录不得被替换");
+        assert!(target.join("keep.txt").is_file());
+
+        let leftovers: Vec<_> = fs::read_dir(vault)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(TMP_SUFFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "失败路径不得留下 tmp: {leftovers:?}");
     }
 
     #[test]

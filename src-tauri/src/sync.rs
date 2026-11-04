@@ -254,6 +254,11 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
         if ft.is_symlink() || !ft.is_file() {
             continue;
         }
+        // 原子写的半成品不进清单：tmp 在 rename 前一瞬存在，写失败时也可能残留；
+        // 一旦被同步出去，对端会多一个永远修不好的孤儿附件。
+        if entry.file_name().to_string_lossy().ends_with(fs_ops::TMP_SUFFIX) {
+            continue;
+        }
         let path = entry.path();
         let bytes = std::fs::read(&path)?;
         let rel = format!(
@@ -440,6 +445,25 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S5 配套：原子写的半成品不得进同步清单——否则会被当成新附件同步给
+    /// 对端，而它随后被 rename 走/删除都不会传播，留下永远修不好的孤儿文件。
+    #[test]
+    fn asset_walk_skips_atomic_tmp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs_ops::ensure_layout(dir.path()).unwrap();
+        let assets = dir.path().join(fs_ops::ASSETS_DIR);
+        std::fs::write(assets.join("ok.png"), b"png").unwrap();
+        std::fs::write(
+            assets.join(format!("ok.png.1.2{}", fs_ops::TMP_SUFFIX)),
+            b"half",
+        )
+        .unwrap();
+
+        let list = asset_walk(dir.path()).unwrap();
+        assert_eq!(list.len(), 1, "tmp 不得进清单: {list:?}");
+        assert_eq!(list[0].path, "assets/ok.png");
+    }
 
 
     #[test]
