@@ -608,7 +608,8 @@ pub fn vault_stats(vault: &Path) -> std::io::Result<VaultStats> {
                     continue;
                 }
                 st.folders += 1;
-                st.bytes += dir_bytes(&p);
+                // 只入栈：文件在遍历到所在目录时逐个累加。
+                // 这里若再 `dir_bytes(&p)`，子文件会按目录层级被重复计算（深度 d 计 d+1 次）。
                 stack.push(p);
             } else if ft.is_file() {
                 if name.starts_with('.') {
@@ -1804,6 +1805,22 @@ mod tests {
         assert_eq!(list[0].trash_path, trash2, "新删的在前");
         assert_eq!(list[1].trash_path, trash1);
         assert!(list.iter().all(|e| !e.trash_path.ends_with(TRASH_INDEX_FILE)));
+    }
+
+    /// 回归：vault 占用按目录层级重复累加（深度 d 的文件被计 d+1 次）。
+    /// 普通目录只入栈、由遍历逐个文件累加；只有 assets/ 例外（不递归、整目录算一次）。
+    #[test]
+    fn vault_stats_counts_nested_files_once() {
+        let (tmp, _conn) = setup();
+        let vault = tmp.path();
+        fs::create_dir_all(vault.join("a/b")).unwrap();
+        fs::write(vault.join("a/b/c.md"), b"0123456789").unwrap(); // 10 字节
+        fs::write(vault.join("根.md"), b"abcde").unwrap(); // 5 字节
+
+        let st = vault_stats(vault).unwrap();
+        assert_eq!(st.notes, 2);
+        assert_eq!(st.folders, 2, "a + a/b");
+        assert_eq!(st.bytes, 15, "每个文件只计一次（此前按层级重复累加）");
     }
 
     /// 来源索引不是条目：usage 不计；prune 清过期条目时自愈索引；
