@@ -675,6 +675,15 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     if (!newName.trim() || newName.trim() === get().tree.find((n) => n.path === path)?.name) {
       return;
     }
+    // 改名前先把当前笔记落盘（saveNow 内部会清掉 saveTimer）：否则 await vault.rename
+    // 期间定时器可能拿旧 activePath 再写一次，Rust 侧改名完成后就在旧路径重建孤儿文件。
+    // 保存失败则中止（saveNow 已 set error，未保存编辑保留）。
+    if (get().dirty && get().activePath) {
+      if (!(await get().saveNow())) return;
+      // 写入在途时又有输入：T1 语义下 saveNow 成功但 dirty 仍在（新输入还没落盘）。
+      // 此时也不能改路径——setContent 新排的定时器仍会用旧 activePath 写盘。
+      if (get().dirty && get().activePath) return;
+    }
     try {
       const node = get().tree.find((n) => n.path === path);
       const isNote = node?.kind === "note";
@@ -728,6 +737,12 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   moveNode: async (path, newDir) => {
     // 移动会让 activePath 被 remap、编辑器 key 随之重建 —— 先 flush
     flushEditorToStore();
+    // 同 commitRename：移动前先落盘并清掉 saveTimer，防旧路径定时器写回孤儿文件；
+    // 落盘期间又有输入（dirty 仍在）同样中止，不能带着未落盘的旧路径去移动。
+    if (get().dirty && get().activePath) {
+      if (!(await get().saveNow())) return;
+      if (get().dirty && get().activePath) return;
+    }
     try {
       const newPath = await vault.move(path, newDir);
       set((s) => ({ activePath: remapPath(s.activePath, path, newPath) }));

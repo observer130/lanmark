@@ -835,3 +835,154 @@ describe("saveNow：陈旧完成不覆盖新输入", () => {
     }
   });
 });
+
+
+/* ── T2：改名/移动前必须先落盘，防旧路径定时器把编辑写回孤儿文件 ── */
+
+describe("改名/移动前先落盘", () => {
+  it("commitRename：dirty 时 writeNote 先于 rename", async () => {
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+      activePath: "a.md",
+      content: "未保存内容",
+      savedContent: "磁盘基线",
+      dirty: true,
+    });
+    rename.mockResolvedValueOnce("b.md");
+
+    await useVaultStore.getState().commitRename("a.md", "b");
+
+    expect(writeNote).toHaveBeenCalledWith("a.md", "未保存内容\n");
+    expect(writeNote.mock.invocationCallOrder[0]).toBeLessThan(
+      rename.mock.invocationCallOrder[0],
+    );
+    expect(useVaultStore.getState().dirty).toBe(false);
+  });
+
+  it("commitRename：落盘失败 → 中止改名，状态与树保留", async () => {
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+      activePath: "a.md",
+      content: "未保存的重要内容",
+      savedContent: "磁盘基线",
+      dirty: true,
+    });
+    writeNote.mockRejectedValueOnce(new Error("磁盘满"));
+
+    await useVaultStore.getState().commitRename("a.md", "b");
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(tree).not.toHaveBeenCalled();
+    const s = useVaultStore.getState();
+    expect(s.activePath).toBe("a.md");
+    expect(s.content).toBe("未保存的重要内容");
+    expect(s.savedContent).toBe("磁盘基线");
+    expect(s.dirty).toBe(true);
+    expect(s.tree).toHaveLength(1);
+    expect(s.error).toBeTruthy();
+  });
+
+  it("commitRename：落盘期间又有新输入（dirty 仍在）→ 中止改名", async () => {
+    let resolveWrite: () => void = () => {};
+    writeNote.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveWrite = resolve; }),
+    );
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+      activePath: "a.md",
+      content: "第一版",
+      savedContent: "磁盘基线",
+      dirty: true,
+    });
+    rename.mockResolvedValueOnce("b.md");
+
+    const renaming = useVaultStore.getState().commitRename("a.md", "b");
+    // 写入在途时用户继续输入：saveNow 成功返回 true，但 T1 语义保留 dirty
+    useVaultStore.getState().setContent("第二版");
+    resolveWrite();
+    await renaming;
+
+    // 落盘确实成功（baseline 已更新），但新输入未落盘 → 不得带着旧路径改名
+    expect(rename).not.toHaveBeenCalled();
+    const s = useVaultStore.getState();
+    expect(s.activePath).toBe("a.md");
+    expect(s.content).toBe("第二版");
+    expect(s.savedContent).toBe("第一版\n");
+    expect(s.dirty).toBe(true);
+    expect(s.error).toBeNull();
+
+    // 收掉 setContent 排的尾沿定时器，避免影响后续用例
+    await useVaultStore.getState().saveNow();
+  });
+
+  it("commitRename：非 dirty 时行为不变（不多写盘）", async () => {
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+      activePath: "a.md",
+      content: "稳定内容",
+      savedContent: "稳定内容",
+      dirty: false,
+    });
+    rename.mockResolvedValueOnce("b.md");
+
+    await useVaultStore.getState().commitRename("a.md", "b");
+
+    expect(writeNote).not.toHaveBeenCalled();
+    expect(rename).toHaveBeenCalledWith("a.md", "b");
+  });
+
+  it("moveNode：dirty 时 writeNote 先于 move", async () => {
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+      activePath: "a.md",
+      content: "未保存内容",
+      savedContent: "磁盘基线",
+      dirty: true,
+    });
+    move.mockResolvedValueOnce("d/a.md");
+
+    await useVaultStore.getState().moveNode("a.md", "d");
+
+    expect(writeNote).toHaveBeenCalledWith("a.md", "未保存内容\n");
+    expect(writeNote.mock.invocationCallOrder[0]).toBeLessThan(
+      move.mock.invocationCallOrder[0],
+    );
+    expect(useVaultStore.getState().dirty).toBe(false);
+  });
+
+  it("moveNode：落盘失败 → 中止移动，状态保留", async () => {
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+      activePath: "a.md",
+      content: "未保存的重要内容",
+      savedContent: "磁盘基线",
+      dirty: true,
+    });
+    writeNote.mockRejectedValueOnce(new Error("权限不足"));
+
+    await useVaultStore.getState().moveNode("a.md", "d");
+
+    expect(move).not.toHaveBeenCalled();
+    const s = useVaultStore.getState();
+    expect(s.activePath).toBe("a.md");
+    expect(s.content).toBe("未保存的重要内容");
+    expect(s.dirty).toBe(true);
+    expect(s.error).toBeTruthy();
+  });
+
+  it("moveNode：非 dirty 时行为不变（不多写盘）", async () => {
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+      activePath: "a.md",
+      content: "稳定内容",
+      savedContent: "稳定内容",
+      dirty: false,
+    });
+    move.mockResolvedValueOnce("d/a.md");
+
+    await useVaultStore.getState().moveNode("a.md", "d");
+
+    expect(writeNote).not.toHaveBeenCalled();
+    expect(move).toHaveBeenCalledWith("a.md", "d");
+  });
+});
