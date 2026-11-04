@@ -1124,9 +1124,16 @@ pub fn reindex(vault: &Path, conn: &Connection) -> std::io::Result<usize> {
 /// hash 必须基于**磁盘原始字节**：非 UTF-8（GBK 等）外来文件此前
 /// read_to_string 失败 → unwrap_or_default 得空串 → 入库 hash = sha256(空串)，
 /// 与磁盘字节不符（违反 files.hash 契约）。
+///
+/// 读失败（文件刚被外部删除 / 权限拒绝）直接返回，**保留旧索引行**：
+/// 写空 body + sha256("") + mtime=0 会让正文从搜索里消失，且同样违反
+/// 「hash = 磁盘字节」契约；等下次成功重索引再更新。
 fn index_note_file(vault: &Path, rel: &str, conn: &Connection) -> std::io::Result<()> {
     let abs = vault.join(rel);
-    let bytes = fs::read(&abs).unwrap_or_default();
+    let bytes = match fs::read(&abs) {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
     let content = String::from_utf8_lossy(&bytes).to_string();
     let mtime = fs::metadata(&abs)
         .and_then(|m| m.modified())
@@ -1821,6 +1828,28 @@ mod tests {
         assert_eq!(st.notes, 2);
         assert_eq!(st.folders, 2, "a + a/b");
         assert_eq!(st.bytes, 15, "每个文件只计一次（此前按层级重复累加）");
+    }
+
+    /// 回归：读失败不得用空 body / sha256("") / mtime=0 覆盖索引（违反
+    /// 「hash = 磁盘字节」契约，正文从搜索消失）。保留旧行，等下次成功重索引。
+    #[test]
+    fn index_note_file_read_failure_keeps_old_row() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let rel = "笔记.md";
+        let body = "# 标题\n\n正文内容";
+        fs::write(vault.join(rel), body).unwrap();
+        index_note_file(vault, rel, &conn).unwrap();
+        let before = db::get_file(&conn, rel).unwrap().expect("应已索引");
+
+        // 模拟磁盘文件在读之前被外部删除 / 权限拒绝
+        fs::remove_file(vault.join(rel)).unwrap();
+        index_note_file(vault, rel, &conn).unwrap();
+
+        let after = db::get_file(&conn, rel).unwrap().expect("旧索引行必须保留");
+        assert_eq!(after, before, "读失败不得覆盖既有索引");
+        assert_eq!(after.1, body);
+        assert_eq!(after.3, content_hash(body.as_bytes()));
     }
 
     /// 来源索引不是条目：usage 不计；prune 清过期条目时自愈索引；
