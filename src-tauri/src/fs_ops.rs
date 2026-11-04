@@ -302,9 +302,16 @@ pub fn rename_entry(
     }
     let target = unique_target(&parent, &new_name)?;
     // M3b：重命名 = 旧路径消失 → 记旧路径 tombstone（文件夹展开），
-    // 对端收敛为「旧路径删除 + 新路径推送」，内容在新路径保留（铁律）
-    record_tombstones_for_entry(vault, rel_path, conn);
+    // 对端收敛为「旧路径删除 + 新路径推送」，内容在新路径保留（铁律）。
+    // 顺序硬约定：先只读快照（路径 + hash），fs::rename 成功后才写墓碑。
+    // rename 是原子的，失败即未发生——提前写会留下「旧路径已删除」，
+    // 下个同步回合 D4 会把仍在旧路径的文件当陈旧恢复再软删（S2）。
+    let pending = snapshot_tombstones_for_entry(vault, rel_path, conn);
     fs::rename(&old_abs, &target)?;
+    // rename 已成功：旧路径确实消失，墓碑成立。即使随后 db::rename_paths
+    // 失败（? 提前返回），旧路径墓碑也必须保留——文件真的改名了，
+    // 同步侧要靠它把旧路径的删除收敛掉；新路径墓碑清理失败同理由下回合兜底。
+    write_tombstones(vault, &pending);
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -362,9 +369,12 @@ pub fn move_entry(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let target = unique_target(&new_dir, &name)?;
-    // M3b：移动 = 旧路径消失 → 同 rename 的 tombstone 处理
-    record_tombstones_for_entry(vault, rel_path, conn);
+    // M3b：移动 = 旧路径消失 → 同 rename 的 tombstone 处理：
+    // 先只读快照，fs::rename 成功后才写墓碑（失败路径不得留下墓碑）。
+    let pending = snapshot_tombstones_for_entry(vault, rel_path, conn);
     fs::rename(&old_abs, &target)?;
+    // 成功后才写；DB 改名失败提前返回时旧路径墓碑保留是正确的（见 rename_entry）。
+    write_tombstones(vault, &pending);
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -413,19 +423,41 @@ pub fn entry_file_list(vault: &Path, rel: &str, conn: &Connection) -> std::io::R
     Ok(out)
 }
 
-/// M3b：为条目下全部同步单元记 tombstone（hash 以磁盘为准，时间 = 现在）
-fn record_tombstones_for_entry(vault: &Path, rel: &str, conn: &Connection) {
+/// M3b：为条目下全部同步单元做只读快照（相对路径 + 内容 hash）。
+/// 只读、无墓碑副作用：rename/move 必须等 `fs::rename` 成功后再落墓碑，
+/// 失败路径不得留下任何 tombstone（见 rename_entry / move_entry）。
+fn snapshot_tombstones_for_entry(
+    vault: &Path,
+    rel: &str,
+    conn: &Connection,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     if let Ok(files) = entry_file_list(vault, rel, conn) {
-        let now = now_ms();
-        for f in &files {
-            if let Ok(bytes) = fs::read(vault.join(f)) {
-                let h = content_hash(&bytes);
-                if let Err(e) = crate::sync::record_tombstone(vault, f, &h, now) {
-                    log::warn!("记 tombstone 失败 {f}: {e}");
-                }
+        for f in files {
+            if let Ok(bytes) = fs::read(vault.join(&f)) {
+                out.push((f, content_hash(&bytes)));
             }
         }
     }
+    out
+}
+
+/// 把快照写成 tombstone（删除时刻 = 现在）。仅在 `fs::rename` 成功后调用。
+fn write_tombstones(vault: &Path, snapshot: &[(String, String)]) {
+    let now = now_ms();
+    for (f, h) in snapshot {
+        if let Err(e) = crate::sync::record_tombstone(vault, f, h, now) {
+            log::warn!("记 tombstone 失败 {f}: {e}");
+        }
+    }
+}
+
+/// M3b：为条目下全部同步单元立即记 tombstone（hash 以磁盘为准，时间 = 现在）。
+/// 保留原入口与语义；rename/move 不能直接用它——它们必须先快照、
+/// 等 rename 成功后再 `write_tombstones`。
+#[allow(dead_code)]
+fn record_tombstones_for_entry(vault: &Path, rel: &str, conn: &Connection) {
+    write_tombstones(vault, &snapshot_tombstones_for_entry(vault, rel, conn));
 }
 
 /// M3b D4：清除条目下全部同步单元的 tombstone
@@ -1135,6 +1167,19 @@ mod tests {
         (dir, conn)
     }
 
+    /// 只读目录权限守卫：Drop 时恢复 0o755，否则 TempDir 连清理都做不了
+    /// （测试 panic 时同样生效）。
+    #[cfg(unix)]
+    struct RestoreDirPerms(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for RestoreDirPerms {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
     #[test]
     fn create_rename_search_flow() {
         let (tmp, conn) = setup();
@@ -1234,6 +1279,93 @@ mod tests {
         let root_note = create_note(vault, "", "r.md").unwrap();
         assert_eq!(move_entry(vault, &root_note.path, "", &conn).unwrap(), root_note.path);
         assert!(!vault.join("r-2.md").exists());
+    }
+
+    /// 回归 S2：rename 失败不得留下墓碑。
+    ///
+    /// 构造确定性失败：`sanitize_filename_with_ext` 原样保留扩展名，
+    /// `x.y/z` 的 ext 是 `.y/z` → 目标 `x.y/z` 的父目录 `x.y` 不存在，
+    /// `fs::rename` 必报 ENOENT。修复前墓碑在 rename 之前写，失败路径会留下
+    /// 「旧路径已删除」，下个同步回合 D4 把仍在原路径的文件当陈旧恢复再软删。
+    #[test]
+    fn rename_failure_leaves_no_tombstone() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let note = create_note(vault, "", "改坏名.md").unwrap();
+        write_note(vault, &note.path, "内容", &conn).unwrap();
+
+        let err = rename_entry(vault, &note.path, "x.y/z", &conn).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "目标父目录不存在: {err}");
+        let ts = crate::sync::load_tombstones(vault);
+        assert!(ts.is_empty(), "rename 失败不得留下墓碑: {ts:?}");
+        assert!(vault.join(&note.path).is_file(), "失败后文件必须仍在原路径");
+    }
+
+    /// 回归 S2：move 失败不得留下墓碑（目标目录只读 → rename EACCES）。
+    /// root 会绕过目录权限，探针能写则跳过（本机/CI 非 root 时有效）。
+    #[cfg(unix)]
+    #[test]
+    fn move_failure_leaves_no_tombstone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let locked = create_folder(vault, "", "锁定").unwrap();
+        let note = create_note(vault, "", "移不动.md").unwrap();
+        write_note(vault, &note.path, "内容", &conn).unwrap();
+
+        let locked_abs = vault.join(&locked.path);
+        let _guard = RestoreDirPerms(locked_abs.clone());
+        fs::set_permissions(&locked_abs, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(locked_abs.join(".perm-probe"), b"").is_ok() {
+            let _ = fs::remove_file(locked_abs.join(".perm-probe"));
+            eprintln!("root 绕过目录权限，跳过只读目录用例");
+            return;
+        }
+
+        let err = move_entry(vault, &note.path, &locked.path, &conn).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "rename 应失败: {err}");
+        let ts = crate::sync::load_tombstones(vault);
+        assert!(ts.is_empty(), "move 失败不得留下墓碑: {ts:?}");
+        assert!(vault.join(&note.path).is_file(), "失败后文件必须仍在原路径");
+        assert!(!locked_abs.join("移不动.md").exists());
+    }
+
+    /// 成功路径（文件）：旧路径墓碑存在、新路径无墓碑。
+    #[test]
+    fn rename_success_tombstones_old_path_only() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let note = create_note(vault, "", "旧名.md").unwrap();
+        write_note(vault, &note.path, "正文", &conn).unwrap();
+
+        let new_path = rename_entry(vault, &note.path, "新名.md", &conn).unwrap();
+        let ts = crate::sync::load_tombstones(vault);
+        assert_eq!(ts.len(), 1, "只应有旧路径一条墓碑: {ts:?}");
+        assert_eq!(ts[0].path, note.path, "旧路径应记墓碑: {ts:?}");
+        assert_eq!(ts[0].hash, content_hash("正文".as_bytes()), "墓碑 hash 应为原内容");
+        assert!(ts.iter().all(|t| t.path != new_path), "新路径不得有墓碑: {ts:?}");
+    }
+
+    /// 成功路径（文件夹）：墓碑必须展开到每个旧子路径，新路径一个都不留。
+    #[test]
+    fn folder_rename_success_expands_old_tombstones() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let folder = create_folder(vault, "", "项目").unwrap();
+        let n1 = create_note(vault, &folder.path, "一.md").unwrap();
+        let n2 = create_note(vault, &folder.path, "二.md").unwrap();
+        write_note(vault, &n1.path, "一", &conn).unwrap();
+        write_note(vault, &n2.path, "二", &conn).unwrap();
+
+        let new_path = rename_entry(vault, &folder.path, "归档", &conn).unwrap();
+        assert_eq!(new_path, "归档");
+        let ts = crate::sync::load_tombstones(vault);
+        for old in [&n1.path, &n2.path] {
+            assert!(ts.iter().any(|t| t.path == *old), "旧子路径应展开墓碑: {ts:?}");
+        }
+        let prefix = format!("{new_path}/");
+        assert!(ts.iter().all(|t| !t.path.starts_with(&prefix)), "新路径不得有墓碑: {ts:?}");
     }
 
     /// tmp 路径必须唯一（pid+序号），并发写同一文件不互相踩踏。
