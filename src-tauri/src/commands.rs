@@ -215,6 +215,8 @@ pub fn tree_list_op(state: &Arc<AppState>) -> CmdResult<Vec<Node>> {
 }
 
 pub fn note_create_op(state: &Arc<AppState>, dir: &str, name: &str) -> CmdResult<Node> {
+    // 新建目录也要守住点目录边界：否则可往 .lanmark/ 里塞笔记（污染元数据/同步清单）
+    reject_dot_path(dir)?;
     with_vault(state, |vault| {
         with_db(state, |conn| {
             let node = fs_ops::create_note(vault, dir, name).map_err(|e| e.to_string())?;
@@ -226,6 +228,7 @@ pub fn note_create_op(state: &Arc<AppState>, dir: &str, name: &str) -> CmdResult
 }
 
 pub fn folder_create_op(state: &Arc<AppState>, dir: &str, name: &str) -> CmdResult<Node> {
+    reject_dot_path(dir)?;
     with_vault(state, |vault| fs_ops::create_folder(vault, dir, name).map_err(|e| e.to_string()))
 }
 
@@ -911,6 +914,10 @@ mod e2e_tests {
         assert!(entry_move_op(s, ".lanmark/sync.json", "assets").is_err());
         assert!(entry_move_op(s, &note.path, ".lanmark").is_err());
         assert!(favorite_toggle_op(s, ".lanmark/sync.json").is_err());
+        // 新建的目录参数同样属于用户路径入口，不能把笔记/文件夹建进 .lanmark
+        assert!(note_create_op(s, ".lanmark", "pwn").is_err());
+        assert!(folder_create_op(s, ".lanmark", "pwn").is_err());
+        assert!(note_create_op(s, ".lanmark/trash", "pwn").is_err());
 
         assert_eq!(std::fs::read_to_string(&sync_json).unwrap(), "keep-me", "不得改内容");
         assert!(sync_json.exists());
