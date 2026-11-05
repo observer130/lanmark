@@ -148,14 +148,33 @@ pub fn save_tombstones(vault: &Path, list: &[Tombstone]) -> std::io::Result<()> 
 
 /// 记 tombstone（按 path upsert）。`deleted_ms` = 删除时刻
 pub fn record_tombstone(vault: &Path, path: &str, hash: &str, deleted_ms: i64) -> std::io::Result<()> {
+    record_tombstones(vault, &[(path.to_string(), hash.to_string())], deleted_ms)
+}
+
+/// 批量记 tombstone：**一次 load、批量 upsert、一次 atomic save**。
+///
+/// 文件夹删除/改名会给每个同步单元记墓碑；逐条调 `record_tombstone` 会把
+/// `tombstones.json` 整读整写 N 次（大文件夹删除时主线程 I/O 成倍放大）。
+/// 与逐条版同语义：同 path 覆盖旧墓碑，`deleted_ms` 统一为本批删除时刻。
+pub fn record_tombstones(
+    vault: &Path,
+    entries: &[(String, String)],
+    deleted_ms: i64,
+) -> std::io::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
     let mut list = load_tombstones(vault);
-    list.retain(|t| t.path != path);
-    list.push(Tombstone {
-        path: path.into(),
-        hash: hash.into(),
-        mtime_ms: deleted_ms,
-        deleted_at: deleted_ms,
-    });
+    // 先剔除本批涉及的旧条目（同 path 在批内重复时后写覆盖先写），再统一追加
+    list.retain(|t| !entries.iter().any(|(p, _)| *p == t.path));
+    for (path, hash) in entries {
+        list.push(Tombstone {
+            path: path.clone(),
+            hash: hash.clone(),
+            mtime_ms: deleted_ms,
+            deleted_at: deleted_ms,
+        });
+    }
     save_tombstones(vault, &list)
 }
 
@@ -465,6 +484,57 @@ mod tests {
         assert_eq!(list[0].path, "assets/ok.png");
     }
 
+    /// A1 回归：批量记墓碑 = 一次 load + 一次 atomic save。
+    /// 此前 entry_delete 对文件夹里每个文件各调一次 `record_tombstone`，
+    /// N 个文件就要整读整写 N 次 tombstones.json（大文件夹删除时主线程卡顿）。
+    #[test]
+    fn record_tombstones_batches_into_one_ledger() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path();
+        fs_ops::ensure_layout(vault).unwrap();
+
+        let entries = vec![
+            ("工作/一.md".to_string(), "h1".to_string()),
+            ("工作/二.md".to_string(), "h2".to_string()),
+        ];
+        record_tombstones(vault, &entries, 1_789_633_800_000).unwrap();
+
+        let ts = load_tombstones(vault);
+        assert_eq!(ts.len(), 2, "批量写入两条墓碑: {ts:?}");
+        let by_path = |p: &str| ts.iter().find(|t| t.path == p).unwrap();
+        assert_eq!(by_path("工作/一.md").hash, "h1");
+        assert_eq!(by_path("工作/二.md").hash, "h2");
+        assert!(ts.iter().all(|t| t.deleted_at == 1_789_633_800_000));
+
+        // 账本只有一个文件，且内容是可整体反序列化的数组（不是多份拼接）
+        let ledger = vault.join(".lanmark/tombstones.json");
+        assert!(ledger.is_file(), "账本必须落盘");
+        let raw = std::fs::read_to_string(&ledger).unwrap();
+        let parsed: Vec<Tombstone> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+
+        // 第二批：同 path 覆盖（不膨胀），新 path 追加
+        record_tombstones(
+            vault,
+            &[
+                ("工作/一.md".to_string(), "h1b".to_string()),
+                ("根.md".to_string(), "h3".to_string()),
+            ],
+            1_789_633_900_000,
+        )
+        .unwrap();
+        let ts = load_tombstones(vault);
+        assert_eq!(ts.len(), 3, "同路径覆盖、新路径追加: {ts:?}");
+        let n1 = ts.iter().find(|t| t.path == "工作/一.md").unwrap();
+        assert_eq!(n1.hash, "h1b", "同路径墓碑取最新一次");
+        assert_eq!(n1.deleted_at, 1_789_633_900_000);
+
+        // 空批次不写盘（清理路径不应凭空造账本）
+        let empty_vault = tempfile::TempDir::new().unwrap();
+        fs_ops::ensure_layout(empty_vault.path()).unwrap();
+        record_tombstones(empty_vault.path(), &[], 1).unwrap();
+        assert!(!empty_vault.path().join(".lanmark/tombstones.json").exists());
+    }
 
     #[test]
     fn version_tuple_ordering() {

@@ -494,10 +494,9 @@ fn snapshot_tombstones_for_entry(
 /// 把快照写成 tombstone（删除时刻 = 现在）。仅在 `fs::rename` 成功后调用。
 fn write_tombstones(vault: &Path, snapshot: &[(String, String)]) {
     let now = now_ms();
-    for (f, h) in snapshot {
-        if let Err(e) = crate::sync::record_tombstone(vault, f, h, now) {
-            log::warn!("记 tombstone 失败 {f}: {e}");
-        }
+    // 批量 upsert：一次 load + 一次 atomic save（逐条版会整读整写账本 N 次）
+    if let Err(e) = crate::sync::record_tombstones(vault, snapshot, now) {
+        log::warn!("记 tombstone 失败（{} 条）: {e}", snapshot.len());
     }
 }
 

@@ -259,13 +259,15 @@ pub fn entry_delete_op(state: &Arc<AppState>, path: &str) -> CmdResult<String> {
             // 本地 UI 删除与服务器 /delete 都走这里 → 两侧墓碑统一
             if let Ok(files) = fs_ops::entry_file_list(vault, path, conn) {
                 let now = fs_ops::now_ms();
+                let mut pending: Vec<(String, String)> = Vec::with_capacity(files.len());
                 for f in &files {
                     if let Ok(bytes) = std::fs::read(vault.join(f)) {
-                        let h = fs_ops::content_hash(&bytes);
-                        if let Err(e) = crate::sync::record_tombstone(vault, f, &h, now) {
-                            log::warn!("记 tombstone 失败 {f}: {e}");
-                        }
+                        pending.push((f.clone(), fs_ops::content_hash(&bytes)));
                     }
+                }
+                // 批量 upsert：一次 load + 一次 atomic save（逐条版按文件数整读整写账本）
+                if let Err(e) = crate::sync::record_tombstones(vault, &pending, now) {
+                    log::warn!("批量记 tombstone 失败（{} 条）: {e}", pending.len());
                 }
             }
             let trash = fs_ops::delete_entry(vault, path, conn).map_err(|e| e.to_string())?;
@@ -392,8 +394,12 @@ pub fn entry_move(state: State<Arc<AppState>>, path: String, new_dir: String) ->
 }
 
 #[tauri::command]
-pub fn entry_delete(state: State<Arc<AppState>>, path: String) -> CmdResult<String> {
-    entry_delete_op(state.inner(), &path)
+pub async fn entry_delete(state: State<'_, Arc<AppState>>, path: String) -> CmdResult<String> {
+    let state = state.inner().clone();
+    // 删除要读盘算 hash + 展开文件夹（大文件夹可能是数百次读）
+    tauri::async_runtime::spawn_blocking(move || entry_delete_op(&state, &path))
+        .await
+        .map_err(|e| format!("删除任务失败: {e}"))?
 }
 
 #[tauri::command]
@@ -402,8 +408,16 @@ pub fn note_read(state: State<Arc<AppState>>, path: String) -> CmdResult<NoteCon
 }
 
 #[tauri::command]
-pub fn note_write(state: State<Arc<AppState>>, path: String, content: String) -> CmdResult<WriteResult> {
-    note_write_op(state.inner(), &path, &content)
+pub async fn note_write(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+    content: String,
+) -> CmdResult<WriteResult> {
+    let state = state.inner().clone();
+    // 每次保存都落盘 + 更新索引，挪出主线程
+    tauri::async_runtime::spawn_blocking(move || note_write_op(&state, &path, &content))
+        .await
+        .map_err(|e| format!("保存任务失败: {e}"))?
 }
 
 #[tauri::command]
@@ -438,8 +452,12 @@ pub fn vault_stats_op(state: &Arc<AppState>) -> CmdResult<fs_ops::VaultStats> {
 }
 
 #[tauri::command]
-pub fn vault_stats(state: State<Arc<AppState>>) -> CmdResult<fs_ops::VaultStats> {
-    vault_stats_op(state.inner())
+pub async fn vault_stats(state: State<'_, Arc<AppState>>) -> CmdResult<fs_ops::VaultStats> {
+    let state = state.inner().clone();
+    // 打开设置页即全库遍历，挪出主线程
+    tauri::async_runtime::spawn_blocking(move || vault_stats_op(&state))
+        .await
+        .map_err(|e| format!("统计任务失败: {e}"))?
 }
 
 /// 清空回收站，返回删除条目数。
@@ -451,8 +469,11 @@ pub fn trash_clear_op(state: &Arc<AppState>) -> CmdResult<usize> {
 }
 
 #[tauri::command]
-pub fn trash_clear(state: State<Arc<AppState>>) -> CmdResult<usize> {
-    trash_clear_op(state.inner())
+pub async fn trash_clear(state: State<'_, Arc<AppState>>) -> CmdResult<usize> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || trash_clear_op(&state))
+        .await
+        .map_err(|e| format!("清空回收站任务失败: {e}"))?
 }
 
 /// 按保留天数清理回收站（`days == 0` = 从不），返回删除条目数。
@@ -464,8 +485,11 @@ pub fn trash_prune_op(state: &Arc<AppState>, days: u32) -> CmdResult<usize> {
 }
 
 #[tauri::command]
-pub fn trash_prune(state: State<Arc<AppState>>, days: u32) -> CmdResult<usize> {
-    trash_prune_op(state.inner(), days)
+pub async fn trash_prune(state: State<'_, Arc<AppState>>, days: u32) -> CmdResult<usize> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || trash_prune_op(&state, days))
+        .await
+        .map_err(|e| format!("清理回收站任务失败: {e}"))?
 }
 
 /// 回收站条目列表（侧栏「回收站」分区；新删的在前）。
@@ -855,6 +879,40 @@ mod e2e_tests {
         assert_eq!(fs_ops::trash_entry_ms("-x.md"), None);
         assert_eq!(fs_ops::trash_entry_ms("abc-x.md"), None);
         assert_eq!(fs_ops::trash_entry_ms("无横线.md"), None);
+    }
+
+    /// A1：文件夹删除把其下全部笔记一次批量记进同一账本（含子目录）。
+    /// 修复前逐文件调用 `record_tombstone`，N 个文件就整读整写 N 次账本。
+    #[test]
+    fn entry_delete_folder_records_all_tombstones_in_one_ledger() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        folder_create_op(s, "", "项目").unwrap();
+        let n1 = note_create_op(s, "项目", "一").unwrap();
+        folder_create_op(s, "项目", "子").unwrap();
+        let n2 = note_create_op(s, "项目/子", "二").unwrap();
+        note_write_op(s, &n1.path, "内容一").unwrap();
+        note_write_op(s, &n2.path, "内容二").unwrap();
+
+        entry_delete_op(s, "项目").unwrap();
+
+        let ts = crate::sync::load_tombstones(dir.path());
+        assert_eq!(ts.len(), 2, "文件夹展开为两条墓碑: {ts:?}");
+        for (path, body) in [(&n1.path, "内容一"), (&n2.path, "内容二")] {
+            let t = ts
+                .iter()
+                .find(|t| t.path == *path)
+                .unwrap_or_else(|| panic!("缺墓碑 {path}: {ts:?}"));
+            assert_eq!(t.hash, fs_ops::content_hash(body.as_bytes()), "墓碑 hash 应为删除前内容");
+            assert_eq!(t.mtime_ms, t.deleted_at, "墓碑时间戳两处一致");
+        }
+        // 单一账本文件，内容是可整体反序列化的数组（批量 upsert，不是多份拼接）
+        let raw = std::fs::read_to_string(dir.path().join(".lanmark/tombstones.json")).unwrap();
+        let parsed: Vec<crate::sync::Tombstone> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+        // 顺序不变：墓碑写完后文件已被删除
+        assert!(!dir.path().join(&n1.path).exists());
+        assert!(!dir.path().join(&n2.path).exists());
     }
 
     /// 清回收站不影响 tombstone（同步的删除传播账本）——两者语义独立
