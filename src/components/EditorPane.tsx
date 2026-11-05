@@ -62,7 +62,7 @@ type LMDoc = LMView["state"]["doc"];
 /**
  * 编辑器实例的 key：**只由「路径 + 模式」决定**。
  *
- * 这是一个回归护栏（docs/08 §4.4 / §9 R2）：外观设置（字体 / 字号 / 行距 / 行宽）
+ * 这是一个回归护栏：外观设置（字体 / 字号 / 行距 / 行宽）
  * 一律走 CSS 变量，**绝不能进这个 key**。一旦进了 key，改字号会销毁重建 Crepe 实例，
  * 而 Crepe 建实例会发一次伪 `markdownUpdated` —— 打开着的笔记就被重写一遍
  * （硬约定 1「打开笔记不得重写文件」）。`settings.test.ts` 里有用例钉住这个契约。
@@ -183,7 +183,7 @@ export function MilkdownHost({
     inner.className = "editor-inner";
     host.appendChild(inner);
 
-    // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填。
+    // frontmatter 不进编辑器（CommonMark 会破坏 ---），保存时原样回填。
     // 用 let：外部重载可能带来不同的 frontmatter / wikilink，基线必须跟着换，
     // 否则用户下一次编辑会把旧 frontmatter 写回去。
     let { fm, body } = splitFrontmatter(content);
@@ -202,7 +202,7 @@ export function MilkdownHost({
     let view: LMView | null = null;
     // 基线文档：只有 doc 树真正相对基线变化过，才放行 markdownUpdated。
     // （Crepe create 后会异步触发一次「同 doc 重序列化」事件——列表 - 会变 *、
-    //  补尾行——若放行就会「打开笔记=重写文件」；见 docs/04 §9c）
+    //  补尾行——若放行就会「打开笔记=重写文件」）
     let lastKnownDoc: LMDoc | null = null;
     // 最近一次**放行**的完整 markdown（含 frontmatter / wikilink 还原）。
     // trailing 插件会在首次选区事务插一个空段落；doc 确实变了，但序列化结果只多一个尾空行。

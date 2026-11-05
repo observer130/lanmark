@@ -13,7 +13,7 @@ val tauriProperties = Properties().apply {
     }
 }
 
-// M4g：固定 release 签名（docs/08 §12.1）。
+// M4g：固定 release 签名。
 //
 // 背景：此前 release 资产是 CI 用 `--debug` 构建的，debug keystore 由 AGP 在每台
 // CI runner 首次构建时**随机生成**（runner 每次全新）→ 每个版本的 APK 签名都不同

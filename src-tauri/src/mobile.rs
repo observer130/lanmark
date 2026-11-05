@@ -1,7 +1,7 @@
 //! M2 移动端自研小插件：vault 目录选择 + 全部文件访问授权。
 //!
 //! Android 的 scoped storage 下 std::fs 直写共享存储需要 MANAGE_EXTERNAL_STORAGE
-//! （调研 docs/research/android-vault-dir.md：SAF+路径映射仅在 legacy 视图可行，
+//! （SAF+路径映射仅在 legacy 视图可行，
 //! 侧载 App 用 MANAGE 最简可靠）。插件三命令：
 //! - has_all_files_access：检查授权
 //! - request_all_files_access：跳系统设置授权页（无回调，返回后前端复查）

@@ -82,7 +82,7 @@ interface VaultStore {
   createNoteIn: (name: string, dir: string) => Promise<boolean>;
   /** 对话框确认：创建文件夹（名称可含 `/` 直接建多级）。返回是否成功 */
   createFolderIn: (name: string, dir: string) => Promise<boolean>;
-  /** M4d：切换笔记库（严格顺序见 docs/08 §6.1）。返回是否成功 */
+  /** M4d：切换笔记库（严格顺序）。返回是否成功 */
   switchVault: (path: string, mode: "open" | "create") => Promise<boolean>;
   toggleDirCollapsed: (path: string) => void;
   /** 展开路径的全部祖先目录（打开笔记/新建文件落在收起目录里时用） */
@@ -348,7 +348,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
    * （write_note upsert / remove_prefix 清三表），此处只重取树与 meta；
    * 当前打开的笔记若未在编辑则重载内容，防陈旧内容被下一次输入覆盖
    * （与桌面 runRound 同守卫）；读失败（远端已删）保留当前状态——
-   * 用户编辑保存后按 LWW edit/delete 复活（docs/07 §4.2） */
+   * 用户编辑保存后按 LWW edit/delete 复活 */
   remoteChanged: async () => {
     if (get().status !== "ready") return;
     await get().refreshTree();
@@ -514,7 +514,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       }
     }
     // 写盘已成功（哪怕中途切走）都要通知：M3d 触发 C → 自动同步循环
-    // （轻量 CustomEvent，避免两 store 循环依赖；循环侧 5s 尾沿后回合，docs/07 §7）
+    // （轻量 CustomEvent，避免两 store 循环依赖；循环侧 5s 尾沿后回合）
     window.dispatchEvent(new CustomEvent("lanmark:vault-saved"));
     return true;
   },
@@ -570,7 +570,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   /**
-   * M4d 切换笔记库（docs/08 §6.1，最高风险流程）。
+   * M4d 切换笔记库（最高风险流程）。
    *
    * 严格顺序，任何一步失败都要保住原状：
    *   1. dirty → saveNow()；失败 → **中止**，不切库（未保存编辑不丢铁律）

@@ -32,7 +32,7 @@ pub struct ServerProfile {
     /// M4h-3：**必须等于 `device_id`**（服务器 `/info` 返回的身份）。
     /// M2/M3 时期是 `hash(url+token)[..8]` —— 那样 IP 一变就得重配对，token 变新
     /// → id 变新 → 基线文件 `sync-<id>.json` 换名 → 下回合全库无基线 →
-    /// 大量「双方都改」→ 冲突副本激增（docs/08 §13.1 P4）。
+    /// 大量「双方都改」→ 冲突副本激增。
     /// 改绑设备身份后 IP 变化只需改 `url`，基线不丢。
     pub id: String,
     pub name: String,
@@ -59,7 +59,7 @@ pub struct Discovered {
     pub url: String,
 }
 
-/// 轻量探测结果（docs/07 §7：自动同步循环的眼睛；GET /info 无鉴权，3s 超时）
+/// 轻量探测结果（自动同步循环的眼睛；GET /info 无鉴权，3s 超时）
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeResult {
@@ -93,7 +93,7 @@ pub fn load_servers(app: &tauri::AppHandle) -> Vec<ServerProfile> {
 ///   2. 新 id = `d<deviceId>`；**把基线文件改名**（`sync-<旧id>.json` →
 ///      `sync-<新id>.json`）而不是重建——重建等于丢掉「上轮已知状态」，
 ///      下个回合会把全部差异判成「双方都改」，正是 P4 要修的现象
-///      （docs/08 §13.6 R12：测试钉住「迁移前后 skipped 计数一致」）
+///      （测试钉住「迁移前后 skipped 计数一致」）
 ///   3. 探测不到的（离线）保持原样，下次同步时再迁
 ///
 /// 幂等：已有 `device_id` 的 profile 直接跳过。
@@ -154,7 +154,7 @@ fn port_of_url(url: &str) -> Option<u16> {
 ///
 /// 优先 `device_id`（稳定身份，IP/端口变了也算同一台）；对方是旧版本服务器
 /// （`/info` 无 `deviceId`）时回退按**名称**匹配——名称匹配可能误配，
-/// 所以只在 deviceId 缺失时用（docs/08 §13.3 ③、§13.5 测试项）。
+/// 所以只在 deviceId 缺失时用。
 pub fn match_by_identity<'a>(
     servers: &'a [ServerProfile],
     device_id: &str,
@@ -286,7 +286,7 @@ fn push_batch(
     resp.json().map_err(|e| format!("推送响应解析失败: {e}"))
 }
 
-/// GET /api/v1/tombstones（docs/07 §3）：旧服务器 404 → 空列表（删除传播静默关闭，退化 M2 行为，不报错）
+/// GET /api/v1/tombstones：旧服务器 404 → 空列表（删除传播静默关闭，退化 M2 行为，不报错）
 fn fetch_tombstones(
     c: &reqwest::blocking::Client,
     url: &str,
@@ -366,7 +366,7 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
                 Err(_) => fs_ops::write_note_bytes(vault, &f.path, &bytes, conn).is_ok(),
             };
             if ok {
-                // LWW 时间源保真（docs/07 §2）：本地 mtime = 服务器版本保存时间
+                // LWW 时间源保真：本地 mtime = 服务器版本保存时间
                 if let Ok(abs) = fs_ops::safe_join(vault, &f.path) {
                     fs_ops::set_file_mtime(&abs, f.mtime_ms);
                 }
@@ -397,7 +397,7 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
             if let Err(e) = fs_ops::atomic_write(&abs, &bytes) {
                 return Some(format!("{}: 附件写入失败: {e}", f.path));
             }
-            // LWW 时间源保真（docs/07 §2）：同笔记分支
+            // LWW 时间源保真：同笔记分支
             fs_ops::set_file_mtime(&abs, f.mtime_ms);
             None
         }
@@ -455,7 +455,7 @@ fn save_sync_state(vault: &Path, id: &str, state: &HashMap<String, String>) -> R
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-// ---------- 同步回合（docs/07 §5 回合语义 v2） ----------
+// ---------- 同步回合 ----------
 
 /// 同步回合核心（分阶段；`sync_round` = 各阶段的默认编排）。
 /// 分阶段两个目的：1) 测试可在阶段之间注入服务器侧改动，确定性构造
@@ -469,7 +469,7 @@ pub(crate) struct RoundCore {
     c: reqwest::blocking::Client,
     server_map: HashMap<String, FileMeta>,
     local_map: HashMap<String, FileMeta>,
-    /// 服务器 tombstone（旧服务器 404 → 空列表，docs/07 §3）
+    /// 服务器 tombstone（旧服务器 404 → 空列表）
     server_tombstones: Vec<crate::sync::Tombstone>,
     /// 本地 tombstone（回合开头 D4 判定后；步骤 3/4 消费与更新）
     local_tombstones: Vec<crate::sync::Tombstone>,
@@ -507,7 +507,7 @@ impl RoundCore {
             fs_ops::reindex(&vault, conn).map_err(|e| format!("重索引失败: {e}"))?;
         }
 
-        // 1. 双侧清单 + 客户端基线 + 服务器 tombstones（docs/07 §5 步骤 1）
+        // 1. 双侧清单 + 客户端基线 + 服务器 tombstones
         let c = client();
         let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
         let server_tombstones = fetch_tombstones(&c, &url, &profile.token)?;
@@ -612,7 +612,7 @@ impl RoundCore {
         })
     }
 
-    /// 步骤 3：服务器 tombstone 处理（docs/07 §5 步骤 3）
+    /// 步骤 3：服务器 tombstone 处理
     /// hash 同 → 本地软删 + 记本地 tombstone；hash 异 → edit/delete LWW（删除元组 size=0，
     /// mtime 平手时编辑恒赢）；本地无 → 补记本地 tombstone 跳过
     fn server_tombstones_phase(&mut self) -> Result<(), String> {
@@ -655,7 +655,7 @@ impl RoundCore {
         Ok(())
     }
 
-    /// 步骤 4：本地 tombstone vs 服务器 manifest（docs/07 §5 步骤 4，方向对调）
+    /// 步骤 4：本地 tombstone vs 服务器 manifest（方向对调）
     /// hash 同 → 调 /delete 静默传播；hash 异 → edit/delete LWW（服务器编辑新 → 拉取复活 + 清
     /// 本地 tombstone；删除新 → /delete）；服务器无此文件 → 无操作
     fn local_tombstones_phase(&mut self) -> Result<(), String> {
@@ -725,7 +725,7 @@ impl RoundCore {
         Ok(files.into_iter().next())
     }
 
-    /// 步骤 5（M3c，docs/07 §4.2/§5 步骤 5）：edit/edit LWW 裁决——
+    /// 步骤 5（M3c）：edit/edit LWW 裁决——
     /// 版本元组 (mtime, size, hash) 比较，较新者留原路径、较旧者自动降级为**可见**冲突副本
     /// （用户无需任何操作；副本进目录树，下回合随同步传遍全端）：
     /// - 本地新（或平手）→ M2 既有行为：服务器版本拉为本地冲突副本，本地以服务器 hash 为 base 推送
@@ -909,7 +909,7 @@ impl RoundCore {
                     continue;
                 }
                 match &r.server_hash {
-                    // 被服务器仲裁降级：原路径上是更新的版本（docs/07 §5 步骤 8）
+                    // 被服务器仲裁降级：原路径上是更新的版本
                     Some(sh) if sh != &pf.hash => match self.corrective_pull(&r.path, sh) {
                         Ok((actual, winner_mtime)) => {
                             self.report.pulled.push(r.path.clone());
@@ -1028,7 +1028,7 @@ fn split_push_batches(
     batches
 }
 
-/// 一个完整同步回合（docs/07 §5 回合语义 v2 的 M3a+M3b 子集：M2 + serverHash 基线修复
+/// 一个完整同步回合（M2 + serverHash 基线修复
 /// + 仲裁降级纠正拉取 + tombstone 删除传播）。阻塞；调用方负责放到 blocking 线程。
 pub fn sync_round(state: &Arc<AppState>, profile: &ServerProfile) -> Result<SyncReport, String> {
     let mut core = RoundCore::new(state, profile)?;
@@ -1117,9 +1117,9 @@ pub struct ScanResult {
 
 /// LAN 发现（M4h-1）：mDNS 一级 best effort → L1 邻居表 → L2 本机网段并发探测。
 ///
-/// **命中即停**：mDNS 或已知地址命中就不再扫描（docs/08 §13.3）——家庭网
+/// **命中即停**：mDNS 或已知地址命中就不再扫描——家庭网
 /// 一次 browse 就够，公司网才退到扫描。整个命令走 `spawn_blocking`，
-/// UI 显示「搜索中」不卡界面（§13.6 R13）。
+/// UI 显示「搜索中」不卡界面。
 #[tauri::command]
 pub async fn sync_scan_lan(
     app: tauri::AppHandle,
@@ -1156,7 +1156,7 @@ pub async fn sync_scan_lan(
         let out = crate::lan_scan::run_scan(&plan, &probe);
         // 标注哪些候选是**已配对**设备（按设备身份匹配，IP 变了也算同一台）——
         // UI 据此把已配对设备排在前面 / 显示「已连接」，而不是让用户对着一堆
-        // 陌生卡片猜哪个是自己的手机（docs/08 §13.4）。
+        // 陌生卡片猜哪个是自己的手机。
         let mut devices = out.devices;
         devices.sort_by_key(|d| {
             let known = match_by_identity(&servers, &d.device_id, &d.name).is_some();
@@ -1219,9 +1219,9 @@ fn gen_nonce() -> String {
     hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
-/// 提交配对请求并轮询等待手机端点「允许」（docs/08 §13.3 ②）。
+/// 提交配对请求并轮询等待手机端点「允许」。
 ///
-/// 桌面等待上限 90s（§13.3：超时/拒绝 → 面板回到设备列表并提示）。
+/// 桌面等待上限 90s（超时/拒绝 → 面板回到设备列表并提示）。
 /// 返回 `PairAttempt`，**不抛错**——超时与拒绝都是正常结局，交给 UI 呈现。
 /// 阻塞；调用方负责放到 blocking 线程。
 pub fn request_pair_blocking(
@@ -1414,7 +1414,7 @@ pub async fn sync_pair(
 /// 已配对服务器列表。
 ///
 /// M4h-3：这里顺带做一次**惰性 profile 迁移**——M2/M3 的旧 profile 用
-/// `hash(url+token)` 当 id，IP 一变就得重配对且基线文件会换名（docs/08 §13.1 P4）。
+/// `hash(url+token)` 当 id，IP 一变就得重配对且基线文件会换名。
 /// 迁移要探测设备（拿 deviceId），是网络动作，所以放在「打开同步面板」这条
 /// 用户可见的路径上做，而不是每次 `load_servers` 都做（那会让同步回合变慢）。
 /// 迁移失败/设备离线都不阻断列表返回——下次再迁。
@@ -1504,7 +1504,6 @@ pub struct InfoResponse {
     pub app: String,
     pub name: String,
     /// M4h-3：设备身份。**旧服务器无该字段 → 空串**，调用方回退名称匹配
-    /// （docs/08 §13.3 ③）
     pub device_id: String,
     pub notes: u64,
     pub assets: u64,
@@ -1513,7 +1512,7 @@ pub struct InfoResponse {
 /// GET `/api/v1/info`（无鉴权、3s 超时）——探测与扫描共用的唯一入口。
 ///
 /// 校验 `app == "lanmark"`：M4h-1 的 LAN 扫描会连到任意开着 4180 端口的主机，
-/// 没有这个校验就会把别人的服务当成笔记库列给用户（docs/08 §13.3 ①）。
+/// 没有这个校验就会把别人的服务当成笔记库列给用户。
 pub fn fetch_info(url: &str) -> Result<InfoResponse, String> {
     let c = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(3))
@@ -2099,7 +2098,7 @@ mod tests {
         // 三份内容都在，无丢失：桌面（桌面版本 + 手机版本二副本）、服务器同
     }
 
-    // ---------- M3a 双客户端集成（docs/07 §9） ----------
+    // ---------- M3a 双客户端集成 ----------
 
     /// 三端（手机服务器 + 桌面×2）顺序改动 → 收敛，终轮全跳过
     #[test]
@@ -2309,7 +2308,7 @@ mod tests {
 
     /// M3c 客户端 LWW（服务器更新方向，M2 没有的分支）：双端离线改同一篇，
     /// 较新者先同步 → 较旧者回合时服务器版本更新 → 先存本地副本再拉取覆写，
-    /// 全程无人工操作；副本下回合传遍全端（docs/07 §10 验收 3）
+    /// 全程无人工操作；副本下回合传遍全端
     #[test]
     fn client_lww_server_newer_saves_copy_then_pulls() {
         let phone_dir = tempfile::TempDir::new().unwrap();
@@ -2353,7 +2352,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dB.path().join(&p.path)).unwrap(), "A 新版");
         assert_eq!(std::fs::read_to_string(dB.path().join(&m.loser_copy)).unwrap(), "B 旧版");
 
-        // 副本传播：B 推 → A 拉 → 三端互见（次回合收敛，docs/07 §10-3）
+        // 副本传播：B 推 → A 拉 → 三端互见（次回合收敛）
         let r = sync_round(&deskB, &profile_b).unwrap();
         assert_eq!(r.pushed.len(), 1, "副本推送: {r:?}");
         let r = sync_round(&deskA, &profile_a).unwrap();
@@ -2375,7 +2374,7 @@ mod tests {
         assert_eq!(r.skipped, snap_phone.len());
     }
 
-    /// LWW 时间源保真（docs/07 §2 的核心决策）：裁决按文件 mtime 而非到达顺序。
+    /// LWW 时间源保真：裁决按文件 mtime 而非到达顺序。
     /// A 的旧版（10:00）先到达服务器，B 的新版（10:05）后到达（base 过期）→
     /// B 必须赢。若服务器落地时把 mtime 重写成落地时刻（到达顺序），A 会误赢。
     #[test]
@@ -2434,7 +2433,7 @@ mod tests {
         );
     }
 
-    // ---------- M3b tombstone（docs/07 §9） ----------
+    // ---------- M3b tombstone ----------
 
     /// 删除传播：hash 相同（删后没再改）→ 三端软删，回收站都有，不再拉回复活
     #[test]
@@ -3324,7 +3323,7 @@ mod tests {
     }
 
     /// 迁移核心：旧 id 的基线文件必须**改名**到新 id，状态不丢。
-    /// 丢基线的后果是下回合全库判「双方都改」→ 冲突副本激增（docs/08 §13.1 P4）。
+    /// 丢基线的后果是下回合全库判「双方都改」→ 冲突副本激增。
     #[test]
     fn migrate_renames_baseline_file_and_keeps_state() {
         use crate::commands::open_vault_at;

@@ -48,7 +48,7 @@ export interface PathTitle {
   title: string;
 }
 
-/** M4d：vault 规模统计（一次遍历，docs/08 §3.3 C2） */
+/** M4d：vault 规模统计（一次遍历） */
 export interface VaultStats {
   notes: number;
   folders: number;
@@ -58,7 +58,7 @@ export interface VaultStats {
   trashBytes: number;
 }
 
-/** M4d：关于页信息（docs/08 §3.5 E1） */
+/** M4d：关于页信息 */
 export interface AppInfo {
   version: string;
   platform: string;

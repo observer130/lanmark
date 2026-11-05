@@ -89,7 +89,7 @@ pub async fn vault_set_path(
     .map_err(|e| format!("开库任务失败: {e}"))?
 }
 
-/// M3：自动同步开关（app_config_dir/config.json 持久化，docs/07 §7）
+/// M3：自动同步开关（app_config_dir/config.json 持久化）
 #[tauri::command]
 pub fn vault_set_sync_auto(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
     let mut cfg = vault::load_config(&app);
@@ -467,7 +467,7 @@ pub async fn vault_stats(state: State<'_, Arc<AppState>>) -> CmdResult<fs_ops::V
 
 /// 清空回收站，返回删除条目数。
 ///
-/// 注意与 M3 tombstone 的区别（docs/08 §3.3 注）：这里是**本地找回**用的垃圾桶，
+/// 注意与 M3 tombstone 的区别：这里是**本地找回**用的垃圾桶，
 /// 清它不影响同步的删除传播——tombstone 账本另存 `.lanmark/tombstones.json`。
 pub fn trash_clear_op(state: &Arc<AppState>) -> CmdResult<usize> {
     with_vault(state, |vault| fs_ops::trash_clear(vault).map_err(|e| e.to_string()))
@@ -522,7 +522,7 @@ pub fn trash_restore(state: State<Arc<AppState>>, trash_path: String) -> CmdResu
     trash_restore_op(state.inner(), &trash_path)
 }
 
-/// 关于页信息（docs/08 §3.5 E1）
+/// 关于页信息
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {

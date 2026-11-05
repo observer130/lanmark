@@ -15,7 +15,7 @@ import {
 /**
  * M4a 设置 store（与 vault / sync 同构）。
  *
- * 应用顺序（docs/08 §6.3）：
+ * 应用顺序：
  *   UI 改动 → 乐观 set state → applyAppearance（立即可见） → settings_patch
  *           → 以 Rust 返回值覆盖 state（归一化结果）
  *           └→ 失败：回滚上一版 state + 复原 CSS 变量/主题 + error 提示
@@ -61,7 +61,7 @@ interface SettingsStore {
   activeSection: SectionKey;
   /**
    * D3：「管理设备与配对」的跳转请求。设置页不复制一套配对 UI，
-   * 而是关掉自己 + 请侧栏把同步面板展开（docs/08 §3.4 D3）。
+   * 而是关掉自己 + 请侧栏把同步面板展开。
    * 计数器而非布尔：连点两次也要能再次触发（布尔会因「已经是 true」失效）。
    */
   syncPanelRequest: number;

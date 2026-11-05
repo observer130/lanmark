@@ -2,7 +2,7 @@
  * M1 决策门自动化证据：markdown ↔ Crepe(ProseMirror) ↔ markdown 往返保真。
  * 编辑器配置与产品（EditorPane.tsx）保持一致。
  *
- * 保真标准（docs/04）：
+ * 保真标准：
  *  - 结构无损：标题/列表/表格/代码块/图片/中文 语义完全保留
  *  - frontmatter 不损坏（走 splitFrontmatter/joinFrontmatter，与产品一致）
  *  - 允许的风格归一化：列表符号 - 与 *、表格分隔行 --- 与 --、hr 三种写法（语义等价）
@@ -138,7 +138,7 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
     expect(normalize(out)).toBe(normalize(md));
   });
 
-  it("任务列表（- [ ] / - [x]——§9c 事故触发形态，此前护栏缺 case）", async () => {
+  it("任务列表（- [ ] / - [x]——事故触发形态，此前护栏缺 case）", async () => {
     const md = ["# 待办", "", "- [ ] 未完成项", "- [x] 已完成项", "", "普通列表：", "- 普通项一", "- 普通项二"].join("\n");
     const out = await roundtrip(md);
     expect(semantic(out)).toBe(semantic(md));

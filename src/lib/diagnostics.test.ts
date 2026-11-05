@@ -2,7 +2,7 @@
  * M4f E3：诊断信息组装（纯函数）。
  *
  * 覆盖重点不是「字符串长什么样」，而是**该有的信息都在**——用户把这段贴出来
- * 求助时，缺一项就要多一轮来回追问（docs/08 §3.5 E3 的立意）。
+ * 求助时，缺一项就要多一轮来回追问。
  */
 import { describe, expect, it } from "vitest";
 import { buildDiagnostics, type DiagnosticsInput } from "../components/SettingsDialog";

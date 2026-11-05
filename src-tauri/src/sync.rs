@@ -61,7 +61,7 @@ pub struct PushResult {
     pub error: Option<String>,
     /// 服务器侧原有版本被改名保留时的新路径（冲突命名）
     pub conflict_saved_as: Option<String>,
-    /// 该路径在服务器上**操作后的最终 hash**（docs/07 §3，M3a 新增）：
+    /// 该路径在服务器上**操作后的最终 hash**（M3a 新增）：
     /// 干净落盘/来件仲裁获胜 = 所推 hash；来件被仲裁降级 = 原路径现有 hash。
     /// 旧服务器不返回该字段（None）→ 客户端退化 M2 行为（ok = 落盘）。
     #[serde(default)]
@@ -76,7 +76,7 @@ pub struct PullResponse {
     pub missing: Vec<(String, String)>,
 }
 
-/// 一次 LWW 自动合并（docs/07 §3/§6）：较新版留原路径，较旧版降级为可见冲突副本。
+/// 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本。
 /// 报告仅 IPC 消费（非 wire 字段）；UI 据此展示「自动合并 N（较新留原名）」明细。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -106,7 +106,7 @@ pub struct SyncReport {
     pub errors: Vec<String>,
 }
 
-// ---------- tombstone（M3b 删除传播，docs/07 §3/§5） ----------
+// ---------- tombstone（M3b 删除传播） ----------
 
 /// 删除墓碑：一端删除 → 另一端软删（铁律：永不硬删）。
 /// `mtime_ms` = 删除时刻（LWW 裁决时间源，与编辑侧的文件 mtime 比较）；
@@ -121,7 +121,7 @@ pub struct Tombstone {
     pub deleted_at: i64,
 }
 
-/// tombstone TTL：30 天（docs/07 §9 M3b）
+/// tombstone TTL：30 天
 pub const TOMBSTONE_TTL_MS: i64 = 30 * 86_400_000;
 
 fn tombstones_path(vault: &Path) -> std::path::PathBuf {
@@ -289,7 +289,7 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
     Ok(out)
 }
 
-// ---------- 版本元组（LWW 裁决，docs/07 §4.1） ----------
+// ---------- 版本元组（LWW 裁决） ----------
 
 /// 版本元组：`(mtime_ms, size, hash_hex)`，字典序比较，**大者赢**。
 /// mtime 不同 → mtime 新者赢；同毫秒 → size 大者赢；size 同 → hash 字典序大者赢

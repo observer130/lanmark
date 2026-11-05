@@ -49,7 +49,7 @@ pub struct SyncConfig {
     /// M4h-3：设备身份。桌面端 `ServerProfile.id` 绑它而非 `hash(url+token)`
     /// ——原来 IP 一变就得重新配对，token 变新 → id 变新 → 基线文件 `sync-<id>.json`
     /// 换名 → 下回合全库无基线 → 大量「双方都改」→ 冲突副本激增
-    /// （docs/08 §13.1 P4）。语义同 `pairing_code`：**随 vault**，不是设备全局。
+    /// 语义同 `pairing_code`：**随 vault**，不是设备全局。
     #[serde(default)]
     pub device_id: String,
 }
@@ -166,7 +166,7 @@ pub struct ServerCtx {
     /// 生产由 spawn 从 AppState.sync_notify 取（Tauri setup 注册的 emit 闭包），
     /// 测试注入计数器或保持 None（无操作）
     ui_notify: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// M4h-2：待授权的配对请求（「手机点允许」取代抄 8 位码，docs/08 §13.3 ②）
+    /// M4h-2：待授权的配对请求（「手机点允许」取代抄 8 位码）
     pending: Mutex<Vec<PendingPair>>,
 }
 
@@ -174,7 +174,7 @@ pub struct ServerCtx {
 ///
 /// 生命周期：桌面 POST /pair-request 入队 → 手机 UI 轮询看到并「允许/拒绝」
 /// → 桌面 GET /pair-status 取走 token。**nonce 单次消费**（取走即出队），
-/// 5 分钟过期，同时最多 `PAIR_PENDING_MAX` 条（§13.6 R11：杜绝排队轰炸）。
+/// 5 分钟过期，同时最多 `PAIR_PENDING_MAX` 条（杜绝排队轰炸）。
 #[derive(Debug, Clone)]
 pub struct PendingPair {
     /// 客户端生成的一次性随机串（状态查询的凭据）
@@ -189,7 +189,7 @@ pub struct PendingPair {
     pub decision: Option<Result<String, String>>,
 }
 
-/// 待授权请求上限与过期时间（docs/08 §13.6 R11）
+/// 待授权请求上限与过期时间
 pub const PAIR_PENDING_MAX: usize = 3;
 pub const PAIR_PENDING_TTL: Duration = Duration::from_secs(300);
 
@@ -329,7 +329,7 @@ async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
         .unwrap_or((String::new(), 0, 0));
     let name = crate::alias::current_alias(None);
     // M4h-3：deviceId 让桌面端按「设备」而不是「URL」记住服务器（IP 变了自动找回）。
-    // 旧服务器无该字段 → 客户端看到空串，回退按名称匹配（docs/08 §13.3 ③）。
+    // 旧服务器无该字段 → 客户端看到空串，回退按名称匹配。
     let device_id = ctx.device_id();
     Json(json!({
         "app": "lanmark",
@@ -404,7 +404,7 @@ async fn pair(
 // 桌面 GET  /pair-status?nonce=…            → 轮询等到 approved 时取走 token
 //
 // 安全感不降反升：8 位数字码只有 10^8 组合，LAN 内可穷尽（现靠退避兜）；
-// 而「**人在手机旁点允许**」是物理确认（docs/08 §13.3 ②）。
+// 而「**人在手机旁点允许**」是物理确认。
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -483,7 +483,7 @@ struct PairStatusQuery {
 
 /// GET /api/v1/pair-status?nonce=… —— 桌面轮询结果。
 ///
-/// **nonce 单次消费**：取走决定即出队，二次查询一律 invalid（§13.5 测试项）。
+/// **nonce 单次消费**：取走决定即出队，二次查询一律 invalid。
 async fn pair_status(
     State(ctx): State<Arc<ServerCtx>>,
     axum::extract::Query(q): axum::extract::Query<PairStatusQuery>,
@@ -660,7 +660,7 @@ pub struct PushBody {
 }
 
 /// POST /api/v1/push —— 客户端推送更新。
-/// 冲突判定（M3a 起，docs/07 §5.1）：服务器现 hash ≠ base_hash（含 base 空 + 文件已存在）
+/// 冲突判定（M3a 起）：服务器现 hash ≠ base_hash（含 base 空 + 文件已存在）
 /// → 版本元组 (mtime, size, hash) 仲裁：来件新 → 来件落原路径、原版本改名保留；
 /// 来件旧/平手 → 来件改名保留、原路径不动（serverHash 回传操作后最终 hash）。
 /// 内容 hash 校验不符则拒绝该文件。
@@ -713,13 +713,13 @@ fn push_blocking(
     Ok(results)
 }
 
-/// push 落盘结果：冲突副本去向 + 原路径**操作后的最终 hash**（docs/07 §3）
+/// push 落盘结果：冲突副本去向 + 原路径**操作后的最终 hash**
 struct Landed {
     conflict_saved_as: Option<String>,
     server_hash: String,
 }
 
-/// 服务器侧 push 仲裁（docs/07 §5.1，M3a 核心语义变更）：
+/// 服务器侧 push 仲裁（M3a 核心语义变更）：
 /// 当前 P 存在且 hash ≠ base_hash（含 base 为空 + 文件已存在 = 竞态创建窗口，
 /// 修掉 M2 该场景静默覆盖的洞）→ 版本元组 (mtime_ms, size, hash) 与当前 P 比较：
 /// - 来件更大 → 来件赢：当前 P 存为服务器侧冲突副本，来件落原路径（M2 既有行为）
@@ -820,7 +820,7 @@ fn write_pushed_file(
                 Err(_) => fs_ops::write_note_bytes(vault, &pf.path, &bytes, conn),
             }
             .map_err(|e| format!("写入失败: {e}"))?;
-            // LWW 时间源保真（docs/07 §2）：保留源端保存时间，服务器 mtime 不得是落地时刻
+            // LWW 时间源保真：保留源端保存时间，服务器 mtime 不得是落地时刻
             if let Ok(abs) = fs_ops::resolve_in_vault(vault, &pf.path) {
                 fs_ops::set_file_mtime(&abs, pf.mtime_ms);
             }
@@ -857,7 +857,7 @@ fn write_pushed_file(
             // 会留下半截附件，下一回合按「内容 hash 不同」被当成服务器新版本，
             // 反向覆盖对端完整副本。
             fs_ops::atomic_write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
-            // LWW 时间源保真（docs/07 §2）：同笔记分支
+            // LWW 时间源保真：同笔记分支
             fs_ops::set_file_mtime(&abs, pf.mtime_ms);
             // M3b D4：push 干净落盘/仲裁获胜 → 清除该路径 tombstone（笔记分支经 write_note 自动清）
             if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &pf.path) {
@@ -872,7 +872,7 @@ fn write_pushed_file(
     }
 }
 
-/// GET /api/v1/tombstones —— 删除墓碑列表（需鉴权；docs/07 §3）。
+/// GET /api/v1/tombstones —— 删除墓碑列表（需鉴权）。
 /// 旧服务器无此端点 → 404，客户端按空列表处理（删除传播静默关闭，退化 M2 行为）。
 /// 顺带做 TTL 清理（30 天，惰性执行）。
 async fn tombstones(
@@ -1105,7 +1105,7 @@ pub(crate) async fn serve_on(
     // tokio 要求 fd 先行 nonblocking（否则 panic，tokio#7172）
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
-    // with_connect_info：/pair-request 需要来源 IP（UI 展示给用户辨识，docs/08 §13.6 R11）
+    // with_connect_info：/pair-request 需要来源 IP（UI 展示给用户辨识）
     axum::serve(
         listener,
         router(ctx).into_make_service_with_connect_info::<SocketAddr>(),
@@ -1229,7 +1229,7 @@ pub fn sync_pair_reject(nonce: String) -> CmdResult<()> {
     reject_pending(&ctx, &nonce)
 }
 
-/// vault 内冲突副本计数（docs/07 §6 手机端可发现性）：
+/// vault 内冲突副本计数：
 /// 笔记走 DB 索引（路径含「冲突」，无逐文件 hash），附件浅层扫描。
 #[tauri::command]
 pub fn sync_conflict_count(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<u32> {
@@ -1840,7 +1840,7 @@ mod tests {
         assert!(leftovers.is_empty(), "不得残留 tmp: {leftovers:?}");
     }
 
-    /// M3a 仲裁单测（docs/07 §9：来件新 / 来件旧 / 平手三向）。
+    /// M3a 仲裁单测（来件新 / 来件旧 / 平手三向）。
     /// 直接调 arbitrate_existing——HTTP 层无法钉住服务器侧文件的 mtime
     #[test]
     fn arbitrate_mtime_directions_and_tie() {
@@ -2016,7 +2016,7 @@ mod tests {
         assert!(ok.status().is_success());
     }
 
-    /// nonce 二次消费必须失败（§13.5 测试项）
+    /// nonce 二次消费必须失败
     #[test]
     fn pair_status_nonce_is_single_use() {
         use crate::commands::open_vault_at;
@@ -2079,7 +2079,7 @@ mod tests {
         assert!(list_pending(&ctx).is_empty());
     }
 
-    /// pending 上限 3：第 4 个请求被 429（§13.6 R11 杜绝排队轰炸）
+    /// pending 上限 3：第 4 个请求被 429（杜绝排队轰炸）
     #[test]
     fn pair_request_pending_cap() {
         use crate::commands::open_vault_at;

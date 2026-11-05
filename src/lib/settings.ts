@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
  * M4a 设置：设备级偏好（字号/行距/编辑器）的前端封装。
  *
  * 存哪：`app_config_dir/config.json`（Rust `AppConfig`），**不在 vault 内、不在 localStorage**。
- * 理由见 docs/08 §4.1：外观是设备偏好，换库不该变；localStorage 会被 Android WebView
+ * 理由：外观是设备偏好，换库不该变；localStorage 会被 Android WebView
  * 清理且不可测。vault 级视图状态（折叠目录）继续留在 localStorage。
  *
  * 与 Rust 的对应关系：Rust 只存枚举 key，**枚举→像素值全在本文件**（单一来源），
@@ -72,7 +72,7 @@ export interface SettingsPatch {
   update?: UpdatePrefs;
 }
 
-/* ── 枚举 → 数值（四档，docs/08 §3.1） ── */
+/* ── 枚举 → 数值（四档） ── */
 
 const TEXT_PX: Record<SizeKey, number> = { sm: 14, md: 16, lg: 18, xl: 20 };
 const LINE_HEIGHT: Record<LineHeightKey, number> = {
@@ -161,7 +161,7 @@ export function applyCssVars(a: Appearance, root?: HTMLElement): void {
  * `:root[data-scheme=…]` 变量块传导。
  *
  * **为什么不用 style.setProperty 逐个写色值**：那等于把设计 token 复制进 JS，
- * 与「色值只在 CSS、枚举映射只在 TS」的分工相悖（docs/09 §4.1）；改配色是一个
+ * 与「色值只在 CSS、枚举映射只在 TS」的分工相悖；改配色是一个
  * DOM 属性写入，同样不重建编辑器实例（外观不进编辑器 key）。
  * 非法 key 的兜底在 Rust 归一化（`settings_patch` 返回值为准）+ TS 类型约束。
  */

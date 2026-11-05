@@ -15,13 +15,13 @@ import {
 import { useVaultStore } from "./vault";
 
 /**
- * M2 同步状态 + M3 自动同步循环（docs/07 §7，TS 驱动；手机是服务器，无循环）。
+ * M2 同步状态 + M3 自动同步循环（TS 驱动；手机是服务器，无循环）。
  * 触发器：A 周期探测（在线 60s）/ B 离线退避（1s→60s，恢复跳变立即回合）/
  * C 保存完成 5s 尾沿 / D 回前台立即探测 / E 手动「立即同步」（恒可用）。
  * 所有触发走同一入口 runRound：尊重 syncing 串行锁 + 同步前 flush 脏编辑。
  */
 
-/** per-server 探测状态机（docs/07 §7） */
+/** per-server 探测状态机 */
 export interface ServerProbeState {
   /** null = 尚未探测过 */
   online: boolean | null;
@@ -111,7 +111,7 @@ async function autoTick(): Promise<void> {
           if (ok) setProbeState(s.id, { ...next, lastRoundAt: Date.now() });
         }
       } else if (next.failCount === MDNS_RETRY_FAILS && !next.mdnsRetried) {
-        // 离线恢复：连续失败 3 次后尝试一次「按设备身份找回」（docs/08 §13.3 ③）。
+        // 离线恢复：连续失败 3 次后尝试一次「按设备身份找回」。
         //
         // 取代原来的「mDNS 重发现」：本环境桌面多播常不可达、公司网也拦广播，
         // 而 M4h-1 的 LAN 扫描不依赖多播。**按 deviceId 匹配**（不是按名字）——
@@ -120,7 +120,7 @@ async function autoTick(): Promise<void> {
         setProbeState(s.id, { ...next, mdnsRetried: true });
         try {
           // 只跑 L0+L1（已知地址 + 邻居表），不做网段全扫——后台周期任务
-          // 不该做秒级扫描（docs/08 §13.3 ①）
+          // 不该做秒级扫描
           const found = await sync.scanLan(false);
           const match = found.devices.find((d) => {
             if (d.url === s.url) return false;
@@ -178,7 +178,7 @@ interface SyncStore {
   syncAuto: boolean | null;
   /** M3：per-server 探测状态机（UI 展示在线状态用） */
   probeStates: Record<string, ServerProbeState>;
-  /** M3e：vault 内冲突副本数（手机端可发现性，docs/07 §6） */
+  /** M3e：vault 内冲突副本数（手机端可发现性） */
   conflictCount: number | null;
 
   /** M4h：LAN 扫描发现与一键授权 ──
@@ -347,7 +347,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     }
   },
 
-  /** 单回合执行（手动/自动共用入口，docs/07 §7：所有触发走同一入口）。
+  /** 单回合执行（手动/自动共用入口：所有触发走同一入口）。
    * silent = 自动触发：Rust 串行锁的「进行中」拒绝与 flush 失败不弹错误 */
   runRound: async (id, opts) => {
     if (get().syncing) return false;

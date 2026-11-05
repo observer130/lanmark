@@ -150,7 +150,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # gen/android 已提交（含 buildToolsVersion 钉 34.0.0），无需再 init
       #
-      # M4g（docs/08 §12.1）：改用**固定 release keystore** 签名。
+      # M4g：改用**固定 release keystore** 签名。
       # 此前用 --debug 构建 → debug keystore 由 AGP 在每台全新 runner 上随机生成
       # → 每个版本签名都不同 → 用户只能卸载重装（应用目录用户的笔记库会一起没）。
       - name: 解码 release keystore
@@ -170,7 +170,7 @@ jobs:
           LANMARK_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           LANMARK_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: pnpm tauri android build --apk --target aarch64
-      # 签名指纹佐证：连续两次构建应得到相同证书（固定性证明，docs/08 §12.1 验收）
+      # 签名指纹佐证：连续两次构建应得到相同证书（固定性证明）
       - name: 校验签名指纹
         run: |
           APK=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk

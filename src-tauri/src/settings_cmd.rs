@@ -31,7 +31,7 @@ pub fn settings_apply_op(cfg: &mut AppConfig, patch: SettingsPatch) -> Settings 
 }
 
 /// 纯逻辑：恢复默认设置，**保留 `vault_path` / `sync_auto` / `device_alias`**
-/// （docs/08 §3.5 E4；代号是设备身份，恢复外观默认不该把它抹掉）。
+/// （代号是设备身份，恢复外观默认不该把它抹掉）。
 /// 已配对设备不在 AppConfig 里（`sync-servers.json`），天然不受影响。
 pub fn settings_reset_op(cfg: &mut AppConfig) -> Settings {
     let path = cfg.vault_path.clone();
@@ -46,7 +46,7 @@ pub fn settings_reset_op(cfg: &mut AppConfig) -> Settings {
     cfg.settings()
 }
 
-/// 读设置。**不依赖 vault**：未配置笔记库时设置页也要能用（docs/08 §4.3）。
+/// 读设置。**不依赖 vault**：未配置笔记库时设置页也要能用。
 #[tauri::command]
 pub fn settings_get(app: tauri::AppHandle) -> CmdResult<Settings> {
     Ok(settings_read_op(&vault::load_config(&app)))

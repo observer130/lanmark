@@ -2,7 +2,7 @@
 //!
 //! 存哪：`app_config_dir/config.json` 的 `AppConfig` 内嵌小节（见 `vault.rs`）。
 //! 为什么不放 vault 内 `.lanmark/settings.json`：字体是**设备**偏好，换库不该变；
-//! 且 `.lanmark/` 不参与同步，放 vault 里会让设置进入同步清单判定（docs/08 §4.1）。
+//! 且 `.lanmark/` 不参与同步，放 vault 里会让设置进入同步清单判定。
 //! 分界规则：设备/用户偏好 → `AppConfig`；vault 级视图状态 → localStorage；笔记内容 → 文件。
 //!
 //! 本模块只做「结构 + 归一化」，不碰 tauri::AppHandle（命令封装在 `commands.rs`）。
@@ -22,7 +22,7 @@ const SIZE_KEYS: [&str; 4] = ["sm", "md", "lg", "xl"];
 const LINE_HEIGHT_KEYS: [&str; 3] = ["compact", "normal", "relaxed"];
 const EDITOR_MODE_KEYS: [&str; 3] = ["read", "wysiwyg", "source"];
 const NEW_NOTE_LOCATION_KEYS: [&str; 2] = ["root", "last"];
-/// 自动保存延迟档位（ms）：仅改防抖时长，不改尾沿纪律（docs/08 §3.2 B2）。
+/// 自动保存延迟档位（ms）：仅改防抖时长，不改尾沿纪律。
 /// M5-3 整体调大（原 0.3/0.7/1.5/3s）；旧值归一到最近档（见 `nearest_autosave`）。
 const AUTOSAVE_KEYS: [u32; 4] = [1500, 3000, 10_000, 20_000];
 
@@ -124,7 +124,7 @@ impl Default for EditorPrefs {
 
 impl Default for StoragePrefs {
     fn default() -> Self {
-        // 30 天：与 tombstone TTL 数值巧合但**语义无关**（docs/08 §3.3 注）
+        // 30 天：与 tombstone TTL 数值巧合但**语义无关**
         Self { trash_retention_days: 30 }
     }
 }
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn defaults_match_previous_hardcoded_visuals() {
-        // 默认值必须与 M3 的硬编码等价，否则升级用户界面会突变（docs/08 §3 表头）
+        // 默认值必须与 M3 的硬编码等价，否则升级用户界面会突变
         let a = Appearance::default();
         assert_eq!(a.scheme, "light", "M7：默认配色 = 现状晨窗，升级不突变");
         assert_eq!(a.font, "sans", "M7：默认字体 = 内置 MiSans");

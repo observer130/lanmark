@@ -2,7 +2,7 @@
 @import "@milkdown/crepe/theme/common/style.css";
 @import "@milkdown/crepe/theme/frame-dark.css";
 
-/* ── M6d 内置字体（npm 包，随应用分发 ⇒ 三端字形一致；docs/09 §4.7）──
+/* ── M6d 内置字体（npm 包，随应用分发 ⇒ 三端字形一致）──
    都是 unicode-range 切片 woff2：磁盘上随包全量，运行时只解码命中的切片。
    出处与许可文本见 `licenses/fonts/`；**MiSans 需在「关于」页注明**（小米协议）。
    版本钉死（无 ^）：字体包的结构/切片范围会随大版本变。 */
@@ -79,7 +79,7 @@
   /* ── 字体栈（M7：编辑区字体可调，走 `<html data-font>`；界面壳固定）──
      正文默认栈 = 内置 MiSans（三端一致），其后是系统兜底（生僻字回退）；
      等宽 = 内置 JetBrains Mono。界面壳（--font-sans，见 @theme）仍用系统栈：
-     字体差异只作用于编辑区（docs/09 D3）。 */
+     字体差异只作用于编辑区。 */
   --lanmark-font-text: "MiSans", "Noto Sans", "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --lanmark-font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, "Noto Sans Mono CJK SC", monospace;
 
@@ -297,7 +297,7 @@ body {
   line-height: var(--lanmark-line-height);
 }
 
-/* ── 标题排版层级（M6a，docs/09 §5）──
+/* ── 标题排版层级（M6a）──
    Crepe 默认 h1=2.625em/h2=2.25em…且字重 400（大字细体），是「标题比正文大太多」
    的根因。对齐主流 md 渲染器共识（GitHub/VS Code/Notion/Obsidian 实测调研）：
    H1 2.0 / H2 1.5 / H3 1.25 / H4-H6 1.0（em，随字号档位整体缩放），字重 600。

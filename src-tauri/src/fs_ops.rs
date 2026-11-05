@@ -624,7 +624,7 @@ fn trash_index_remove(vault: &Path, trash_name: &str) {
 
 // ---------- M4d/M4e：vault 统计与回收站清理 ----------
 
-/// vault 规模统计（`vault_stats` 命令的返回体，docs/08 §3.3 C2）。
+/// vault 规模统计（`vault_stats` 命令的返回体）。
 #[derive(Debug, Serialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStats {
@@ -814,7 +814,7 @@ pub fn trash_entry_ms(name: &str) -> Option<i64> {
 
 /// 按保留天数清理回收站，返回删除条目数。
 ///
-/// `days == 0` = 从不清理（docs/08 §3.3 C6）。
+/// `days == 0` = 从不清理。
 /// **与 M3 tombstone TTL 无关**：trash 是本地找回（不进同步），tombstone 是删除
 /// 传播账本（`.lanmark/tombstones.json`，固定 30 天）——清 trash 不影响同步传播删除。
 pub fn trash_prune(vault: &Path, days: u32, now: i64) -> std::io::Result<usize> {
@@ -1036,7 +1036,7 @@ fn tmp_path_for(abs: &Path) -> PathBuf {
     parent.join(format!("{name}.{}.{}{TMP_SUFFIX}", std::process::id(), seq))
 }
 
-/// 设定文件 mtime（LWW 时间源跨端保真，docs/07 §2：裁决按「文件 mtime」而非
+/// 设定文件 mtime（LWW 时间源跨端保真：裁决按「文件 mtime」而非
 /// 「服务器到达顺序」——push/pull 落地时若不保留源端保存时间，服务器侧文件
 /// mtime 会被写成落地时刻，离线早改、晚上线的设备会被晚到的旧版覆盖）。
 /// `ms <= 0` 视为无效（读不到 mtime 的退化值），跳过不覆写。best effort。

@@ -1,10 +1,10 @@
-//! M4h-1 发现层：mDNS 之外的局域网并发探测（docs/08 §13.3 ①）。
+//! M4h-1 发现层：mDNS 之外的局域网并发探测。
 //!
 //! 背景：mDNS 在用户实测的两处网络（家庭 WiFi 多播不可达、公司 LAN 拦截广播）
 //! 都不可用，而它是 M2/M3 唯一的自动发现手段，不可达时只剩手输 IP 一条路
-//! （docs/08 §13.1 P1/P2）。本模块补一条不依赖多播的路径：直接 TCP 连。
+//! 本模块补一条不依赖多播的路径：直接 TCP 连。
 //!
-//! **代价必须分层**（docs/08 §13.3 实测）：用户机器本机网段是 /22
+//! **代价必须分层**：用户机器本机网段是 /22
 //! （192.168.128.0/22，1022 个主机 × 10 端口 ≈ 1 万次 connect，按并发 128 /
 //! 单连 150ms 估算上限 ≈12s，达不到「点一下」的体感）；而读 ARP/邻居表只得到
 //! 3 个候选、全套探测 152ms。因此候选按代价从小到大依次尝试、**命中即停**：
@@ -15,9 +15,9 @@
 //! | L1 | 本机 ARP/邻居表里的私有地址 | 个位数–几十 | 百毫秒级 |
 //! | L2 | 本机直连网卡的私有网段全扫（跳虚拟网卡） | 数百–上千 | 秒级，有硬预算 |
 //!
-//! 安全边界（docs/08 §13.6 R9）：只探本机私有网段 + profile 历史地址，
+//! 安全边界：只探本机私有网段 + profile 历史地址，
 //! **只做 TCP connect + GET /api/v1/info，不发任何笔记数据**，绝不探公网。
-//! 设置页提供「局域网扫描」开关，关掉即退化为纯手输 URL（§13.8 走查项 5）。
+//! 设置页提供「局域网扫描」开关，关掉即退化为纯手输 URL。
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,14 +31,14 @@ use crate::sync_server::DEFAULT_PORT;
 /// 扫描端口范围：与 `DEFAULT_PORT` + 少量容错一致。
 /// 刻意不扫 `MAX_PORT_TRIES`(60) 全段——那是测试并行的产物，真实设备只用前几个。
 pub const SCAN_PORT_SPAN: u16 = 10;
-/// 并发上限（§13.6 R9：并发 128 起，不再往上加，避免触发企业 IDS）。
+/// 并发上限（并发 128 起，不再往上加，避免触发企业 IDS）。
 const MAX_CONCURRENCY: usize = 128;
-/// L2 全扫的总预算硬截断：超时即返回已命中部分，UI 不再转圈（§13.3 R13）。
+/// L2 全扫的总预算硬截断：超时即返回已命中部分，UI 不再转圈。
 const L2_BUDGET: Duration = Duration::from_millis(3000);
-/// 候选总数上限（§13.6 R10：多网卡/VPN/Docker 会产出大量无效网段）。
+/// 候选总数上限（多网卡/VPN/Docker 会产出大量无效网段）。
 const MAX_CANDIDATES: usize = 1024;
 
-/// 扫描命中的设备（比 `Discovered` 多带 `deviceId` 与笔记数，docs/08 §13.4 卡片）
+/// 扫描命中的设备（比 `Discovered` 多带 `deviceId` 与笔记数）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannedDevice {
@@ -81,7 +81,7 @@ pub fn mask_v4(ip: Ipv4Addr, prefix: u8) -> Ipv4Addr {
 
 impl NetSegment {
     /// 该网段是否值得扫：只接受 RFC1918 私有段 + 链路本地。
-    /// **绝不扫公网**（docs/08 §13.3 安全边界）。
+    /// **绝不扫公网**。
     pub fn is_private(&self) -> bool {
         is_private_v4(self.network)
     }
@@ -110,7 +110,7 @@ pub fn is_private_v4(ip: Ipv4Addr) -> bool {
 }
 
 /// 虚拟网卡前缀：docker/veth/br-/utun/tun/tap/wg 等。
-/// 它们的网段扫了必无结果，却会成倍拉长 L2（§13.6 R10）。
+/// 它们的网段扫了必无结果，却会成倍拉长 L2。
 pub fn is_virtual_iface(name: &str) -> bool {
     const PREFIXES: [&str; 14] = [
         "docker", "veth", "br-", "virbr", "vmnet", "vboxnet", "utun", "tun", "tap", "wg", "zt",
@@ -122,7 +122,7 @@ pub fn is_virtual_iface(name: &str) -> bool {
 
 /// 按 `(网卡名, ip, prefix)` 生成 L2 候选网段：跳虚拟网卡、只留私有段、同段去重。
 ///
-/// 去重按 `(network, prefix)`：多张网卡落在同一网段时只扫一次（§13.6 R10）。
+/// 去重按 `(network, prefix)`：多张网卡落在同一网段时只扫一次。
 pub fn subnet_candidates(ifaces: &[(String, Ipv4Addr, u8)]) -> Vec<NetSegment> {
     let mut out: Vec<NetSegment> = Vec::new();
     for (name, ip, prefix) in ifaces {
@@ -198,7 +198,7 @@ pub fn parse_ip_neigh_output(text: &str) -> Vec<Ipv4Addr> {
 /// 探一个 URL 的 `/api/v1/info`。
 ///
 /// 生产实现是真实 HTTP；测试注入假实现，从而无需起真服务器即可断言
-/// 「命中 /info 校验、去重、超时即弃」（docs/08 §13.5 测试计划）。
+/// 「命中 /info 校验、去重、超时即弃」。
 pub trait InfoProbe: Send + Sync {
     /// 返回 `(name, device_id, notes)`；连不上 / 不是 lanmark / 超时 → None
     fn probe(&self, url: &str) -> Option<ScannedDevice>;
@@ -328,7 +328,7 @@ fn scan_network(plan: &ScanPlan, probe: &dyn InfoProbe, ports: &[u16]) -> ScanOu
     out
 }
 
-/// 按 L0 → L1 → L2 依次探测，**命中即停**（docs/08 §13.3）。
+/// 按 L0 → L1 → L2 依次探测，**命中即停**。
 ///
 /// 返回合并去重后的设备列表。L0 命中就不再做 L1/L2——这是「点一下」体感的关键：
 /// 家庭网 mDNS 可用时一次 browse 就够，公司网才退到扫描。
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(out.devices[0].url, "http://192.168.128.30:4180");
     }
 
-    /// 关掉「局域网扫描」开关 → 只做 L0/L1，UI 退化为手输 URL（§13.8 走查项 5）
+    /// 关掉「局域网扫描」开关 → 只做 L0/L1，UI 退化为手输 URL
     #[test]
     fn subnet_layer_disabled_by_switch() {
         let probe = FakeProbe::new(&[("http://192.168.128.30:4180", "phone", "d1", 3)]);
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(out.devices.len(), 1, "重复候选只出一条");
     }
 
-    /// L2 预算硬截断：慢探测不得让扫描无限期跑下去（§13.6 R13）
+    /// L2 预算硬截断：慢探测不得让扫描无限期跑下去
     #[test]
     fn subnet_scan_truncates_on_budget() {
         struct SlowProbe;

@@ -20,9 +20,8 @@ export XDG_DATA_HOME="$WS/.cache/data"
 export XDG_CONFIG_HOME="$WS/.cache/config"
 export npm_config_cache="$WS/.cache/npm"
 
-# 临时文件也归位到 .cache：本机 /tmp 是仅 10M 的 tmpfs，跑一次 pnpm test 就被 Node 的
-# 编译缓存（node-compile-cache）吃掉近 9M，紧接着的 cargo test 里 tempfile::TempDir
-# 建 SQLite 会成批报 "disk I/O error"（实测：先测前端再测 Rust，30 项必挂）。
+# 临时文件也归位到 .cache：/tmp 的容量与清理策略不可控（沙箱/CI 尤甚），
+# 让 Node 编译缓存与 cargo test 的 tempfile::TempDir 共用同一块可预期空间。
 export TMPDIR="$WS/.cache/tmp"
 mkdir -p "$TMPDIR"
 
@@ -33,7 +32,7 @@ if [ -n "$jdk" ]; then
 fi
 
 # Android SDK / NDK：本机是 curl 手工组的（本网络下 Java 直连 dl.google.com 会被连接重置，
-# sdkmanager 拉不下 manifest），缓存/配方见 docs/长效知识.md §5；Java 侧强制 IPv4 见下方 JAVA_TOOL_OPTIONS
+# sdkmanager 拉不下 manifest），缓存/配方见 AGENTS.md「环境与平台笔记」；Java 侧强制 IPv4 见下方 JAVA_TOOL_OPTIONS
 if [ -d "$WS/.cache/android-sdk" ]; then
   export ANDROID_HOME="$WS/.cache/android-sdk"
   export ANDROID_SDK_ROOT="$ANDROID_HOME"

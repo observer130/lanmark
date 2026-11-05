@@ -134,7 +134,7 @@ function AliasHeader({ alias }: { alias: string }) {
 /** 手机端面板：服务器状态 + **待授权配对请求** + 本机地址 + 冲突副本可发现性。
  *
  *  M4h-2 起主路径变了：桌面点「连接」→ 这里出现「『青柠台机』请求连接」+ [允许][拒绝]，
- *  取代过去「手机读数、桌面抄 8 位码」（docs/08 §13.4）。配对码降为兜底。
+ *  取代过去「手机读数、桌面抄 8 位码」。配对码降为兜底。
  *  M4h-4：面板头部是**设备代号**（LocalSend alias 语义）——局域网内 Machine
  *  靠它标识，点笔可改；IP/端口与配对码继续收在兜底区。
  *  轮询在常驻条里做（面板收起时条上也要显示运行状态），这里只做展示。 */
@@ -222,7 +222,7 @@ function ServerPanel() {
         </div>
       )}
 
-      {/* 8 位配对码降为兜底（docs/08 §13.3 ②：主路径已改「手机点允许」） */}
+      {/* 8 位配对码降为兜底（主路径已改「手机点允许」） */}
       {pairing.running && (
         <details className="rounded-[10px] border border-line bg-card px-3 py-2 shadow-card">
           <summary className="cursor-pointer text-[11px] text-ink-3">
@@ -239,7 +239,7 @@ function ServerPanel() {
         </details>
       )}
 
-      {/* M3e 可发现性：最近回合时间 + 库中冲突副本（docs/07 §6） */}
+      {/* M3e 可发现性：最近回合时间 + 库中冲突副本 */}
       {pairing.running && (
         <div className="flex items-center gap-3 px-1 text-[11px] text-ink-3">
           <span>
@@ -279,7 +279,7 @@ function ClientPanel() {
   useEffect(() => {
     if (!scanning && (scanned.length > 0 || connectOutcome != null)) setScanRan(true);
   }, [scanning, scanned.length, connectOutcome]);
-  // 面板展开时自动扫一次（「点一下就看到候选手机」的体感，docs/08 §13.2 目标）
+  // 面板展开时自动扫一次（「点一下就看到候选手机」的体感）
   useEffect(() => {
     void scanLan().finally(() => setScanRan(true));
     // 只在挂载时扫一次：后续由「自动查找」按钮驱动
@@ -500,7 +500,7 @@ function ClientPanel() {
               连接（等待手机确认）
             </button>
 
-            {/* 8 位配对码：一键授权失败或对方是旧版本时的兜底（docs/08 §13.3 ②） */}
+            {/* 8 位配对码：一键授权失败或对方是旧版本时的兜底 */}
             <div className="border-t border-line pt-1.5">
               <div className="text-[11px] text-ink-3">桌面端连不上时，用配对码</div>
               <div className="mt-1 flex gap-1.5">
@@ -681,7 +681,7 @@ export function SyncSection() {
 
         {!android && (
           <>
-            {/* 迷你自动同步开关（关掉后仅保留手动同步，docs/07 §7） */}
+            {/* 迷你自动同步开关（关掉后仅保留手动同步） */}
             <button
               role="switch"
               aria-checked={autoOn}

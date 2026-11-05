@@ -31,12 +31,12 @@ fn default_sync_auto() -> bool {
 }
 
 /// 设备级配置。**全部小节都 `serde(default)`**：M3 及更早的 config.json 直接可读，
-/// 缺字段取默认（docs/08 §4.2）。同步周期不在这里——D1 定了固定 60s，不进配置。
+/// 缺字段取默认。同步周期不在这里——D1 定了固定 60s，不进配置。
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub vault_path: Option<String>,
-    /// M3：桌面端自动同步开关（默认开；旧配置无此字段 → serde default，docs/07 §7）
+    /// M3：桌面端自动同步开关（默认开；旧配置无此字段 → serde default）
     #[serde(default = "default_sync_auto")]
     pub sync_auto: bool,
     /// M4a：外观（M7 起 = 配色 scheme + 编辑区字体 font + 字号/行距）

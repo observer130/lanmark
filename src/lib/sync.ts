@@ -88,7 +88,7 @@ export interface SyncPairingInfo {
   pendingPairs?: PendingPair[];
 }
 
-/** 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本（M3c，docs/07 §3/§6） */
+/** 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本（M3c） */
 export interface MergeEvent {
   path: string;
   /** "local" | "server" */
@@ -113,7 +113,7 @@ export interface SyncReport {
 export const sync = {
   pairingInfo: () => invoke<SyncPairingInfo>("sync_pairing_info"),
   serverStart: () => invoke<number>("sync_server_start"),
-  /** vault 内冲突副本数（手机端可发现性，docs/07 §6） */
+  /** vault 内冲突副本数（手机端可发现性） */
   conflictCount: () => invoke<number>("sync_conflict_count"),
 
   /** 桌面端 */

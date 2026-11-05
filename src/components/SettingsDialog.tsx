@@ -39,7 +39,7 @@ import {
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
 
 /**
- * M4a 设置面板外壳（docs/08 §5.1）。
+ * M4a 设置面板外壳。
  *
  * 形态：宽屏（≥768）居中模态；窄屏（<768，与 `useIsNarrow` 同一阈值）全屏覆盖页。
  * 未配置 vault 时也可用——设置存在设备配置目录，与 vault 无关。
@@ -53,7 +53,7 @@ const SECTIONS: { key: SectionKey; label: string; icon: typeof Palette }[] = [
   { key: "about", label: "关于", icon: Info },
 ];
 
-/* ── 通用控件（docs/08 §5.2：离散档位点一次即应用，无需防抖） ── */
+/* ── 通用控件（离散档位点一次即应用，无需防抖） ── */
 
 function Row({
   label,
@@ -455,7 +455,7 @@ function SyncSection2() {
       {/* M5-2：原「设备发现」组（局域网扫描开关）已移除——扫描只在点
           「自动查找手机」时发生，且开关从不持久化，属无意义设置。 */}
 
-      {/* 配对 UI 只有一套：关掉设置面板并展开侧栏的同步面板（docs/08 §3.4 D3） */}
+      {/* 配对 UI 只有一套：关掉设置面板并展开侧栏的同步面板 */}
       <Group title="设备配对">
         <Row label="管理设备与配对" hint="配对、查看已连接设备">
           <button
@@ -664,7 +664,7 @@ function AboutSection() {
   /**
    * E3：一键复制诊断信息（纯函数 buildDiagnostics，见文件末尾）。
    *
-   * 目的（docs/08 §3.5 E3）：替代完整错误上报。用户遇到问题把这段贴出来，
+   * 目的：替代完整错误上报。用户遇到问题把这段贴出来，
    * 就能判断是「库没打开 / 同步没连上 / 版本太旧」哪一类，不必来回追问。
    */
   const diagnostics = () =>

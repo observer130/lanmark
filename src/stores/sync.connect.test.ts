@@ -1,5 +1,5 @@
 /**
- * M4h 连接方式改造的前端测试：LAN 扫描发现 + 一键授权（docs/08 §13.5）。
+ * M4h 连接方式改造的前端测试：LAN 扫描发现 + 一键授权。
  *
  * 重点覆盖四态（等待 / 批准 / 拒绝 / 超时）、错误回滚，以及
  * M5-2 的扫描行为钉子：开关已移除，扫描恒为全扫（allowSubnet=true）。
@@ -261,7 +261,7 @@ describe("待授权请求的可发现性（真机反馈的 bug 回归）", () =>
   /**
    * 真机现象：桌面点「连接」后手机毫无反应——请求已入队，但卡片只在同步面板里
    * 渲染，而面板默认收起。这里钉住「UI 能拿到 pending 数据」这一层；
-   * 自动展开由 SyncSection 的 pendingCount 效应负责（组件层，见 §13.4）。
+   * 自动展开由 SyncSection 的 pendingCount 效应负责（组件层）。
    */
   it("轮询后 store 里能看到待授权请求（含来源 IP 与等待时长）", async () => {
     m.pairingInfo.mockResolvedValueOnce({

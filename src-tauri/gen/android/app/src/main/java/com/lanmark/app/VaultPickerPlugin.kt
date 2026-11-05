@@ -17,7 +17,7 @@ import app.tauri.plugin.Plugin
 /**
  * M2 vault 目录选择插件（Rust 侧桥见 src-tauri/src/mobile.rs）。
  *
- * 策略（docs/research/android-vault-dir.md）：Android 11+ 的 scoped storage 下，
+ * 策略：Android 11+ 的 scoped storage 下，
  * SAF tree URI 直接映射回文件路径后 std::fs 并不可写——必须 MANAGE_EXTERNAL_STORAGE。
  * 因此：hasAllFilesAccess / requestAllFilesAccess 管授权；appDir 返回框架创建的
  * 应用私有外部目录（Android/data/<pkg> 系统懒创建，std::fs mkdir 包目录必被拒，
