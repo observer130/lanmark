@@ -284,31 +284,16 @@ pub struct ScanPlan {
     pub allow_subnet: bool,
 }
 
-/// 按 L0 → L1 → L2 依次探测，**命中即停**（docs/08 §13.3）。
+/// 按给定的端口集合做 L1 → L2 探测，**命中即停**。
 ///
-/// 返回合并去重后的设备列表。L0 命中就不再做 L1/L2——这是「点一下」体感的关键：
-/// 家庭网 mDNS 可用时一次 browse 就够，公司网才退到扫描。
-pub fn run_scan(plan: &ScanPlan, probe: &dyn InfoProbe) -> ScanOutcome {
-    // L0：已知地址（mDNS + 历史 IP）。这一层必须做，代价近乎零。
-    if !plan.known.is_empty() {
-        let out = probe_all(&plan.known, probe, None);
-        if !out.devices.is_empty() {
-            return out;
-        }
-    }
-
-    let port = plan.known_port.unwrap_or(DEFAULT_PORT);
-    let ports: Vec<u16> = if plan.known_port.is_some() {
-        vec![port]
-    } else {
-        (DEFAULT_PORT..DEFAULT_PORT + SCAN_PORT_SPAN).collect()
-    };
-
+/// 抽出来供 B2 的两轮复用：已知端口先跑一轮，全空再换端口段重跑。
+/// L2 每轮各有一份 `L2_BUDGET` 硬预算（单轮不会无限期转圈）。
+fn scan_network(plan: &ScanPlan, probe: &dyn InfoProbe, ports: &[u16]) -> ScanOutcome {
     // L1：邻居表地址。个位数候选，百毫秒级。
     if !plan.neighbors.is_empty() {
         let mut urls = Vec::new();
         for ip in &plan.neighbors {
-            for p in &ports {
+            for p in ports {
                 urls.push(format!("http://{ip}:{p}"));
             }
         }
@@ -329,7 +314,7 @@ pub fn run_scan(plan: &ScanPlan, probe: &dyn InfoProbe) -> ScanOutcome {
             if plan.neighbors.contains(&ip) {
                 continue;
             }
-            for p in &ports {
+            for p in ports {
                 urls.push(format!("http://{ip}:{p}"));
                 if urls.len() >= MAX_CANDIDATES {
                     break 'outer;
@@ -340,6 +325,50 @@ pub fn run_scan(plan: &ScanPlan, probe: &dyn InfoProbe) -> ScanOutcome {
     let mut out = probe_all(&urls, probe, Some(L2_BUDGET));
     // 候选被截断（超过上限）也算「可能不全」
     out.truncated |= urls.len() >= MAX_CANDIDATES;
+    out
+}
+
+/// 按 L0 → L1 → L2 依次探测，**命中即停**（docs/08 §13.3）。
+///
+/// 返回合并去重后的设备列表。L0 命中就不再做 L1/L2——这是「点一下」体感的关键：
+/// 家庭网 mDNS 可用时一次 browse 就够，公司网才退到扫描。
+///
+/// 端口策略（B2）：「主端口优先 + 回退全端口段」——`known_port` 只作为第一轮
+/// 的缩窄提示；一轮 L1/L2 全空且允许网段扫描时，回退到
+/// `DEFAULT_PORT..DEFAULT_PORT+SCAN_PORT_SPAN`（去掉已试端口）重跑一遍。
+/// 手机 4180 被占落到 4181 时 profile 仍记 4180，不回退就永远扫不到。
+pub fn run_scan(plan: &ScanPlan, probe: &dyn InfoProbe) -> ScanOutcome {
+    // L0：已知地址（mDNS + 历史 IP）。这一层必须做，代价近乎零。
+    if !plan.known.is_empty() {
+        let out = probe_all(&plan.known, probe, None);
+        if !out.devices.is_empty() {
+            return out;
+        }
+    }
+
+    // 无历史端口：行为不变，一次把全端口段交给 L1/L2。
+    let Some(known_port) = plan.known_port else {
+        let ports: Vec<u16> = (DEFAULT_PORT..DEFAULT_PORT + SCAN_PORT_SPAN).collect();
+        return scan_network(plan, probe, &ports);
+    };
+
+    // 第一轮：只探历史端口（省掉其余端口的开销）
+    let first = scan_network(plan, probe, &[known_port]);
+    if !first.devices.is_empty() || !plan.allow_subnet {
+        // 命中即停；关掉「局域网扫描」时也不回退（只查已知设备）
+        return first;
+    }
+
+    // 回退：主端口全空 → 全端口段（去掉已试端口）重跑 L1/L2
+    let fallback: Vec<u16> = (DEFAULT_PORT..DEFAULT_PORT + SCAN_PORT_SPAN)
+        .filter(|p| *p != known_port)
+        .collect();
+    if fallback.is_empty() {
+        return first;
+    }
+    let mut out = scan_network(plan, probe, &fallback);
+    // 第一轮 L2 可能被预算截断 → 最终结果仍「可能不全」
+    out.truncated |= first.truncated;
     out
 }
 
@@ -553,22 +582,55 @@ mod tests {
         assert!(out.devices.is_empty(), "关了开关不得做网段全扫");
     }
 
-    /// 已知端口优先：该 profile 有历史端口时只探那一个，不撒 10 个端口
+    /// 已知端口优先：首轮只探该端口；未命中且允许网段扫描 → 回退到其余端口段
     #[test]
     fn known_port_narrows_candidates() {
-        struct Counting(Arc<AtomicUsize>, Option<ScannedDevice>);
-        impl InfoProbe for Counting {
-            fn probe(&self, _url: &str) -> Option<ScannedDevice> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                self.1.clone()
+        struct Recording(Arc<Mutex<Vec<String>>>);
+        impl InfoProbe for Recording {
+            fn probe(&self, url: &str) -> Option<ScannedDevice> {
+                self.0.lock().unwrap().push(url.to_string());
+                None
             }
         }
-        let hits = Arc::new(AtomicUsize::new(0));
-        let probe = Counting(Arc::clone(&hits), None);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let probe = Recording(Arc::clone(&seen));
         let mut p = plan(vec![], vec!["192.168.1.9".parse().unwrap()], vec![]);
         p.known_port = Some(4183);
-        run_scan(&p, &probe);
-        assert_eq!(hits.load(Ordering::Relaxed), 1, "已知端口只探 1 次");
+        let out = run_scan(&p, &probe);
+        assert!(out.devices.is_empty());
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 10, "首轮 1 次 + 回退 9 次: {seen:?}");
+        assert_eq!(seen[0], "http://192.168.1.9:4183", "第一次探测只含已知端口");
+        assert_eq!(
+            seen.iter().filter(|u| u.ends_with(":4183")).count(),
+            1,
+            "回退不得重复已试端口: {seen:?}"
+        );
+        for port in DEFAULT_PORT..DEFAULT_PORT + SCAN_PORT_SPAN {
+            if port == 4183 {
+                continue;
+            }
+            assert!(
+                seen.iter().any(|u| u.ends_with(&format!(":{port}"))),
+                "回退缺端口 {port}: {seen:?}"
+            );
+        }
+    }
+
+    /// B2 回归：手机 4180 被占 → 服务落到 4181，profile 仍记 4180。
+    /// 已知端口未命中后必须回退扫其余端口段，否则 4181 永远找不到。
+    #[test]
+    fn known_port_miss_falls_back_to_shifted_port() {
+        let probe = FakeProbe::new(&[("http://192.168.5.1:4181", "phone", "dev-4181", 9)]);
+        let mut p = plan(
+            vec![],
+            vec![],
+            vec![NetSegment { network: "192.168.5.0".parse().unwrap(), prefix: 30 }],
+        );
+        p.known_port = Some(4180);
+        let out = run_scan(&p, &probe);
+        assert_eq!(out.devices.len(), 1, "回退应命中 4181: {out:?}");
+        assert_eq!(out.devices[0].url, "http://192.168.5.1:4181");
     }
 
     /// 命中 /info 校验：探测返回 None 即为「不是 lanmark / 连不上」→ 丢弃
