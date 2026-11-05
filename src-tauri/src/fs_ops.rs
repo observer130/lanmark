@@ -1182,6 +1182,19 @@ fn index_note_file(vault: &Path, rel: &str, conn: &Connection) -> std::io::Resul
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
+/// 列出 vault 下全部笔记（vault 相对路径，排序保证确定性）。
+///
+/// 同步清单用它而不是 DB：vault 文件是唯一事实源，常驻期间外部（编辑器/
+/// 文件管理器）新建、删除、改名也能立刻反映，不会被 DB 旧行复活。
+/// 复用 `collect_notes` 的纪律：跳过点目录（含 `.lanmark`）与符号链接。
+pub fn collect_note_paths(vault: &Path) -> std::io::Result<Vec<String>> {
+    let mut set = std::collections::HashSet::new();
+    collect_notes(vault, vault, &mut set)?;
+    let mut out: Vec<String> = set.into_iter().collect();
+    out.sort();
+    Ok(out)
+}
+
 fn collect_notes(
     root: &Path,
     dir: &Path,
