@@ -72,6 +72,14 @@ pub fn has_update(current: &str, latest: &str) -> bool {
     version_tuple(latest) > version_tuple(current)
 }
 
+/// 自更新准入：目标 tag 必须**严格高于**当前版本（复用 `version_tuple`）。
+///
+/// tag 来自前端（update_install_linux 的参数），只补 v 前缀不校验高低的话，
+/// 旧 release 页/被改过的页面能把新二进制降级回有已知漏洞的旧版本。
+pub fn is_upgrade(tag: &str, current: &str) -> bool {
+    version_tuple(tag) > version_tuple(current)
+}
+
 /// 节流判定：手动（force）总是查；自动检查距上次 ≥24h 才查。
 pub fn check_due(last_check_ms: u64, now_ms: u64, force: bool) -> bool {
     force || now_ms.saturating_sub(last_check_ms) >= CHECK_INTERVAL_MS
@@ -231,6 +239,80 @@ pub(crate) mod linux {
         found.ok_or_else(|| "tar 包内未找到根级 `lanmark` 二进制".into())
     }
 
+    /// 同目录兄弟路径：`/usr/bin/lanmark` + `.old` → `/usr/bin/lanmark.old`。
+    /// 用 `with_extension` 会替换掉文件名里的点（`lanmark-0.8.1` → `lanmark-0.8.old`），
+    /// 所以按字符串追加。
+    fn sibling(exe: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut s = exe.as_os_str().to_os_string();
+        s.push(suffix);
+        std::path::PathBuf::from(s)
+    }
+
+    /// 用新二进制替换现行可执行文件（核心替换逻辑，抽出来便于临时目录测试）。
+    ///
+    /// 时序（每一步都保证任一步失败后仍有可启动的程序）：
+    ///   1. 写 `exe.new`（同目录）——新二进制**完整落盘**后才动现行程序
+    ///   2. chmod 0755——可执行位在换入前就绪，换入后不会出现无执行权的一瞬
+    ///   3. `rename(exe → exe.old)`（仅当 exe 存在）：Linux 允许重命名运行中的程序
+    ///   4. `rename(exe.new → exe)`；失败则把 `.old` 还原回 exe
+    ///
+    /// **不删 `.old`**：新二进制可能起不来（缺库/段错误/被杀），唯一回滚副本必须
+    /// 留到新进程跑起来之后，由 `cleanup_old_binary` 在 setup 里清理。
+    pub fn replace_binary(exe: &std::path::Path, new_bin: &[u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let new = sibling(exe, ".new");
+        let old = sibling(exe, ".old");
+
+        // 1+2：先写同目录临时文件并加执行位（写一半失败 → 清理，不动现行程序）
+        std::fs::write(&new, new_bin)?;
+        if let Err(e) = std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)) {
+            let _ = std::fs::remove_file(&new);
+            return Err(e);
+        }
+
+        // 3：备份现行程序（.old 已存在时 rename 会覆盖旧副本，等待被替换的
+        //    正是当前运行的二进制，覆盖是对的）
+        let had_exe = exe.exists();
+        if had_exe {
+            if let Err(e) = std::fs::rename(exe, &old) {
+                let _ = std::fs::remove_file(&new);
+                return Err(e);
+            }
+        }
+
+        // 4：原子换入；失败把 .old 还原，绝不留下「有 exe.new、没有 exe」的目录
+        if let Err(e) = std::fs::rename(&new, exe) {
+            if had_exe {
+                restore_old(exe, &old);
+            }
+            let _ = std::fs::remove_file(&new);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// 换入失败时把 `.old` 放回原位。尽力而为：回滚失败只能记日志
+    /// （此时新二进制还在 `.new`，人工可手动恢复）。
+    pub fn restore_old(exe: &std::path::Path, old: &std::path::Path) {
+        if !old.exists() {
+            return;
+        }
+        if let Err(e) = std::fs::rename(old, exe) {
+            log::error!("自更新回滚失败（{} → {}）: {e}", old.display(), exe.display());
+        }
+    }
+
+    /// 新进程跑到 setup → 说明新二进制可启动，此时才删自更新留下的 `.old`。
+    /// 失败只记日志（清理是尽力而为，不影响启动）。
+    pub fn cleanup_old_binary(exe: &std::path::Path) {
+        let old = sibling(exe, ".old");
+        match std::fs::remove_file(&old) {
+            Ok(()) => log::info!("已清理自更新旧副本（{}）", old.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("清理自更新旧副本失败（{}）: {e}", old.display()),
+        }
+    }
+
     /// 下载 release 资产（tar.gz 与 .sig 走同一构造逻辑）。
     fn download(url: &str) -> Result<Vec<u8>, String> {
         let c = reqwest::blocking::Client::builder()
@@ -254,6 +336,14 @@ pub(crate) mod linux {
     /// 自更新同步实现（命令经 spawn_blocking 调用）。tag 接受 `vX.Y.Z` 与
     /// 裸版本号两种形式，内部统一成完整 tag 再拼下载 URL（见 `normalized_tag`）。
     pub fn self_update(app: &tauri::AppHandle, tag: &str) -> Result<(), String> {
+        // 拒绝降级/同版本：tag 来自前端，不能信
+        let current = app.package_info().version.to_string();
+        if !super::is_upgrade(tag, &current) {
+            return Err(format!(
+                "拒绝降级/同版本更新（当前 {current}，目标 {}）",
+                tag.trim()
+            ));
+        }
         let tag = &super::normalized_tag(tag);
         let base = format!("https://github.com/observer130/lanmark/releases/download/{tag}");
         let tar_gz = download(&format!("{base}/lanmark-linux-x64.tar.gz"))?;
@@ -285,23 +375,8 @@ pub(crate) mod linux {
         // 替换现行可执行文件：Linux 允许 rename 运行中的程序。
         // current_exe 在打包容器里测试不可得，错误信息里带上路径便于排查。
         let exe = std::env::current_exe().map_err(|e| format!("无法定位自身可执行文件: {e}"))?;
-        let old = exe.with_extension("old");
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(&exe, &old).map_err(|e| format!("备份旧程序失败（{}）: {e}", exe.display()))?;
-        let write = std::fs::write(&exe, &new_bin);
-        if let Err(e) = write {
-            // 写失败 → 尽力回滚（旧文件还在 .old）
-            let _ = std::fs::rename(&old, &exe);
-            return Err(format!("写入新程序失败: {e}"));
-        }
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)) {
-            let _ = std::fs::rename(&old, &exe);
-            return Err(format!("设置可执行权限失败: {e}"));
-        }
-        // 清理 .old 与签名测试残留成功后才走——保留到重启后也没机会删了，
-        // 让新进程首启清理（这里简单处理：尽力删，失败不影响更新）
-        let _ = std::fs::remove_file(&old);
+        replace_binary(&exe, &new_bin)
+            .map_err(|e| format!("替换程序失败（{}）: {e}", exe.display()))?;
 
         log::info!("Linux 自更新完成，重启应用（tag={tag}）");
         app.restart(); // -> !
@@ -357,6 +432,21 @@ mod tests {
         // v 前缀 / 位数不足都可比
         assert!(has_update("0.4.0", "v0.4.1"));
         assert!(!has_update("0.4.0", "0.4"));
+    }
+
+    /// C1：自更新只允许**严格升级**。tag 来自前端（可被换库/旧 release 页
+    /// 引导成任意字符串），旧实现只补 v 不校验高低 → 能用旧包覆盖新二进制。
+    #[test]
+    fn is_upgrade_requires_strictly_newer_tag() {
+        assert!(is_upgrade("v0.8.2", "0.8.1"), "v 前缀 tag 可升级");
+        assert!(is_upgrade("0.8.2", "0.8.1"), "裸版本号 tag 可升级");
+        assert!(is_upgrade("V1.0.0", "0.9.9"), "大写 V 同样认");
+        assert!(is_upgrade("0.9.0", "0.8.9"), "次版本位也算升级");
+        assert!(!is_upgrade("v0.8.1", "0.8.1"), "同版本拒绝");
+        assert!(!is_upgrade("0.8.1", "v0.8.1"), "同版本（握手 v）拒绝");
+        assert!(!is_upgrade("v0.8.0", "0.8.1"), "降级拒绝");
+        assert!(!is_upgrade("v0.7.9", "0.8.1"), "跨次版本降级拒绝");
+        assert!(!is_upgrade("", "0.8.1"), "空 tag 不是升级");
     }
 
     /// 回归：自更新 URL 必须用完整 tag。v0.5.0 剥 v 再拼 URL →
@@ -426,7 +516,94 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     mod linux_tests {
-        use super::linux::{extract_binary, inner_public_key_line, PUBKEY_B64};
+        use super::linux::{
+            cleanup_old_binary, extract_binary, inner_public_key_line, replace_binary, restore_old,
+            PUBKEY_B64,
+        };
+
+        /// 临时目录里放一个「现行程序」，内容可辨认
+        fn fake_exe(dir: &std::path::Path) -> std::path::PathBuf {
+            let exe = dir.join("lanmark");
+            std::fs::write(&exe, b"old-binary").unwrap();
+            exe
+        }
+
+        fn mode_of(p: &std::path::Path) -> u32 {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+
+        /// C1：替换必须是「先写 .new 再换入」，并且 `.old` 保留给启动失败回滚。
+        /// 用临时目录模拟——绝不碰测试进程自己的 exe。
+        #[test]
+        fn replace_binary_swaps_in_new_bytes_and_keeps_old_copy() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path());
+            let new_path = dir.path().join("lanmark.new");
+            let old_path = dir.path().join("lanmark.old");
+
+            replace_binary(&exe, b"new-binary").unwrap();
+
+            assert_eq!(std::fs::read(&exe).unwrap(), b"new-binary", "正式路径是新二进制");
+            assert_eq!(mode_of(&exe), 0o755, "新二进制带可执行位");
+            assert_eq!(
+                std::fs::read(&old_path).unwrap(),
+                b"old-binary",
+                ".old 是旧副本，**不得**在重启前删除"
+            );
+            assert!(!new_path.exists(), "临时 .new 已被 rename 走");
+        }
+
+        /// C1：备份那一步失败时，现行程序必须原位不动，临时文件清理掉。
+        /// 用「非空目录占住 .old」制造 rename(exe → .old) 失败。
+        #[test]
+        fn replace_binary_leaves_exe_intact_when_backup_rename_fails() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path());
+            let old_path = dir.path().join("lanmark.old");
+            std::fs::create_dir(&old_path).unwrap();
+            std::fs::write(old_path.join("occupied"), b"x").unwrap();
+
+            assert!(replace_binary(&exe, b"new-binary").is_err(), "备份失败必须报错");
+            assert_eq!(std::fs::read(&exe).unwrap(), b"old-binary", "原程序仍在原位");
+            assert!(!dir.path().join("lanmark.new").exists(), "临时 .new 已清理");
+        }
+
+        /// C1：换入失败（`rename(.new → exe)` 报错）时的回滚路径——
+        /// `.old` 必须被放回正式路径，目录里不能只剩一个 `.new`。
+        #[test]
+        fn restore_old_puts_backup_back_in_place() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = dir.path().join("lanmark");
+            let old = dir.path().join("lanmark.old");
+            std::fs::write(&old, b"old-binary").unwrap();
+
+            restore_old(&exe, &old);
+            assert_eq!(std::fs::read(&exe).unwrap(), b"old-binary", "旧副本已还原");
+            assert!(!old.exists(), ".old 已被 rename 消费");
+
+            // 没有 .old（exe 原本就缺失）→ 无操作、不 panic
+            let ghost = dir.path().join("ghost");
+            restore_old(&ghost, &dir.path().join("ghost.old"));
+            assert!(!ghost.exists());
+        }
+
+        /// C1：新进程跑到 setup 才清 `.old`；不存在时是无操作。
+        #[test]
+        fn cleanup_old_binary_removes_old_sibling_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path());
+            let old_path = dir.path().join("lanmark.old");
+            std::fs::write(&old_path, b"old-binary").unwrap();
+
+            cleanup_old_binary(&exe);
+            assert!(!old_path.exists(), ".old 已删");
+            assert_eq!(std::fs::read(&exe).unwrap(), b"old-binary", "现行程序不受影响");
+
+            // 再调一次：不存在 → 无操作、不 panic
+            cleanup_old_binary(&exe);
+            assert!(!old_path.exists());
+        }
 
         #[test]
         fn inner_public_key_line_unpacks_wrapper() {

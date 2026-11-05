@@ -106,6 +106,13 @@ pub fn run() {
         .manage(state.clone())
         // 启动时自动打开上次配置的 vault（重索引 + 恢复 DB）
         .setup(|app| {
+            // C1：Linux 自更新成功后，新进程能跑到 setup 就说明新二进制可启动，
+            // 此时才删 `.old`（重启失败时它是唯一的回滚副本）。失败只记日志。
+            #[cfg(target_os = "linux")]
+            match std::env::current_exe() {
+                Ok(exe) => crate::update::linux::cleanup_old_binary(&exe),
+                Err(e) => log::warn!("自更新清理旧副本跳过：无法定位可执行文件（{e}）"),
+            }
             let handle = app.handle().clone();
             let state = app.state::<Arc<AppState>>().inner().clone();
             // M5-5：应用内更新（updater 插件，桌面限定——Android/iOS 官方不支持；
