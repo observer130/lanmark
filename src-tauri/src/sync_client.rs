@@ -730,23 +730,44 @@ impl RoundCore {
     /// （用户无需任何操作；副本进目录树，下回合随同步传遍全端）：
     /// - 本地新（或平手）→ M2 既有行为：服务器版本拉为本地冲突副本，本地以服务器 hash 为 base 推送
     /// - 服务器新（M2 没有的方向）→ 先把本地当前字节存为冲突副本，再拉服务器 P 覆写本地
+    ///
+    /// **两阶段（B1）**：冲突拉取是网络 IO（单次最长 `CLIENT_TIMEOUT`=30s），
+    /// 必须在**锁外**完成；全部拉完后只取一次 DB 锁做裁决/落盘。
+    /// 旧实现一进来就 `state.db.lock()`，冲突多 + 手机熄屏时所有 `with_db`
+    /// 命令（保存/搜索/元数据）被拖住数分钟。
     fn resolve_conflicts(&mut self) -> Result<(), String> {
-        let conn_guard = self.state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
-        let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-        for (path, _sm_hash) in self.conflicts.iter().cloned() {
-            let Some(lm) = self.local_map.get(&path).cloned() else {
+        // 阶段 1（锁外）：先快照冲突清单（take 避免与 to_pull/to_push 的借用冲突），
+        // 逐条拉服务器版本，只收集结果，不碰 DB。
+        let conflicts = std::mem::take(&mut self.conflicts);
+        let mut pulled: Vec<(String, Result<Option<crate::sync::PullFile>, String>)> = Vec::new();
+        for (path, _sm_hash) in conflicts {
+            if !self.local_map.contains_key(&path) {
                 // 不一致态（分类为冲突但本地已无文件，如回合开头 D4 软删后）→ 按「仅服务器有」拉取
                 self.to_pull.push(path);
                 continue;
-            };
-            let Some(sm) = self.server_map.get(&path).cloned() else {
+            }
+            if !self.server_map.contains_key(&path) {
                 // 不一致态（服务器 manifest 已无该路径）→ 按「仅本地有」推送
                 self.to_push.push((path, String::new()));
+                continue;
+            }
+            pulled.push((path.clone(), self.pull_single(&path)));
+        }
+
+        // 阶段 2（一次取锁）：按原顺序裁决/写冲突副本/store_pulled/to_push/merge 事件。
+        // 裁决输入仍是阶段 0 的内存 local_map/server_map 与磁盘字节，语义不变。
+        let conn_guard = self.state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+        let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+        for (path, result) in pulled {
+            let Some(lm) = self.local_map.get(&path).cloned() else {
+                continue;
+            };
+            let Some(sm) = self.server_map.get(&path).cloned() else {
                 continue;
             };
             let local_tuple = (lm.mtime_ms, lm.size, lm.hash.as_str());
             let server_tuple = (sm.mtime_ms, sm.size, sm.hash.as_str());
-            let f = match self.pull_single(&path) {
+            let f = match result {
                 Ok(Some(f)) => f,
                 Ok(None) => {
                     self.report.errors.push(format!("冲突副本拉取为空: {path}"));
@@ -1809,6 +1830,166 @@ mod tests {
         let r3 = sync_round(&desk, &profile).unwrap();
         assert!(r3.pulled.is_empty() && r3.pushed.is_empty());
         assert_eq!(r3.skipped, 2);
+    }
+
+    /// B1 测试用：manifest 里有一篇与桌面冲突的笔记；`/pull` 先卡 500ms，
+    /// 再等测试放行（上限 5s 兜底）。返回 (base, /pull 已开始, 放行开关)。
+    fn start_slow_pull_server() -> (
+        String,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::AtomicBool;
+
+        const REL: &str = "慢拉笔记.md";
+        const SERVER_BODY: &str = "服务器版本";
+        let server_hash = fs_ops::content_hash(SERVER_BODY.as_bytes());
+        let server_b64 = b64_encode(SERVER_BODY.as_bytes());
+        let server_mtime = fs_ops::now_ms() - 3_600_000;
+        let manifest = serde_json::json!([{
+            "path": REL,
+            "kind": "note",
+            "hash": server_hash,
+            "mtimeMs": server_mtime,
+            "size": SERVER_BODY.len(),
+        }]);
+
+        let pull_started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let started = Arc::clone(&pull_started);
+        let gate = Arc::clone(&release);
+        let path = REL.to_string();
+        let app = Router::new()
+            .route(
+                "/api/v1/manifest",
+                get(move || {
+                    let m = manifest.clone();
+                    async move { Json(m) }
+                }),
+            )
+            .route("/api/v1/tombstones", get(|| async { Json(serde_json::json!([])) }))
+            .route(
+                "/api/v1/pull",
+                post(move || {
+                    let started = Arc::clone(&started);
+                    let gate = Arc::clone(&gate);
+                    let path = path.clone();
+                    let b64 = server_b64.clone();
+                    let hash = server_hash.clone();
+                    async move {
+                        use std::sync::atomic::Ordering;
+                        started.store(true, Ordering::SeqCst);
+                        // 500ms 基线窗口 + 测试释放门：主线程即使被调度推迟，
+                        // 请求仍停在网络阶段（最多等 5s，避免测试挂死）
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        while !gate.load(Ordering::SeqCst)
+                            && std::time::Instant::now() < deadline
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        Json(serde_json::json!({
+                            "files": [{
+                                "path": path,
+                                "kind": "note",
+                                "contentBase64": b64,
+                                "hash": hash,
+                                "mtimeMs": server_mtime,
+                            }],
+                            "missing": [],
+                        }))
+                    }
+                }),
+            )
+            .route("/api/v1/push", post(|| async { Json(serde_json::json!([])) }));
+        let (port, listener) = crate::sync_server::bind_listener().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let l = tokio::net::TcpListener::from_std(listener).unwrap();
+                let _ = axum::serve(l, app).await;
+            });
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::blocking::Client::new();
+        for _ in 0..40 {
+            if c.get(format!("{base}/api/v1/manifest"))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        (base, pull_started, release)
+    }
+
+    /// B1 回归：冲突裁决的 `/pull` 是网络段（单次最长 30s），不得持 DB 锁。
+    /// 旧实现进 `resolve_conflicts` 就 `state.db.lock()`，冲突多 + 手机熄屏时
+    /// 保存/搜索/元数据全被拖住；这里在 /pull 延迟窗口内断言 DB 锁可拿。
+    #[test]
+    fn slow_conflict_pull_does_not_hold_db_lock() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let (base, pull_started, release) = start_slow_pull_server();
+        let (desk_dir, desk) = client_vault();
+        let note = note_create_op(&desk, "", "慢拉笔记").unwrap();
+        note_write_op(&desk, &note.path, "桌面版本").unwrap();
+        // 桌面更新（LWW 本地赢）→ resolve_conflicts 必然要 /pull 服务器版本
+        set_mtime(&desk, &note.path, fs_ops::now_ms() + 3_600_000);
+
+        let profile = ServerProfile {
+            id: "slow".into(),
+            name: "phone".into(),
+            url: base,
+            token: "test-token".into(),
+            last_success_at: None,
+            ..Default::default()
+        };
+        let desk_round = Arc::clone(&desk);
+        let profile_round = profile.clone();
+        let handle = std::thread::spawn(move || sync_round(&desk_round, &profile_round));
+
+        // 轮询等网络请求真正进入 /pull（此时旧实现已持 DB 锁，新实现必须没持）
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pull_started.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "10s 内 /pull 未开始：sync_round 没走到冲突拉取，测试构造失效"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let lock_free = desk.db.try_lock().is_ok();
+        release.store(true, Ordering::SeqCst);
+        assert!(
+            lock_free,
+            "冲突 /pull 进行中 DB 锁被占用：网络 IO 必须在锁外完成，否则保存/搜索全被拖住"
+        );
+
+        let report = handle.join().unwrap().expect("sync_round 应成功");
+        assert!(report.errors.is_empty(), "回合不应有错误: {:?}", report.errors);
+        assert_eq!(report.merges.len(), 1, "本地赢 → 一条合并事件: {report:?}");
+        assert_eq!(report.merges[0].winner, "local");
+        // 双份都在：原路径 = 桌面版本，冲突副本 = 服务器版本
+        assert_eq!(
+            std::fs::read_to_string(desk_dir.path().join(&note.path)).unwrap(),
+            "桌面版本"
+        );
+        let copy = &report.merges[0].loser_copy;
+        assert_eq!(
+            std::fs::read_to_string(desk_dir.path().join(copy)).unwrap(),
+            "服务器版本"
+        );
     }
 
     /// S4 回归：本地赢分支的冲突副本写失败（超长文件名 → NAME_MAX）后不得继续
