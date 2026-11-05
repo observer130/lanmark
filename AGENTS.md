@@ -21,12 +21,13 @@ cd src-tauri && cargo check
 cd src-tauri && cargo test
 
 scripts/android-check.sh         # Android 交叉编译门禁（不跑 gradle）
+scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64 debug 包 → 种子 → 滚动探针
 ```
 
 - **没有 lint / format 工具**：无 ESLint / Biome / prettier / rustfmt / clippy 配置，`lint` 脚本不存在。门禁只有 `tsc`（strict）与 `cargo check`。风格沿用既有文件：TS 双引号 + 分号 + 2 空格；Rust 走 rustfmt 默认。
 - **测试临时目录**：`scripts/env.sh` 把 `TMPDIR` 指到 `.cache/tmp`；测试/构建的临时文件不要依赖 `/tmp`（沙箱/CI 下容量与清理策略都不可控）。
 - **Windows 本机**：工具链在 `.cache/`（cargo/rustup/vs-buildtools），pwsh 下先 `. scripts/env.ps1`。dev 一律用 `pnpm tauri:dev`：它把 `WEBVIEW2_USER_DATA_FOLDER` 指到 `.cache\webview-profile`（安全软件会拦未签名 dev exe 读写 `%LOCALAPPDATA%\com.lanmark.app`），日志也落 `.cache\logs`。裸跑 `pnpm tauri dev` 会复现拦截。
-- **Android**：`source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`，产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。它装成独立应用 `com.lanmark.app.debug`（「Lanmark Debug」），与 release 共存。
+- **Android**：`source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`，产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。它装成独立应用 `com.lanmark.app.debug`（「Lanmark Debug」），与 release 共存。模拟器（x86_64）改用 `--target x86_64`，或直接用 `scripts/android-emu.sh`。
 - 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`；桌面 release 用 `scripts/lanmark-desktop.sh`。
 
 ## 改动边界
@@ -143,7 +144,28 @@ node scripts/cdp-eval.mjs "document.querySelector('.ProseMirror')?.clientWidth"
 
 - **debug 与 release 共存**：debug 包是 `com.lanmark.app.debug`（`applicationIdSuffix` 写在 `src-tauri/gen/android/build.gradle.kts` 的 `subprojects` 钩子，见硬约定 4），装它**不要卸载 release**——两者签名不同无法互相覆盖，卸载会清掉「应用目录」用户的笔记库。`app/src/debug/res/values/strings.xml` 改应用名「Lanmark Debug」；首启页「应用目录」路径要问插件（`vaultPicker.appDir()`），不要写死包名。
 - **探针必须用真触摸**：`Input.dispatchTouchEvent`，别用合成 MouseEvent；坐标要减 `visualViewport.offsetTop/Left`（软键盘弹出时页面被上推）。
-- **截图用 `adb exec-out screencap`**，不要 `Page.captureScreenshot`（真机 WebView 上会挂住）；`adb` 用绝对路径（探针不经 `env.sh`）。
+- **截图用 `adb exec-out screencap`**，不要 `Page.captureScreenshot`（真机 WebView 上会挂住）；`scripts/cdp-lib.mjs` 依次从 `$ADB` / `$ANDROID_SDK_ROOT` / `.cache/android-sdk` / `PATH` 找 adb，探针不必 source `env.sh`。
 - 探针别假设文档里有 `<p>`（前几轮会把段落转成标题），按「任意顶层块」取。
 - **Android 16 忽略 `windowSoftInputMode`**：`adjustResize` 不生效（强制 edge-to-edge），键盘弹出时页面被上推、顶栏会滚出可视区；`interactive-widget=resizes-content` 也无效。`visualViewport` 目前只用于判断键盘是否弹出（避开悬浮按钮），**顶栏锚定尚未做**。
 - 屏幕会休眠：黑截图 → `adb shell input keyevent KEYCODE_WAKEUP && adb shell wm dismiss-keyguard`；应用重启后 pid 变，`adb forward` 要重做（或先 `adb forward --remove-all`）。
+
+## 模拟器调试（16KB 页 / 布局走查）
+
+`scripts/android-emu.sh` 把「起 AVD → 装 x86_64 debug 包 → 写种子 → 跑滚动探针」固化了：
+
+```bash
+scripts/android-emu.sh all       # up + install + seed + probe（探针失败退出码非 0）
+scripts/android-emu.sh up        # 缺 AVD 则建，无头启动，断言 PAGE_SIZE=16384
+scripts/android-emu.sh install   # 构建/安装 x86_64 debug 包（--rebuild 强制重建）
+scripts/android-emu.sh seed      # config.json + 80 节长笔记 + 重启 App（启动时开库并 reindex）
+scripts/android-emu.sh probe     # adb forward + node scripts/probe-android.mjs
+scripts/android-emu.sh status | down
+```
+
+- **定位**：模拟器能替真机做布局/滚动/触控尺寸、WebView 渲染、edge-to-edge insets、APK 安装升级、16KB 镜像的走查；ROM 行为（MIUI 返回广播、杀后台/Doze）、SAF/MANAGE 存储、真实 IME、性能仍要真机。
+- **AVD**：`lanmark-37-16k`，镜像 `system-images;android-37.0;google_apis_ps16k;x86_64`（Android 17，16KB 页，视口 411×862 CSS）。用户数据持久，`-no-snapshot` 只禁快照不擦盘；要干净重来加 `-wipe-data`。
+- **SDK 解析**：`$ANDROID_SDK_ROOT`（须含 `emulator/`）→ `/opt/android-sdk` → `.cache/android-sdk`。Arch 上 AUR `android-emulator` 装到 `/opt/android-sdk`，但**不带 platform-tools**，模拟器启动会 FATAL `Broken AVD system path`，需 `sudo /opt/android-sdk/cmdline-tools/latest/bin/android sdk install --sdk=/opt/android-sdk platform-tools`。sudo 下 `android` CLI 默认 `--sdk=$HOME`（=`/root/Android/Sdk`），**必须显式 `--sdk=/opt/android-sdk`**。
+- **必须 x86_64 包**：模拟器是 x86_64，release 的 aarch64 APK 装不上；devtools 也只有 debug 包有。
+- **种子两个坑**：① App 配置在 `/data/user/0/<pkg>/config.json`，不是 `files/config.json`；② vault 目录必须让 App 自己建（IPC `vault_ensure_dir`）——`run-as mkdir`/`adb push` 在 `/storage/emulated` 上会被 SELinux/FUSE 拒（`mkdir: '/storage/emulated': Permission denied`），而 shell 属主的目录 App 打开报 `Permission denied (os error 13)`。笔记文件用 `adb push` 进 App 属主目录即可（只读场景）。
+- **16KB**：ps16k 镜像 `getconf PAGE_SIZE` = 16384；debug APK 的 `.so` ELF 段已 0x4000 对齐，但本地 debug 路径的 zip 条目没做 16KB zipalign（`data_off % 16384 ≠ 0`），模拟器放行；**发给真 16KB 设备请走 release 包**（release APK 已验证 `% 16384 = 0`）。
+- **探针**：`scripts/probe-android.mjs`（真机/模拟器通用，`--note` 指定侧栏文件）只认真触摸滑动的 `scrollTop` 位移，并断言 `mainH ≤ innerH+2`（守住 `min-h-0`）。截图落 `.cache/screenshots/emu-probe-{wysiwyg,read}.png`。
