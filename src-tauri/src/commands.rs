@@ -162,6 +162,11 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
     fs_ops::ensure_layout(path).map_err(|e| format!("初始化 vault 失败: {e}"))?;
     let db_path = path.join(fs_ops::META_DIR).join("lanmark.db");
     let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {e}"))?;
+    // A3：显式固定 5s busy_timeout（rusqlite 0.40 的 open 恰好默认也是 5000ms，
+    // 但那是库实现细节，不能当契约）。双开 / 同步回合并发写时等待锁释放，
+    // 而不是立刻 `database is locked`。
+    conn.busy_timeout(std::time::Duration::from_millis(5_000))
+        .map_err(|e| format!("设置数据库忙等待失败: {e}"))?;
     // WAL 在部分共享存储（Android 外部存储）上不可用：回退必须留痕，
     // 否则「搜索偶发锁库」一类问题无从排查
     if let Err(e) = conn.pragma_update(None, "journal_mode", "WAL") {
@@ -576,6 +581,19 @@ mod e2e_tests {
         let state = Arc::new(AppState::default());
         open_vault_at(&state, dir.path()).unwrap();
         (dir, state)
+    }
+
+    /// A3 回归：开库即设 5s busy_timeout，双开 / 同步回合并发写不再立刻
+    /// `database is locked`（SQLite 默认 0 = 立即失败）。
+    #[test]
+    fn open_vault_sets_busy_timeout() {
+        let (_dir, state) = opened_vault();
+        let conn = state.db.lock().unwrap();
+        let conn = conn.as_ref().unwrap();
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, 5000, "busy_timeout 应为 5000ms");
     }
 
     #[test]
