@@ -372,7 +372,8 @@ async fn pair(
     // 配置本体从当前 vault 实时读（切库后旧库的码/token 不再有效）
     let serial = ctx.cfg.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
     let (vault, mut cfg) = ctx.current_config()?;
-    if body.code.trim() != cfg.pairing_code {
+    // 常量时间比较（与 token 校验同一纪律）：避免按字节短路泄露前缀匹配长度
+    if !const_eq(body.code.trim(), &cfg.pairing_code) {
         drop(serial);
         let mut guard = ctx.pair_guard.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
         guard.failures += 1;
@@ -1496,6 +1497,44 @@ mod tests {
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = r.text().unwrap();
         assert!(body.contains("后重试"), "{body}");
+    }
+
+    /// C2 回归：配对码比较改走 `const_eq`（常量时间）后，可观察语义必须不变——
+    /// 近似码仍判不等、首尾空白仍先 trim 再比较。
+    #[test]
+    fn pair_const_eq_keeps_accept_and_reject_semantics() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, code) = test_util::start_phone_server(dir.path(), app);
+        let client = reqwest::blocking::Client::new();
+        wait_ready(&client, &base);
+
+        // 末位改掉一位 → 仍必须 403（常量时间比较也要判不等）
+        let mut near_miss: Vec<char> = code.chars().collect();
+        let last = near_miss[7];
+        near_miss[7] = if last == '0' { '1' } else { '0' };
+        let near_miss: String = near_miss.into_iter().collect();
+        let r = client
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": near_miss }))
+            .send()
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "近似码不得通过");
+
+        // 首尾空白 → trim 后与正确码完全一致 → 200 + token
+        let r = client
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": format!("  {code}  ") }))
+            .send()
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "trim 后正确码应通过");
+        let token = r.json::<serde_json::Value>().unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!token.is_empty());
     }
 
     #[test]
