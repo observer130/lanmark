@@ -69,6 +69,16 @@ pub fn has_dot_segment(path: &str) -> bool {
 /// delete 同理。这里用 canonicalize 做真路径判定：路径尚不存在（新建）时
 /// 以最近存在的祖先目录为准，不存在段拼回规范化祖先之后。
 pub fn resolve_in_vault(vault: &Path, rel: &str) -> std::io::Result<PathBuf> {
+    resolve_in_vault_impl(vault, rel, false)
+}
+
+/// 回收站恢复专用：显式放行 `.lanmark/trash/...` 点段，但保留「不越出 vault」
+/// 的符号链接校验（`.lanmark/trash` 若被换成外链，仍不得写到 vault 外）。
+fn resolve_in_vault_allow_dot(vault: &Path, rel: &str) -> std::io::Result<PathBuf> {
+    resolve_in_vault_impl(vault, rel, true)
+}
+
+fn resolve_in_vault_impl(vault: &Path, rel: &str, allow_dot: bool) -> std::io::Result<PathBuf> {
     let abs = safe_join(vault, rel)?;
     // 向上找最近存在的祖先（abs 本身可能尚不存在）
     let mut existing = abs.clone();
@@ -94,6 +104,20 @@ pub fn resolve_in_vault(vault: &Path, rel: &str) -> std::io::Result<PathBuf> {
             "路径经符号链接越出 vault",
         ));
     }
+    // A4：仅挡「越出 vault」不够——vault 内 `pics -> .lanmark` 时
+    // `pics/sync.json` 仍落在 vault 内，会绕过协议层的点目录检查读到配对码/token。
+    // 以 canonicalize 后的相对段判定，挡住一切「经链接进入点目录」的路径。
+    let rel_canon = canon.strip_prefix(&canon_vault).unwrap_or(&canon);
+    if !allow_dot
+        && rel_canon
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "路径经符号链接进入点目录（拒绝访问）",
+        ));
+    }
     // 校验通过：返回原拼接路径（后续 rel 计算以 vault 前缀为准，
     // 若 vault 本身含符号链接段，canonicalize 后的路径无法 strip_prefix）
     Ok(abs)
@@ -113,7 +137,18 @@ pub fn rel_to_string(p: &Path) -> String {
 }
 
 pub fn ensure_layout(vault: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(vault.join(META_DIR))?;
+    // A4：`.lanmark` 必须是真实目录。若它是符号链接（例如指向 vault 外），
+    // 索引库、tombstone 账本、配对信息与回收站都会被写到 vault 之外。
+    let meta = vault.join(META_DIR);
+    if let Ok(m) = fs::symlink_metadata(&meta) {
+        if m.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{META_DIR} 不能是符号链接（元数据必须留在 vault 内）"),
+            ));
+        }
+    }
+    fs::create_dir_all(&meta)?;
     fs::create_dir_all(vault.join(ASSETS_DIR))?;
     fs::create_dir_all(vault.join(TRASH_DIR))?;
     Ok(())
@@ -494,10 +529,9 @@ fn snapshot_tombstones_for_entry(
 /// 把快照写成 tombstone（删除时刻 = 现在）。仅在 `fs::rename` 成功后调用。
 fn write_tombstones(vault: &Path, snapshot: &[(String, String)]) {
     let now = now_ms();
-    for (f, h) in snapshot {
-        if let Err(e) = crate::sync::record_tombstone(vault, f, h, now) {
-            log::warn!("记 tombstone 失败 {f}: {e}");
-        }
+    // 批量 upsert：一次 load + 一次 atomic save（逐条版会整读整写账本 N 次）
+    if let Err(e) = crate::sync::record_tombstones(vault, snapshot, now) {
+        log::warn!("记 tombstone 失败（{} 条）: {e}", snapshot.len());
     }
 }
 
@@ -853,7 +887,10 @@ pub fn trash_clear(vault: &Path) -> std::io::Result<usize> {
 /// 文件在原路径复活，不清的话下一次同步回合会把恢复又「删」给对端。
 pub fn trash_restore(vault: &Path, trash_rel: &str, conn: &Connection) -> std::io::Result<String> {
     let trash_dir = safe_join(vault, TRASH_DIR)?;
-    let abs = resolve_in_vault(vault, trash_rel)?;
+    // 点目录内部路径：resolve_in_vault 会拒绝点段（A4），这里显式放行
+    // `.lanmark/trash` 但仍做符号链接逃逸校验（见 resolve_in_vault_allow_dot）；
+    // 下方父目录检查保持「只能从回收站顶层恢复」的约束。
+    let abs = resolve_in_vault_allow_dot(vault, trash_rel)?;
     // 只恢复回收站顶层条目（trash_list 只产出一层；防「.lanmark/trash」外借道）
     if abs.parent() != Some(trash_dir.as_path()) {
         return Err(std::io::Error::new(
@@ -1181,6 +1218,19 @@ fn index_note_file(vault: &Path, rel: &str, conn: &Connection) -> std::io::Resul
     let title = extract_frontmatter_title(&content).unwrap_or_else(|| title_from_stem(&name));
     db::upsert_file(conn, rel, &title, &content, mtime, &hash, true)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+/// 列出 vault 下全部笔记（vault 相对路径，排序保证确定性）。
+///
+/// 同步清单用它而不是 DB：vault 文件是唯一事实源，常驻期间外部（编辑器/
+/// 文件管理器）新建、删除、改名也能立刻反映，不会被 DB 旧行复活。
+/// 复用 `collect_notes` 的纪律：跳过点目录（含 `.lanmark`）与符号链接。
+pub fn collect_note_paths(vault: &Path) -> std::io::Result<Vec<String>> {
+    let mut set = std::collections::HashSet::new();
+    collect_notes(vault, vault, &mut set)?;
+    let mut out: Vec<String> = set.into_iter().collect();
+    out.sort();
+    Ok(out)
 }
 
 fn collect_notes(
@@ -1569,6 +1619,69 @@ mod tests {
         assert!(resolve_in_vault(vault, "循环/ok.md").is_ok());
         // 字符串逃逸仍被挡
         assert!(resolve_in_vault(vault, "../x").is_err());
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A4 回归：vault 内的符号链接不得成为进入点目录的后门。
+    /// `pics -> .lanmark` 时，`pics/sync.json` 能通过「不越出 vault」判定，
+    /// 从而以普通笔记路径读走配对码/token。
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_symlink_into_dot_dir() {
+        let (tmp, _conn) = setup();
+        let vault = tmp.path();
+        std::fs::write(vault.join(".lanmark/sync.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(".lanmark", vault.join("pics")).unwrap();
+
+        let err = resolve_in_vault(vault, "pics/sync.json").unwrap_err();
+        assert!(
+            err.to_string().contains("点目录"),
+            "必须拒绝经链接进入点目录: {err}"
+        );
+        assert!(resolve_in_vault(vault, ".lanmark/sync.json").is_err(), "直接点目录也拒绝");
+        // 链接本身也不能被当作条目解析
+        assert!(resolve_in_vault(vault, "pics").is_err());
+    }
+
+    /// A4 回归：vault 内指向「非点目录」的符号链接仍按原约定放行，
+    /// 且返回未 canonicalize 的拼接路径（rel 计算依赖它）。
+    #[cfg(unix)]
+    #[test]
+    fn resolve_allows_inner_symlink_to_normal_dir() {
+        let (tmp, _conn) = setup();
+        let vault = tmp.path();
+        std::fs::create_dir_all(vault.join("真实")).unwrap();
+        std::fs::write(vault.join("真实/a.md"), "x").unwrap();
+        std::os::unix::fs::symlink("真实", vault.join("别名")).unwrap();
+
+        let abs = resolve_in_vault(vault, "别名/a.md").unwrap();
+        assert_eq!(abs, vault.join("别名/a.md"), "返回原拼接路径（不 canonicalize）");
+        assert_eq!(read_note(vault, "别名/a.md").unwrap(), "x");
+    }
+
+    /// A4 回归：ensure_layout 拒绝把 `.lanmark` 做成符号链接
+    /// （否则元数据/账本/索引会写到 vault 外）。
+    #[cfg(unix)]
+    #[test]
+    fn ensure_layout_rejects_symlinked_meta_dir() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path();
+        let outside = tmp
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("outside-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, vault.join(".lanmark")).unwrap();
+
+        let err = ensure_layout(vault).unwrap_err();
+        assert!(err.to_string().contains(".lanmark"), "错误须点明 .lanmark: {err}");
+        assert!(err.to_string().contains("符号链接"), "错误须说明链接: {err}");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "不得往 vault 外写元数据"
+        );
         let _ = std::fs::remove_dir_all(&outside);
     }
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::commands::{with_db, with_vault};
+use crate::commands::with_vault;
 use crate::fs_ops;
 use crate::vault::AppState;
 
@@ -148,14 +148,33 @@ pub fn save_tombstones(vault: &Path, list: &[Tombstone]) -> std::io::Result<()> 
 
 /// 记 tombstone（按 path upsert）。`deleted_ms` = 删除时刻
 pub fn record_tombstone(vault: &Path, path: &str, hash: &str, deleted_ms: i64) -> std::io::Result<()> {
+    record_tombstones(vault, &[(path.to_string(), hash.to_string())], deleted_ms)
+}
+
+/// 批量记 tombstone：**一次 load、批量 upsert、一次 atomic save**。
+///
+/// 文件夹删除/改名会给每个同步单元记墓碑；逐条调 `record_tombstone` 会把
+/// `tombstones.json` 整读整写 N 次（大文件夹删除时主线程 I/O 成倍放大）。
+/// 与逐条版同语义：同 path 覆盖旧墓碑，`deleted_ms` 统一为本批删除时刻。
+pub fn record_tombstones(
+    vault: &Path,
+    entries: &[(String, String)],
+    deleted_ms: i64,
+) -> std::io::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
     let mut list = load_tombstones(vault);
-    list.retain(|t| t.path != path);
-    list.push(Tombstone {
-        path: path.into(),
-        hash: hash.into(),
-        mtime_ms: deleted_ms,
-        deleted_at: deleted_ms,
-    });
+    // 先剔除本批涉及的旧条目（同 path 在批内重复时后写覆盖先写），再统一追加
+    list.retain(|t| !entries.iter().any(|(p, _)| *p == t.path));
+    for (path, hash) in entries {
+        list.push(Tombstone {
+            path: path.clone(),
+            hash: hash.clone(),
+            mtime_ms: deleted_ms,
+            deleted_at: deleted_ms,
+        });
+    }
     save_tombstones(vault, &list)
 }
 
@@ -186,49 +205,36 @@ pub fn purge_expired_tombstones(vault: &Path, now_ms: i64) -> std::io::Result<us
 
 // ---------- 清单 ----------
 
-/// 本地清单：笔记来自 DB 索引（write_note/reindex 维护 hash），附件 walk assets/。
+/// 本地清单：笔记 walk 磁盘（vault 文件是唯一事实源），附件 walk assets/。
+///
+/// 不再查 DB：手机端（服务器）常驻期间只在开库 reindex，外部新建/删除/改名
+/// 若以 DB 为准就同步不出去，外部删除还会被桌面「推回来」复活。
+/// 逐文件读磁盘字节算 hash/mtime/size（读失败跳过，与旧实现一致）。
 pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
     let mut out = Vec::new();
     with_vault(state, |vault| {
-        with_db(state, |conn| {
-            // 笔记：DB 是可重建索引，hash 由 M1 写路径维护
-            let rows: Vec<(String, String, i64)> = {
-                let mut stmt = conn
-                    .prepare("SELECT path, hash, mtime_ms FROM files WHERE is_note=1")
-                    .map_err(|e| e.to_string())?;
-                let list = stmt
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                    .map_err(|e| e.to_string())?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(|e| e.to_string())?;
-                list
+        for path in fs_ops::collect_note_paths(vault).map_err(|e| e.to_string())? {
+            let abs = vault.join(&path);
+            let Ok(bytes) = std::fs::read(&abs) else { continue };
+            let (mtime_ms, size) = match std::fs::metadata(&abs) {
+                Ok(m) => (
+                    m.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                    m.len() as i64,
+                ),
+                Err(_) => (0, 0),
             };
-            for (path, _hash, _mtime) in rows {
-                // 磁盘是唯一事实源：DB 的 hash/body 只服务搜索，可能因外部改动
-                // （其他 App/编辑器直接改文件）与磁盘脱节——同步清单必须以磁盘为准
-                let abs = vault.join(&path);
-                let Ok(bytes) = std::fs::read(&abs) else { continue };
-                let (mtime_ms, size) = match std::fs::metadata(&abs) {
-                    Ok(m) => (
-                        m.modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_millis() as i64)
-                            .unwrap_or(0),
-                        m.len() as i64,
-                    ),
-                    Err(_) => (0, 0),
-                };
-                out.push(FileMeta {
-                    path,
-                    kind: "note".into(),
-                    hash: fs_ops::content_hash(&bytes),
-                    mtime_ms,
-                    size,
-                });
-            }
-            Ok(())
-        })?;
+            out.push(FileMeta {
+                path,
+                kind: "note".into(),
+                hash: fs_ops::content_hash(&bytes),
+                mtime_ms,
+                size,
+            });
+        }
         // 附件：内容寻址（assets/<sha16>.<ext>），不进 DB，直接 walk
         for meta in asset_walk(vault).map_err(|e| e.to_string())? {
             out.push(meta);
@@ -465,6 +471,57 @@ mod tests {
         assert_eq!(list[0].path, "assets/ok.png");
     }
 
+    /// A1 回归：批量记墓碑 = 一次 load + 一次 atomic save。
+    /// 此前 entry_delete 对文件夹里每个文件各调一次 `record_tombstone`，
+    /// N 个文件就要整读整写 N 次 tombstones.json（大文件夹删除时主线程卡顿）。
+    #[test]
+    fn record_tombstones_batches_into_one_ledger() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path();
+        fs_ops::ensure_layout(vault).unwrap();
+
+        let entries = vec![
+            ("工作/一.md".to_string(), "h1".to_string()),
+            ("工作/二.md".to_string(), "h2".to_string()),
+        ];
+        record_tombstones(vault, &entries, 1_789_633_800_000).unwrap();
+
+        let ts = load_tombstones(vault);
+        assert_eq!(ts.len(), 2, "批量写入两条墓碑: {ts:?}");
+        let by_path = |p: &str| ts.iter().find(|t| t.path == p).unwrap();
+        assert_eq!(by_path("工作/一.md").hash, "h1");
+        assert_eq!(by_path("工作/二.md").hash, "h2");
+        assert!(ts.iter().all(|t| t.deleted_at == 1_789_633_800_000));
+
+        // 账本只有一个文件，且内容是可整体反序列化的数组（不是多份拼接）
+        let ledger = vault.join(".lanmark/tombstones.json");
+        assert!(ledger.is_file(), "账本必须落盘");
+        let raw = std::fs::read_to_string(&ledger).unwrap();
+        let parsed: Vec<Tombstone> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+
+        // 第二批：同 path 覆盖（不膨胀），新 path 追加
+        record_tombstones(
+            vault,
+            &[
+                ("工作/一.md".to_string(), "h1b".to_string()),
+                ("根.md".to_string(), "h3".to_string()),
+            ],
+            1_789_633_900_000,
+        )
+        .unwrap();
+        let ts = load_tombstones(vault);
+        assert_eq!(ts.len(), 3, "同路径覆盖、新路径追加: {ts:?}");
+        let n1 = ts.iter().find(|t| t.path == "工作/一.md").unwrap();
+        assert_eq!(n1.hash, "h1b", "同路径墓碑取最新一次");
+        assert_eq!(n1.deleted_at, 1_789_633_900_000);
+
+        // 空批次不写盘（清理路径不应凭空造账本）
+        let empty_vault = tempfile::TempDir::new().unwrap();
+        fs_ops::ensure_layout(empty_vault.path()).unwrap();
+        record_tombstones(empty_vault.path(), &[], 1).unwrap();
+        assert!(!empty_vault.path().join(".lanmark/tombstones.json").exists());
+    }
 
     #[test]
     fn version_tuple_ordering() {
@@ -535,6 +592,59 @@ mod tests {
         assert_eq!(asset_meta.size, 8);
         // .lanmark 与回收站不出现在清单
         assert!(!paths.iter().any(|p| p.starts_with(".lanmark")));
+    }
+
+    /// A2 回归：服务端清单以磁盘为准——外部（不经命令/DB）新建/删除的笔记
+    /// 必须立刻反映在 `local_manifest`；DB 残留旧行不得复活已删文件。
+    /// 手机端常驻期间只在开库 reindex，外部增删改必须靠这条路径同步。
+    #[test]
+    fn local_manifest_follows_disk_not_db() {
+        use crate::commands::open_vault_at;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let state = Arc::new(AppState::default());
+        open_vault_at(&state, dir.path()).unwrap();
+        let s = &state;
+
+        // 外部新建：不经过 note_write_op，DB 里没有这一行
+        std::fs::write(dir.path().join("外部新建.md"), "外部内容").unwrap();
+        let manifest = local_manifest(s).unwrap();
+        let paths: Vec<&str> = manifest.iter().map(|m| m.path.as_str()).collect();
+        let m = manifest
+            .iter()
+            .find(|m| m.path == "外部新建.md")
+            .unwrap_or_else(|| panic!("磁盘上的笔记必须在清单: {paths:?}"));
+        assert_eq!(m.hash, fs_ops::content_hash("外部内容".as_bytes()), "hash 取自磁盘");
+        assert_eq!(m.size, "外部内容".len() as i64, "size 取自磁盘");
+        assert!(m.mtime_ms > 0, "mtime 取自磁盘");
+
+        // 外部删除：磁盘没了就不能再出现（即便 DB 还有旧行）
+        std::fs::remove_file(dir.path().join("外部新建.md")).unwrap();
+        let manifest = local_manifest(s).unwrap();
+        assert!(
+            !manifest.iter().any(|m| m.path == "外部新建.md"),
+            "已删除文件不得被清单复活: {manifest:?}"
+        );
+
+        // DB 残留一行、磁盘没有 → 不出现
+        {
+            let conn = s.db.lock().unwrap();
+            let conn = conn.as_ref().unwrap();
+            crate::db::upsert_file(conn, "幽灵.md", "幽灵", "x", 1, "deadbeef", true).unwrap();
+        }
+        let manifest = local_manifest(s).unwrap();
+        assert!(!manifest.iter().any(|m| m.path == "幽灵.md"), "DB 孤行不得进清单");
+
+        // 磁盘有、DB 残留旧 hash → 以磁盘为准
+        std::fs::write(dir.path().join("真实.md"), "真实内容").unwrap();
+        {
+            let conn = s.db.lock().unwrap();
+            let conn = conn.as_ref().unwrap();
+            crate::db::upsert_file(conn, "真实.md", "真实", "旧", 1, "deadbeef", true).unwrap();
+        }
+        let manifest = local_manifest(s).unwrap();
+        let m = manifest.iter().find(|m| m.path == "真实.md").unwrap();
+        assert_eq!(m.hash, fs_ops::content_hash("真实内容".as_bytes()), "hash 以磁盘为准");
     }
 
     #[test]
