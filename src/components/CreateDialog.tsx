@@ -71,7 +71,7 @@ function DirPicker({
       window.removeEventListener("pointerdown", onDown, true);
       window.removeEventListener("keydown", onKey);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // 依赖只留 open：onDown/onKey 闭包捕获的都是稳定引用，重挂会打断按下手势
   }, [open]);
 
   // 列表展开时把当前项滚进可视区（只在展开那一刻，之后不干预滚动：
@@ -81,7 +81,6 @@ function DirPicker({
     listRef.current
       ?.querySelector<HTMLElement>(`[data-index="${active}"]`)
       ?.scrollIntoView({ block: "nearest" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const pick = (dir: string) => {
@@ -185,7 +184,7 @@ export function CreateDialog() {
     setName(pendingCreate.kind === "note" ? "未命名" : "新建文件夹");
     setDir(pendingCreate.parentDir);
     setBusy(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // 只在「待创建项」变化时重置；name/dir 是用户正在编辑的值，不能进依赖
   }, [pendingCreate]);
 
   // Esc 关闭（位置下拉展开时，Esc 只收起下拉——由 DirPicker 自行处理）

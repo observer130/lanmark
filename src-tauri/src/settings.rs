@@ -25,6 +25,8 @@ const NEW_NOTE_LOCATION_KEYS: [&str; 2] = ["root", "last"];
 /// 自动保存延迟档位（ms）：仅改防抖时长，不改尾沿纪律。
 /// M5-3 整体调大（原 0.3/0.7/1.5/3s）；旧值归一到最近档（见 `nearest_autosave`）。
 const AUTOSAVE_KEYS: [u32; 4] = [1500, 3000, 10_000, 20_000];
+/// 回收站保留天数档位（与前端 `TRASH_RETENTION_OPTIONS` 同序同值）+ 0 = 从不
+const TRASH_RETENTION_GEARS: [u32; 3] = [7, 30, 90];
 
 // ---------- 数据结构 ----------
 
@@ -220,12 +222,26 @@ impl EditorPrefs {
 }
 
 impl StoragePrefs {
-    /// 保留天数上限 3650（10 年）：再大等于「从不」，但 `0` 才是显式的「从不」，
-    /// 避免超大数值被前端展示成无意义的数字。
+    /// 回收站保留天数归一到三档 + 从不（与前端 `TRASH_RETENTION_OPTIONS` 同值）。
+    ///
+    /// 此前只做 `> 3650` 上限截断：手改配置或旧版本留下的 14 天这类值会被原样
+    /// 接受，而设置页只有 7/30/90/从不四个按钮 —— 结果一个都不高亮。与 autosave
+    /// 同一纪律：非法档位归到最近的合法档，绝不留在「界面表达不了」的中间值。
     pub fn normalize(mut self) -> Self {
-        if self.trash_retention_days > 3650 {
-            self.trash_retention_days = 3650;
-        }
+        let d = self.trash_retention_days;
+        self.trash_retention_days = if d == 0 {
+            0 // 0 = 从不，是显式合法值
+        } else {
+            let mut best = TRASH_RETENTION_GEARS[0];
+            for &k in &TRASH_RETENTION_GEARS {
+                if (i64::from(d) - i64::from(k)).abs()
+                    < (i64::from(d) - i64::from(best)).abs()
+                {
+                    best = k;
+                }
+            }
+            best
+        };
         self
     }
 }
@@ -347,7 +363,7 @@ mod tests {
         let s = StoragePrefs { trash_retention_days: 0 }.normalize();
         assert_eq!(s.trash_retention_days, 0, "0 = 从不，是合法值");
         let s = StoragePrefs { trash_retention_days: 100_000 }.normalize();
-        assert_eq!(s.trash_retention_days, 3650);
+        assert_eq!(s.trash_retention_days, 90, "超大值归到最大档，而不是界面表达不了的 3650");
     }
 
     #[test]

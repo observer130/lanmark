@@ -20,7 +20,7 @@ import { AppMark } from "./AppMark";
 import { Pencil } from "lucide-react";
 
 /**
- * 同步区收纳（方案 B，用户选定 2026-09-21，design/direction-approved.md）：
+ * 同步区收纳（选定方案：不设全窗底栏，侧栏底边单行，管理/配对在展开面板里）：
  * 侧栏底边只剩一行常驻条（状态点 + 自动同步开关 + 立即同步 + 展开箭头），
  * 服务器管理 / 配对 / 同步报告收进点击行后向上弹出的面板。
  * 视觉沿用「晨窗」基线；只动布局收纳，不动 store 与 Rust 逻辑。
@@ -283,7 +283,6 @@ function ClientPanel() {
   useEffect(() => {
     void scanLan().finally(() => setScanRan(true));
     // 只在挂载时扫一次：后续由「自动查找」按钮驱动
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const canPair = url.trim().startsWith("http") && code.trim().length === 8;

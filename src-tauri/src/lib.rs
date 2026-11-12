@@ -1,4 +1,3 @@
-mod bridge;
 mod commands;
 mod db;
 mod fs_ops;
@@ -22,15 +21,6 @@ use std::sync::Arc;
 use tauri::Emitter;
 use tauri::Manager;
 use vault::AppState;
-
-/// M0 双向桥演示保留（ping 的事件模式将被同步引擎复用）
-#[tauri::command]
-fn ping(app: tauri::AppHandle, message: String) -> Result<bridge::EchoPayload, String> {
-    let payload = bridge::build_echo(&message, bridge::now_unix_ms(), "lanmark-core");
-    app.emit(bridge::ECHO_EVENT, payload.clone())
-        .map_err(|e| e.to_string())?;
-    Ok(payload)
-}
 
 /// 日志目标：debug 构建落仓库 `.cache/logs`（本机安全软件拦截未签名 dev exe
 /// 写 AppData，见 run() 内注释）；release 走标准 LogDir。其余平台恒为 LogDir。
@@ -158,7 +148,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            ping,
             settings_cmd::settings_get,
             settings_cmd::settings_patch,
             settings_cmd::settings_reset,
