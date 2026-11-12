@@ -1008,7 +1008,7 @@ mod e2e_tests {
     /// 回原位 → 读得到、搜得到、统计归零
     #[test]
     fn trash_list_and_restore_roundtrip() {
-        let (dir, state) = opened_vault();
+        let (_dir, state) = opened_vault();
         let s = &state;
         let note = note_create_op(s, "", "会丢的笔记").unwrap();
         note_write_op(s, &note.path, "找回 我自己").unwrap();

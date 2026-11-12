@@ -196,11 +196,21 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
 
 // ---------- HTTP 封装 ----------
 
-fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+/// 进程内复用的 HTTP 客户端。
+///
+/// 两处修正：① 此前每个请求都 `Client::builder()` 新建一个，连接不复用、
+/// 每批 pull/push 都要重新握手；② 构建失败原本走 `.expect()`，而 release 是
+/// `panic = "abort"`（Cargo.toml），一次 TLS 初始化失败就是整进程退出。
+fn client() -> Result<reqwest::blocking::Client, String> {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c.clone()); // Client 内部是 Arc，clone 很便宜
+    }
+    let built = reqwest::blocking::Client::builder()
         .timeout(CLIENT_TIMEOUT)
         .build()
-        .expect("构建 HTTP 客户端失败")
+        .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
+    Ok(CLIENT.get_or_init(|| built).clone())
 }
 
 fn auth_bearer(token: &str) -> String {
@@ -216,7 +226,7 @@ pub fn pair(base_url: &str, code: &str) -> Result<(String, String), String> {
         token: String,
         name: String,
     }
-    let resp = client()
+    let resp = client()?
         .post(format!("{url}/api/v1/pair"))
         .json(&serde_json::json!({ "code": code.trim() }))
         .send()
@@ -527,7 +537,7 @@ impl RoundCore {
         }
 
         // 1. 双侧清单 + 客户端基线 + 服务器 tombstones
-        let c = client();
+        let c = client()?;
         let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
         let server_tombstones = fetch_tombstones(&c, &url, &profile.token)?;
 
@@ -2110,7 +2120,7 @@ mod tests {
         assert_eq!(r0.pulled.len(), 1);
 
         // 1) 客户端先取 manifest（此刻服务器还是「手机版本一」）
-        let c = client();
+        let c = client().unwrap();
         let manifest = fetch_manifest(&c, &base, &token).unwrap();
         let stale_hash = manifest.iter().find(|m| m.path == note.path).unwrap().hash.clone();
 
@@ -2438,7 +2448,7 @@ mod tests {
         note_write_op(&phone, &p.path, "基础").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let c = client();
+        let c = client().unwrap();
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -2985,7 +2995,7 @@ mod tests {
                 let _ = axum::serve(tl, axum::Router::new()).await;
             });
         });
-        let c = client();
+        let c = client().unwrap();
         let base = format!("http://127.0.0.1:{port}");
         // 等就绪
         for _ in 0..40 {
@@ -3266,7 +3276,7 @@ mod tests {
         assert_eq!(std::fs::read(phone_dir.path().join(foreign)).unwrap(), vec![0xC4, 0xE3, 0xBA, 0xC3]);
 
         // 服务器 manifest 与 pull 字节一致（修复1+2：磁盘真相）
-        let c = client();
+        let c = client().unwrap();
         let manifest = fetch_manifest(&c, &base, &token).unwrap();
         let asset_meta = manifest.iter().find(|m| m.path == asset_path).unwrap();
         let served = std::fs::read(phone_dir.path().join(asset_path)).unwrap();
@@ -3292,7 +3302,7 @@ mod tests {
         // 外部直接改文件（绕过 write_note，DB 保持旧值）
         std::fs::write(phone_dir.path().join(&note.path), "外部改过的内容").unwrap();
 
-        let c = client();
+        let c = client().unwrap();
         let manifest = fetch_manifest(&c, &base, &token).unwrap();
         let meta = manifest.iter().find(|m| m.path == note.path).unwrap();
         assert_eq!(

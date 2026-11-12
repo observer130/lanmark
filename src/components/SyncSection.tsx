@@ -669,10 +669,20 @@ export function SyncSection() {
       {/* 常驻单行：点击展开/收起面板；行内控件各自拦截冒泡 */}
       <div
         role="button"
+        tabIndex={0}
         aria-expanded={open}
         title={error && !open ? error : "同步设置与状态"}
         onClick={() => setOpen((o) => !o)}
-        className="flex h-[42px] cursor-pointer select-none items-center gap-2 border-t border-line px-2.5 text-xs text-ink-2 hover:bg-canvas/60"
+        // 键盘可达：此前只有 onClick，Tab 到不了、Enter/Space 也打不开面板
+        //（配对与服务器管理都在面板里）。行内 switch 的按键不冒泡到这里。
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+        className="flex h-[42px] cursor-pointer select-none items-center gap-2 border-t border-line px-2.5 text-xs text-ink-2 hover:bg-canvas/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
       >
         <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} />
         <span className="shrink-0 font-medium">{label}</span>

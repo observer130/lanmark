@@ -2,8 +2,9 @@
 //! 手机 = 局域网同步中心节点；桌面端（客户端）发现/配对后驱动双向同步回合。
 //! 端点幂等可重放；token 仅防误连（传输全程明文 HTTP——自签 TLS + 证书固定至今没做，仍是未清偿项）。
 //!
-//! 并发说明：单客户端串行同步（锁在客户端侧），文件写入走 M1 的 tmp+rename，
-//! handler 内联阻塞 IO 在当前量级（1e3-1e4 文件）是毫秒级，可接受。
+//! 并发说明：客户端侧串行同步；服务端 push/delete 另由 `ServerCtx::write_lock`
+//! 串行化（handler 跑在 spawn_blocking 线程池里，并非"单线程 runtime 天然串行"）。
+//! 文件写入走 M1 的 tmp+rename。
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
@@ -674,9 +675,13 @@ pub struct PushBody {
 async fn push(
     State(ctx): State<Arc<ServerCtx>>,
     headers: HeaderMap,
-    Json(body): Json<PushBody>,
+    // 先收原始字节、**验签后再解析**：用 `Json` extractor 时反序列化发生在
+    // handler 之前，未配对设备也能塞 64 MiB 让服务器完整解析（内存放大打满）。
+    body: axum::body::Bytes,
 ) -> Result<Json<Vec<PushResult>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
+    let body: PushBody = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("请求体解析失败: {e}")))?;
     // 逐文件落盘（含 DB 写）移出单线程 runtime
     let ctx2 = ctx.clone();
     let results = tokio::task::spawn_blocking(move || push_blocking(&ctx2, &body.files))
