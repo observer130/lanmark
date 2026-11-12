@@ -1240,7 +1240,11 @@ fn collect_notes(
 ) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
+        // 非 UTF-8 文件名无法在清单/协议里表达：直接跳过（评审决策：不带原始字节）。
+        // 用 lossy 转出来的路径读不回原文件，会每回合失败、永不收敛。
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
         if name == META_DIR || name.starts_with('.') {
             continue;
         }
@@ -2057,4 +2061,20 @@ mod tests {
         assert!(!trash_index_path(vault).exists());
         assert!(vault.join(TRASH_DIR).is_dir(), "清空后目录保留");
     }
+    /// 回归（P2-A3）：非 UTF-8 文件名不进同步清单（决策：不带原始字节）。
+    /// 用 lossy 路径会让清单里有、读盘打不开，每回合报错永不收敛。
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_names_are_skipped() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        std::fs::write(vault.join("正常.md"), "ok").unwrap();
+        let bad = std::ffi::OsStr::from_bytes(b"bad-\xff.md");
+        std::fs::write(vault.join(bad), "bad").unwrap();
+
+        let paths = collect_note_paths(vault).unwrap();
+        assert_eq!(paths, vec!["正常.md".to_string()], "非 UTF-8 名称必须被跳过");
+    }
+
 }

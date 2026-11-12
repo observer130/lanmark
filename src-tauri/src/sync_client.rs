@@ -546,7 +546,7 @@ impl RoundCore {
             log::warn!("tombstone TTL 清理失败: {e}");
         }
         // 回合开头 D4 判定：本地 tombstone 的路径重新出现在磁盘上（回收站恢复/重建）
-        let local_tombstones = {
+        let mut local_tombstones = {
             let mut keep: Vec<crate::sync::Tombstone> = Vec::new();
             for t in crate::sync::load_tombstones(&vault) {
                 let abs = vault.join(&t.path);
@@ -582,6 +582,44 @@ impl RoundCore {
             local.iter().cloned().map(|m| (m.path.clone(), m)).collect();
         let base_prev = load_sync_state(&vault, &profile.id);
 
+        // 外部删除也算删除（评审决策）：上回合本地还有、现在磁盘上确已不存在 → 补记墓碑。
+        // 只认「路径真的不存在」——读失败（被别的进程占用、权限）不能被误判成删除，
+        // 否则一次临时 IO 错误就会把整篇笔记从所有设备上删掉。
+        let now_ms = fs_ops::now_ms();
+        let mut external_deleted: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut pending_tombstones: Vec<(String, String)> = Vec::new();
+        for (path, hash) in &base_prev {
+            if local_map.contains_key(path) || vault.join(path).exists() {
+                continue;
+            }
+            // 已经记过墓碑（App 内删除 / 上回合传播）→ 不重复记，也不刷新删除时刻
+            if local_tombstones.iter().any(|t| &t.path == path) {
+                continue;
+            }
+            pending_tombstones.push((path.clone(), hash.clone()));
+            external_deleted.insert(path.clone());
+        }
+        if !pending_tombstones.is_empty() {
+            match crate::sync::record_tombstones(&vault, &pending_tombstones, now_ms) {
+                Ok(()) => {
+                    for (path, hash) in &pending_tombstones {
+                        local_tombstones.push(crate::sync::Tombstone {
+                            path: path.clone(),
+                            hash: hash.clone(),
+                            mtime_ms: now_ms,
+                            deleted_at: now_ms,
+                        });
+                    }
+                }
+                // 记账失败就本轮不当作删除（宁可下回合再来，也不能删了却传不出去）
+                Err(e) => {
+                    log::warn!("补记外部删除墓碑失败（{} 条，本回合按未删除处理）: {e}", pending_tombstones.len());
+                    external_deleted.clear();
+                }
+            }
+        }
+
         let mut report = SyncReport::default();
         let mut to_pull: Vec<String> = Vec::new();
         let mut to_push: Vec<(String, String)> = Vec::new(); // (path, base_hash)
@@ -590,6 +628,8 @@ impl RoundCore {
         // 2. 四分类（仅服务器有→拉 / 仅本地有→推 / hash 同→跳 / hash 异→三方对比）
         for (path, sm) in &server_map {
             match local_map.get(path) {
+                // 本地「外部删除」的路径不拉回：否则文件管理器里的删除会被同步撤销
+                None if external_deleted.contains(path) => {}
                 None => to_pull.push(path.clone()),
                 Some(lm) => {
                     if lm.hash == sm.hash {
@@ -715,6 +755,9 @@ impl RoundCore {
             for r in results {
                 if r.ok {
                     self.report.deleted.push(r.path.clone());
+                    // 删除已双端生效：基线里不该再留着这个路径，
+                    // 否则墓碑 TTL 过期后「外部删除检测」会把它当成又删了一次，无限续期
+                    self.baseline.remove(&r.path);
                 } else {
                     self.report
                         .errors
@@ -3720,4 +3763,55 @@ mod tests {
             "未拉的路径不得写进基线，否则下回合会静默覆盖服务器版本: {saved:?}"
         );
     }
+
+    /// 回归（P2-A5）：在文件管理器里删掉的文件，同步时必须当作「删除」传播，
+    /// 而不是被对端按「仅服务器有」拉回来。
+    #[test]
+    fn external_delete_propagates_as_delete() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let note = note_create_op(&phone, "", "会被外部删掉").unwrap();
+        note_write_op(&phone, &note.path, "正文").unwrap();
+
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _name) = pair(&base, &code).unwrap();
+
+        let (dir, state) = client_vault();
+        let profile = ServerProfile {
+            id: "dev-ext-del".into(),
+            name: "desk".into(),
+            url: base,
+            token,
+            last_success_at: None,
+            device_id: "ext-del".into(),
+            port: None,
+        };
+
+        // 回合 1：拉下来，基线建立
+        let r1 = sync_round(&state, &profile).unwrap();
+        assert!(r1.errors.is_empty(), "{:?}", r1.errors);
+        assert!(dir.path().join(&note.path).is_file(), "应先同步到本地");
+
+        // 模拟文件管理器删除：不经过 App，因此没有墓碑
+        std::fs::remove_file(dir.path().join(&note.path)).unwrap();
+
+        // 回合 2：识别为删除 → 记墓碑 + 传播 /delete
+        let r2 = sync_round(&state, &profile).unwrap();
+        assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+        assert!(
+            !phone_dir.path().join(&note.path).exists(),
+            "服务器侧也应删掉（进回收站），而不是把文件留着重推回来"
+        );
+        assert!(
+            load_tombstones(dir.path()).iter().any(|t| t.path == note.path),
+            "本地应留下墓碑"
+        );
+        // 基线里不该再留着已删路径（否则墓碑 TTL 过期后会无限续期）
+        assert!(
+            !load_sync_state(dir.path(), &profile.id).contains_key(&note.path),
+            "删除生效后基线应移除该路径"
+        );
+    }
+
 }

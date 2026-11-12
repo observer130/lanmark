@@ -262,16 +262,16 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
         }
         // 原子写的半成品不进清单：tmp 在 rename 前一瞬存在，写失败时也可能残留；
         // 一旦被同步出去，对端会多一个永远修不好的孤儿附件。
-        if entry.file_name().to_string_lossy().ends_with(fs_ops::TMP_SUFFIX) {
+        // 非 UTF-8 文件名同样跳过（与 collect_notes 同纪律：清单里表达不了）
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.ends_with(fs_ops::TMP_SUFFIX) {
             continue;
         }
         let path = entry.path();
         let bytes = std::fs::read(&path)?;
-        let rel = format!(
-            "{}/{}",
-            fs_ops::ASSETS_DIR,
-            entry.file_name().to_string_lossy()
-        );
+        let rel = format!("{}/{}", fs_ops::ASSETS_DIR, name);
         out.push(FileMeta {
             path: rel,
             kind: "asset".into(),
