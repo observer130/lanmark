@@ -28,6 +28,10 @@ use crate::sync::{
 use crate::vault::AppState;
 
 pub const SERVICE_TYPE: &str = "_lanmark._tcp.local.";
+
+/// 同步协议版本（`/info` 下发）。加字段/改语义时 +1，客户端按它决定降级行为。
+/// 旧服务端无该字段 → 默认 0（v1）。
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DEFAULT_PORT: u16 = 4180;
 /// push 请求体上限（S1）：axum 0.8 对 `Json` 的默认体限是 2 MiB，而客户端把
 /// 一整批文件 base64 进一个请求（膨胀 4/3）——3 MB 附件就会 413。
@@ -352,6 +356,7 @@ async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
         "notes": notes,
         "assets": assets,
         "requiresPairing": true,
+        "protocol": PROTOCOL_VERSION,
     }))
 }
 

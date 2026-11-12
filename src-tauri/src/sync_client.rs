@@ -330,6 +330,12 @@ fn delete_batch(
         .json(&serde_json::json!({ "paths": paths }))
         .send()
         .map_err(|e| format!("删除传播失败: {e}"))?;
+    // 旧服务端没有 /delete：降级成「不传播删除」而不是整回合失败
+    //（否则一个旧手机能让桌面端所有同步卡死，连拉取都做不了）
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        log::warn!("服务器无 /delete（旧版本），本次跳过删除传播");
+        return Ok(Vec::new());
+    }
     if !resp.status().is_success() {
         return Err(format!("删除传播失败（HTTP {}）", resp.status()));
     }
