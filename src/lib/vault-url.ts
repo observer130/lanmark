@@ -2,13 +2,13 @@
  * vault:// 协议 URL 与相对路径的换算。
  *
  * 约定（与 Obsidian 一致）：markdown 里的图片引用是「相对笔记所在目录」的路径，
- * 例如 工作/笔记.md 里写 ![](assets/x.png) 实际指 工作/assets/x.png。
+ * 例如工作/笔记.md 里写 ![](assets/x.png) 实际指工作/assets/x.png。
  * WYSIWYG 文档树内的 image src 则用 vault 绝对协议 URL，序列化回 markdown 时把前缀剥掉，
  * 恢复为相对引用（源文件零侵入）。
  *
  * ⚠️ **协议前缀随平台不同，这不是笔误**（2026-10-20 真机走查定）：
- *  - 桌面（WebView2 / WebKitGTK）：`vault://localhost/<相对路径>`
- *  - Android：`http://vault.localhost/<相对路径>`
+ * - 桌面（WebView2 / WebKitGTK）：`vault://localhost/<相对路径>`
+ * - Android：`http://vault.localhost/<相对路径>`
  *
  * Android WebView **不认自定义 scheme 的子资源**（`<img src="vault://…">` 直接 onerror，
  * `naturalWidth=0`），Tauri 在 Android 上把 `register_asynchronous_uri_scheme_protocol`
@@ -405,14 +405,14 @@ function scanMarkdown(md: string): LinkScan {
 
 /**
  * 保存前：markdown 图片/链接 src 中的 vault 协议 URL → 相对笔记目录的引用
- * （Obsidian 约定）。例：笔记在 工作/ 下，图在根 assets/ → URL 还原为 ../assets/x.png
+ * （Obsidian 约定）。例：笔记在工作/ 下，图在根 assets/ → URL 还原为 ../assets/x.png
  *
  * 为什么不用正则：`[^()\s]+` 遇到 title（`![](url "标题")`）会整体失配、把 vault
  * URL 原样写进文件；alt 里的 `\]` 也会让 `[^\]]*` 提前截断。这里用一个小扫描器：
- *  - 跳过 fenced code block 与行内 code span（正文里的 vault:// 文本不得改写）；
- *  - 标签按 `[`/`]` 配对，认 `\]` 转义与嵌套；
- *  - destination 认 `<...>` / 裸形式（`\)` 不结束），title 只用来定位，原样保留；
- *  - 只改 destination，且只改带 vault 前缀的；其余字符逐字节不动。
+ * - 跳过 fenced code block 与行内 code span（正文里的 vault:// 文本不得改写）；
+ * - 标签按 `[`/`]` 配对，认 `\]` 转义与嵌套；
+ * - destination 认 `<...>` / 裸形式（`\)` 不结束），title 只用来定位，原样保留；
+ * - 只改 destination，且只改带 vault 前缀的；其余字符逐字节不动。
  *
  * 不支持/不处理：参考式定义 `[x]: url`（编辑器不产出这种形态，且改写会动到
  * 用户排版）。纯函数、零依赖，代码区域与配对都是一遍扫描。

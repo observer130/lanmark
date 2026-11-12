@@ -154,7 +154,7 @@ export function TreeView({ tree, onNavigate }: Props) {
   const openMenu = (e: React.MouseEvent, node: VaultNode) => {
     e.preventDefault();
     // 视口内收口，避免菜单贴边溢出。
-    // M4i：菜单项放大到 44px 后整体更高（最多 5 项 ≈ 230px），手机上
+    // 菜单项放大到 44px 后整体更高（最多 5 项 ≈ 230px），手机上
     // 原来的 260px 硬编码余量会把菜单顶到屏幕外（下方点不到「删除」）。
     // 改为按视口比例留余量：底部至少留 8px，且不超过可用高度的 90%。
     const menuW = 192; // min-w-[12rem]
@@ -237,7 +237,7 @@ export function TreeView({ tree, onNavigate }: Props) {
               )}
 
               {/* 行内操作：h-5 w-5 与文本行高一致——曾用 p-1（21px）会撑高整行，
-                  hover 时图标/文字因 items-center 下移约 0.5px（用户报障） */}
+ hover 时图标/文字因 items-center 下移约 0.5px（用户报障） */}
               {!isRenaming && (
                 <span className="hidden h-5 shrink-0 items-center gap-0.5 group-hover:flex">
                   {isNote && (

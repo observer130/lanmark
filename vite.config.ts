@@ -6,7 +6,7 @@ import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
 
 /**
- * M6d：剥掉 @fontsource 字体 CSS 里的 `woff` 回退。
+ * 剥掉 @fontsource 字体 CSS 里的 `woff` 回退。
  *
  * 这些包的每个切片都写 `src: url(x.woff2) format('woff2'), url(x.woff) format('woff')`，
  * 而 Vite 会把两种格式**都**当资源打包（实测：226 个多余 .woff ≈ 7.7MB；
@@ -70,7 +70,7 @@ export default defineConfig(() => ({
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       // 4. `.cache` 同理：工具链/临时目录（TMP 也指向 .cache/tmp）文件高频变动，
-      //    watcher 扫到会 EBUSY 直接崩掉 dev server（2026-09-26 实测）
+      // watcher 扫到会 EBUSY 直接崩掉 dev server（2026-09-26 实测）
       ignored: ["**/src-tauri/**", "**/.cache/**"],
     },
   },

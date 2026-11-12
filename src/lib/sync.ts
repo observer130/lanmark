@@ -15,16 +15,16 @@ export interface Discovered {
   url: string;
 }
 
-/** M4h-1：LAN 扫描命中的设备（比 mDNS 的 Discovered 多带身份与规模） */
+/** LAN 扫描命中的设备（比 mDNS 的 Discovered 多带身份与规模） */
 export interface ScannedDevice {
   name: string;
   url: string;
-  /** M4h-3 设备身份；旧服务器为空串（回退名称匹配） */
+  /** 设备身份；旧服务器为空串（回退名称匹配） */
   deviceId: string;
   notes: number;
 }
 
-/** M4h-1 扫描结果 */
+/** 扫描结果 */
 export interface ScanResult {
   devices: ScannedDevice[];
   /** 因预算截断，可能不全 */
@@ -33,14 +33,14 @@ export interface ScanResult {
   scannedSubnet: boolean;
 }
 
-/** M4h-2：桌面一次配对尝试的结局（四态） */
+/** 桌面一次配对尝试的结局（四态） */
 export interface PairAttempt {
   status: "approved" | "rejected" | "timeout" | "error";
   profile: ServerProfile | null;
   reason: string | null;
 }
 
-/** M4h-2：手机端待授权请求 */
+/** 手机端待授权请求 */
 export interface PendingPair {
   nonce: string;
   clientName: string;
@@ -49,20 +49,20 @@ export interface PendingPair {
 }
 
 export interface ServerProfile {
-  /** M4h-3：等于 `deviceId`（IP 变了也不变 → 基线不丢） */
+  /** 等于 `deviceId`（IP 变了也不变 → 基线不丢） */
   id: string;
   name: string;
   url: string;
   token: string;
-  /** 最近一次回合成功时间（unix ms；M3e 状态 UI） */
+  /** 最近一次回合成功时间（unix ms；状态 UI） */
   lastSuccessAt: number | null;
-  /** M4h-3：设备身份（旧服务器为空串） */
+  /** 设备身份（旧服务器为空串） */
   deviceId?: string;
-  /** M4h-3：上次已知端口 */
+  /** 上次已知端口 */
   port?: number | null;
 }
 
-/** 轻量探测结果（M3 自动同步循环；GET /info，3s 超时） */
+/** 轻量探测结果（自动同步循环；GET /info，3s 超时） */
 export interface ProbeResult {
   online: boolean;
   name: string;
@@ -73,7 +73,7 @@ export interface ProbeResult {
 export interface SyncPairingInfo {
   running: boolean;
   port: number | null;
-  /** M4h-4：设备代号（AppConfig.deviceAlias，设备级；UI 优先展示它） */
+  /** 设备代号（AppConfig.deviceAlias，设备级；UI 优先展示它） */
   deviceAlias: string;
   /** vault 内 sync.json 的设备名（旧版兼容） */
   deviceName: string;
@@ -82,13 +82,13 @@ export interface SyncPairingInfo {
   lastRoundAt: number | null;
   /** D10：本机局域网地址（解开「要诊断得先知道 IP，可我不知道 IP」的死循环） */
   lanIp?: string | null;
-  /** M4h-3：设备身份 */
+  /** 设备身份 */
   deviceId?: string;
-  /** M4h-2：待授权配对请求（非空时手机面板显示允许/拒绝卡片） */
+  /** 待授权配对请求（非空时手机面板显示允许/拒绝卡片） */
   pendingPairs?: PendingPair[];
 }
 
-/** 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本（M3c） */
+/** 一次 LWW 自动合并：较新版留原路径，较旧版降级为可见冲突副本 */
 export interface MergeEvent {
   path: string;
   /** "local" | "server" */
@@ -122,13 +122,13 @@ export const sync = {
     invoke<ServerProfile>("sync_pair", { url, code }),
   servers: () => invoke<ServerProfile[]>("sync_servers"),
   serverRemove: (id: string) => invoke<void>("sync_server_remove", { id }),
-  /** M3 P2：探测失败后 mDNS browse 到同名服务器 → 更新 url 重连 */
+  /** P2：探测失败后 mDNS browse 到同名服务器 → 更新 url 重连 */
   serverSetUrl: (id: string, url: string) =>
     invoke<ServerProfile>("sync_server_set_url", { id, url }),
 
-  /* ── M4h：发现 / 一键授权 ── */
+  /* ── 发现 / 一键授权 ── */
   /** LAN 发现（mDNS → 邻居表 → 网段并发探测，命中即停）。`allowSubnet` 关掉
-   *  即退化为只查已知设备（设置里的「局域网扫描」开关） */
+ * 即退化为只查已知设备（设置里的「局域网扫描」开关） */
   scanLan: (allowSubnet = true) =>
     invoke<ScanResult>("sync_scan_lan", { allowSubnet }),
   /** 一键授权：提交请求并等待手机端点「允许」（默认 90s） */
@@ -138,12 +138,12 @@ export const sync = {
   pairApprove: (nonce: string) => invoke<void>("sync_pair_approve", { nonce }),
   /** 手机端：拒绝一次待授权请求 */
   pairReject: (nonce: string) => invoke<void>("sync_pair_reject", { nonce }),
-  /** M3 自动同步循环：轻量在线探测 */
+  /** 自动同步循环：轻量在线探测 */
   probe: (id: string) => invoke<ProbeResult>("sync_probe", { id }),
   syncNow: (id: string) => invoke<SyncReport>("sync_now", { id }),
 };
 
-/* ── M4h-4：设备代号（AppConfig 设备级，换库不变） ── */
+/* ── 设备代号（AppConfig 设备级，换库不变） ── */
 
 export const deviceAlias = {
   /** 改代号：归一化在 Rust 侧做，**以返回值为准**（trim + 24 字截断） */
@@ -156,11 +156,11 @@ export const vaultPicker = {
   requestAllFilesAccess: () =>
     invoke<void>("vault_picker_request_all_files_access"),
   /** 应用私有外部目录（getExternalFilesDir，框架创建；Android/data/<pkg>
-   * 系统懒创建，std::fs mkdir 包目录必被 FUSE 拒——不能前端硬编码后自建） */
+ * 系统懒创建，std::fs mkdir 包目录必被 FUSE 拒——不能前端硬编码后自建） */
   appDir: () => invoke<string | null>("vault_picker_app_dir"),
   pickFolder: () => invoke<string | null>("vault_picker_pick_folder"),
 };
 
 /** 平台判断：Android WebView UA 必含 Android；桌面端（Win/Linux/macOS）不含。
- *  实现已挪到 `platform.ts`（纯逻辑，供 vault-url 复用），这里保留原导出名。 */
+ * 实现已挪到 `platform.ts`（纯逻辑，供 vault-url 复用），这里保留原导出名。 */
 export { isAndroid } from "./platform";

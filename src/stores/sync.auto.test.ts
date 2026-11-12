@@ -1,5 +1,5 @@
 /**
- * M3 自动同步循环状态机：
+ * 自动同步循环状态机：
  * - 开关关 → 无探测无回合（仅手动可用）
  * - 触发 A：在线 60s 至多 1 回合
  * - 触发 B：离线退避 1s→2s→4s→…→60s，离线→在线跳变立即回合
@@ -125,7 +125,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("M3 自动同步循环状态机", () => {
+describe("自动同步循环状态机", () => {
   it("开关关 → 无探测无回合（仅手动可用）", async () => {
     useSyncStore.setState({ syncAuto: false });
     useSyncStore.getState().startAutoLoop();
@@ -181,7 +181,7 @@ describe("M3 自动同步循环状态机", () => {
 
     await vi.advanceTimersByTimeAsync(2_000);
     expect(m.probe).toHaveBeenCalledTimes(3);
-    // M4h-3：连续失败 3 次 → LAN 找回（取代旧的 mDNS 重发现）
+    // 连续失败 3 次 → LAN 找回（取代旧的 mDNS 重发现）
     expect(m.scanLan).toHaveBeenCalledTimes(1);
     // **只跑 L0+L1**（allowSubnet=false）：后台周期任务不做网段全扫
     expect(m.scanLan).toHaveBeenCalledWith(false);

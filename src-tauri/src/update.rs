@@ -1,8 +1,8 @@
-//! M5-4 应用内更新：GitHub release 版本检测（关于页展示）。
+//! 应用内更新：GitHub release 版本检测（关于页展示）。
 //!
 //! 分工：本模块只做「检测」——比较当前版本与 GitHub 最新 release 的 tag，
 //! 节流状态（≥24h 一次）记在 AppConfig。安装侧（Windows updater 插件 /
-//! Linux 自更新 / Android 跳发布页）是 M5-5/5-6 的活。
+//! Linux 自更新 / Android 跳发布页）是 /5-6 的活。
 //! 纯逻辑（版本比较、节流判定、release → UpdateInfo）与网络/命令分离，可单测；
 //! 命令走 `spawn_blocking`（与 sync_client 同惯例）。
 //!
@@ -168,13 +168,13 @@ pub async fn update_check(app: tauri::AppHandle, force: bool) -> CmdResult<Updat
         .map_err(|e| format!("更新检查任务失败: {e}"))?
 }
 
-// ---------- M5-6：Linux 自更新 ----------
+// ---------- Linux 自更新 ----------
 //
 // 官方 updater 插件只支持 AppImage/deb/rpm 安装格式，而我们发的是**裸二进制
 // tar.gz**（AppImage 有 Intel Arc 兼容性问题，见 AGENTS.md）。自更新流程：
-//   下载 tar.gz + .sig → minisign 验签（与 Windows 同一密钥）→ 解包找 `lanmark`
-//   → rename 现行可执行文件（Linux 运行中可改名）→ 写入新二进制 + chmod 755
-//   → `app.restart()` 重启（restart_on_exit 语义，见 tauri AppHandle::restart）。
+// 下载 tar.gz + .sig → minisign 验签（与 Windows 同一密钥）→ 解包找 `lanmark`
+// → rename 现行可执行文件（Linux 运行中可改名）→ 写入新二进制 + chmod 755
+// → `app.restart()` 重启（restart_on_exit 语义，见 tauri AppHandle::restart）。
 // 纯逻辑（公钥行提取、tar 内找条目）与网络/命令分离，可单测。
 
 #[cfg(target_os = "linux")]
@@ -251,10 +251,10 @@ pub(crate) mod linux {
     /// 用新二进制替换现行可执行文件（核心替换逻辑，抽出来便于临时目录测试）。
     ///
     /// 时序（每一步都保证任一步失败后仍有可启动的程序）：
-    ///   1. 写 `exe.new`（同目录）——新二进制**完整落盘**后才动现行程序
-    ///   2. chmod 0755——可执行位在换入前就绪，换入后不会出现无执行权的一瞬
-    ///   3. `rename(exe → exe.old)`（仅当 exe 存在）：Linux 允许重命名运行中的程序
-    ///   4. `rename(exe.new → exe)`；失败则把 `.old` 还原回 exe
+    /// 1. 写 `exe.new`（同目录）——新二进制**完整落盘**后才动现行程序
+    /// 2. chmod 0755——可执行位在换入前就绪，换入后不会出现无执行权的一瞬
+    /// 3. `rename(exe → exe.old)`（仅当 exe 存在）：Linux 允许重命名运行中的程序
+    /// 4. `rename(exe.new → exe)`；失败则把 `.old` 还原回 exe
     ///
     /// **不删 `.old`**：新二进制可能起不来（缺库/段错误/被杀），唯一回滚副本必须
     /// 留到新进程跑起来之后，由 `cleanup_old_binary` 在 setup 里清理。
@@ -271,7 +271,7 @@ pub(crate) mod linux {
         }
 
         // 3：备份现行程序（.old 已存在时 rename 会覆盖旧副本，等待被替换的
-        //    正是当前运行的二进制，覆盖是对的）
+        // 正是当前运行的二进制，覆盖是对的）
         let had_exe = exe.exists();
         if had_exe {
             if let Err(e) = std::fs::rename(exe, &old) {

@@ -14,12 +14,12 @@ use crate::settings::{Appearance, EditorPrefs, Settings, StoragePrefs, UpdatePre
 pub struct AppState {
     pub vault: Mutex<Option<PathBuf>>,
     pub db: Mutex<Option<Connection>>,
-    /// M2 同步服务器实际监听端口（None = 未启动）；幂等启动的判据
+    /// 同步服务器实际监听端口（None = 未启动）；幂等启动的判据
     pub sync_port: Mutex<Option<u16>>,
-    /// M3e：最近一次客户端回合触达同步服务器的时间（unix ms，0 = 从未；
+    /// 最近一次客户端回合触达同步服务器的时间（unix ms，0 = 从未；
     /// /manifest 是每回合签名动作，服务器 handler 更新；手机端面板展示）
     pub last_sync_round_at: std::sync::atomic::AtomicI64,
-    /// M3f：服务器侧同步改动 vault（push 落盘/delete 生效）→ UI 刷新回调。
+    /// 服务器侧同步改动 vault（push 落盘/delete 生效）→ UI 刷新回调。
     /// Tauri setup 注册（经 AppHandle emit 事件）；手机是服务器、无客户端循环，
     /// 不通知则目录仍列远端已删笔记（点击报「笔记不存在」）。
     /// 测试用 AppState::default() = None = 无操作。
@@ -30,27 +30,27 @@ fn default_sync_auto() -> bool {
     true
 }
 
-/// 设备级配置。**全部小节都 `serde(default)`**：M3 及更早的 config.json 直接可读，
+/// 设备级配置。**全部小节都 `serde(default)`**：及更早的 config.json 直接可读，
 /// 缺字段取默认。同步周期不在这里——D1 定了固定 60s，不进配置。
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub vault_path: Option<String>,
-    /// M3：桌面端自动同步开关（默认开；旧配置无此字段 → serde default）
+    /// 桌面端自动同步开关（默认开；旧配置无此字段 → serde default）
     #[serde(default = "default_sync_auto")]
     pub sync_auto: bool,
-    /// M4a：外观（M7 起 = 配色 scheme + 编辑区字体 font + 字号/行距）
+    /// 外观（配色 scheme + 编辑区字体 font + 字号/行距）
     pub appearance: Appearance,
-    /// M4a：编辑器偏好
+    /// 编辑器偏好
     pub editor: EditorPrefs,
-    /// M4a：存储策略（回收站保留天数）
+    /// 存储策略（回收站保留天数）
     pub storage: StoragePrefs,
-    /// M5-4：更新检测偏好（上次检查时间戳也在本结构：`last_update_check_ms`）
+    /// 更新检测偏好（上次检查时间戳也在本结构：`last_update_check_ms`）
     pub update: UpdatePrefs,
-    /// M5-4：上次更新检查的 unix ms（0 = 从未）；serde default 兼容旧配置
+    /// 上次更新检查的 unix ms（0 = 从未）；serde default 兼容旧配置
     #[serde(default)]
     pub last_update_check_ms: u64,
-    /// M4h-4：设备代号（局域网内标识本机；设备级，换库不变）。
+    /// 设备代号（局域网内标识本机；设备级，换库不变）。
     /// 空串 = 未初始化（读侧 `alias::current_alias` 落默认词表代号）。
     #[serde(default)]
     pub device_alias: String,
@@ -65,7 +65,7 @@ impl Default for AppConfig {
             editor: EditorPrefs::default(),
             storage: StoragePrefs::default(),
             update: UpdatePrefs::default(),
-            // M5-4：上次更新检查的 unix ms（0 = 从未）；serde default 兼容旧配置
+            // 上次更新检查的 unix ms（0 = 从未）；serde default 兼容旧配置
             last_update_check_ms: 0,
             device_alias: String::new(),
         }
@@ -123,14 +123,14 @@ mod tests {
         assert!(!back.sync_auto);
         assert_eq!(AppConfig::default().vault_path, None);
         assert!(AppConfig::default().sync_auto, "默认开");
-        // M2 旧配置（无 syncAuto 字段）→ 默认 true，不丢 vault_path
+        // 旧配置（无 syncAuto 字段）→ 默认 true，不丢 vault_path
         let legacy = r#"{"vaultPath": "/tmp/vault"}"#;
         let back: AppConfig = serde_json::from_str(legacy).unwrap();
         assert_eq!(back.vault_path.as_deref(), Some("/tmp/vault"));
         assert!(back.sync_auto, "旧配置兼容：syncAuto 默认 true");
     }
 
-    /// M4a 关键回归：M0–M3 时期的 config.json（只有 vaultPath + syncAuto）
+    /// 关键回归：–时期的 config.json（只有 vaultPath + syncAuto）
     /// 必须能直接读，且三小节取默认、vault_path 不丢。
     #[test]
     fn m3_config_migrates_to_m4_settings() {
@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(round.settings(), crate::settings::Settings::default());
     }
 
-    /// 只有 vaultPath 的更老配置（M1/M2 无同步开关）
+    /// 只有 vaultPath 的更老配置（/无同步开关）
     #[test]
     fn oldest_config_still_opens_vault() {
         let cfg: AppConfig = serde_json::from_str(r#"{"vaultPath":"/tmp/v"}"#).unwrap();

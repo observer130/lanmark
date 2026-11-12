@@ -15,7 +15,7 @@ import {
 import { useVaultStore } from "./vault";
 
 /**
- * M2 同步状态 + M3 自动同步循环（TS 驱动；手机是服务器，无循环）。
+ * 同步状态 + 自动同步循环（TS 驱动；手机是服务器，无循环）。
  * 触发器：A 周期探测（在线 60s）/ B 离线退避（1s→60s，恢复跳变立即回合）/
  * C 保存完成 5s 尾沿 / D 回前台立即探测 / E 手动「立即同步」（恒可用）。
  * 所有触发走同一入口 runRound：尊重 syncing 串行锁 + 同步前 flush 脏编辑。
@@ -114,7 +114,7 @@ async function autoTick(): Promise<void> {
         // 离线恢复：连续失败 3 次后尝试一次「按设备身份找回」。
         //
         // 取代原来的「mDNS 重发现」：本环境桌面多播常不可达、公司网也拦广播，
-        // 而 M4h-1 的 LAN 扫描不依赖多播。**按 deviceId 匹配**（不是按名字）——
+        // 而的 LAN 扫描不依赖多播。**按 deviceId 匹配**（不是按名字）——
         // 同一台手机换了 IP 仍然认得出来，只改 url、不动 id、基线文件不换名，
         // 因此不会像过去那样触发「全库无基线 → 双方都改」的假冲突风暴（P4）。
         setProbeState(s.id, { ...next, mdnsRetried: true });
@@ -174,18 +174,18 @@ interface SyncStore {
   lastReport: SyncReport | null;
   error: string | null;
 
-  /** M3：自动同步开关（null = 尚未从配置加载） */
+  /** 自动同步开关（null = 尚未从配置加载） */
   syncAuto: boolean | null;
-  /** M3：per-server 探测状态机（UI 展示在线状态用） */
+  /** per-server 探测状态机（UI 展示在线状态用） */
   probeStates: Record<string, ServerProbeState>;
-  /** M3e：vault 内冲突副本数（手机端可发现性） */
+  /** vault 内冲突副本数（手机端可发现性） */
   conflictCount: number | null;
 
-  /** M4h：LAN 扫描发现与一键授权 ──
-   *  M5-2：原「局域网扫描」开关已移除——扫描只在用户点「自动查找手机」时
-   *  发生（无后台网段扫描），开关不持久化且效果不可见，属无意义设置。
-   *  行为固定为全扫：mDNS + 已知 IP + 邻居表 + 网段探测（Rust 侧 3s 预算封顶）；
-   *  自动循环里的离线找回仍固定走轻量 L0+L1（下方 autoTick 硬编码 false）。 */
+  /** LAN 扫描发现与一键授权 ──
+ * 原「局域网扫描」开关已移除——扫描只在用户点「自动查找手机」时
+ * 发生（无后台网段扫描），开关不持久化且效果不可见，属无意义设置。
+ * 行为固定为全扫：mDNS + 已知 IP + 邻居表 + 网段探测（Rust 侧 3s 预算封顶）；
+ * 自动循环里的离线找回仍固定走轻量 L0+L1（下方 autoTick 硬编码 false）。 */
   /** 扫描到的候选设备（含 mDNS 与 LAN 探测的合并结果） */
   scanned: ScannedDevice[];
   scanning: boolean;
@@ -196,11 +196,11 @@ interface SyncStore {
   /** 最近一次连接尝试的结局（拒绝/超时的提示文案） */
   connectOutcome: { status: string; reason: string | null } | null;
 
-  /** M4h-1：扫同一局域网的手机（命中即停） */
+  /** 扫同一局域网的手机（命中即停） */
   scanLan: () => Promise<void>;
-  /** M4h-2：对某台设备发起连接（桌面点 [连接] → 手机点允许） */
+  /** 对某台设备发起连接（桌面点 [连接] → 手机点允许） */
   connectDevice: (url: string) => Promise<boolean>;
-  /** M4h-2：手机端允许/拒绝一次请求 */
+  /** 手机端允许/拒绝一次请求 */
   pairApprove: (nonce: string) => Promise<void>;
   pairReject: (nonce: string) => Promise<void>;
 
@@ -212,7 +212,7 @@ interface SyncStore {
   syncNow: (id: string) => Promise<void>;
   clearError: () => void;
 
-  /** M3 */
+  /** */
   loadSyncAuto: () => Promise<void>;
   setSyncAuto: (v: boolean) => Promise<void>;
   startAutoLoop: () => void;
@@ -247,7 +247,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   scanLan: async () => {
     set({ scanning: true, connectOutcome: null });
     try {
-      // M5-2：固定全扫（原 lanScanEnabled 开关已移除，理由见接口注释）
+      // 固定全扫（原 lanScanEnabled 开关已移除，理由见接口注释）
       const r = await sync.scanLan(true);
       set({ scanned: r.devices, scanTruncated: r.truncated });
     } catch (e) {
@@ -348,7 +348,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   },
 
   /** 单回合执行（手动/自动共用入口：所有触发走同一入口）。
-   * silent = 自动触发：Rust 串行锁的「进行中」拒绝与 flush 失败不弹错误 */
+ * silent = 自动触发：Rust 串行锁的「进行中」拒绝与 flush 失败不弹错误 */
   runRound: async (id, opts) => {
     if (get().syncing) return false;
     set({ syncing: true, error: null });
@@ -387,7 +387,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
           // 文件被对端删除等：保留当前状态
         }
       }
-      // lastSuccessAt 由 Rust 侧记录进 profile JSON → 刷新列表（M3e 展示）
+      // lastSuccessAt 由 Rust 侧记录进 profile JSON → 刷新列表（展示）
       void get().refreshServers();
       return true;
     } catch (e) {

@@ -72,7 +72,7 @@ interface DropSlot {
  * 手柄拖拽对应的块序号。
  * ① 优先用 Crepe 在 mousedown 时设下的 `NodeSelection`（与手柄指向的块天然一致）；
  * ② 兜底用**手柄自身的纵向位置**反查——Crepe 的 `#createSelection` 失败时（正是上面说的
- *    那条会退化成复制的路径）也必须能移动，不能跟着一起坏。
+ * 那条会退化成复制的路径）也必须能移动，不能跟着一起坏。
  */
 function sourceIndexFromHandle(view: EditorView, handle: Element): DragSource {
   const sel = view.state.selection;
@@ -106,9 +106,9 @@ function computeDropSlot(
   const targetRect = rectOf(index);
   if (!targetRect) return null;
   /**
-   * 落点指示线的纵向位置：画在**它将要插入的那一块的顶边**上（`gap === childCount` 时取末块底边）。
-   * 不用「上一块的底边」——标题自带 24px 下边距，那条线会浮在空白区上方约一行，指不准。
-   */
+ * 落点指示线的纵向位置：画在**它将要插入的那一块的顶边**上（`gap === childCount` 时取末块底边）。
+ * 不用「上一块的底边」——标题自带 24px 下边距，那条线会浮在空白区上方约一行，指不准。
+ */
   const gapY = (gap: number) =>
     gap < doc.childCount
       ? (rectOf(gap) ?? targetRect).top
@@ -266,7 +266,7 @@ export const blockDragPlugin = $prose((ctx) => {
         }
         // ⚠️ 无论是否真的移动都返回 true：这是「手柄拖拽」，结果必须由我们定义。
         // 返回 false 会把 drop 交给 prosemirror-view 的内建路径，而它只搬**单个节点**——
-        // 表现就是「拖标题只搬标题」（M8 走查反馈）。
+        // 表现就是「拖标题只搬标题」（走查反馈）。
         return true;
       },
     },

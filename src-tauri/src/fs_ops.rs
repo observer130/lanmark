@@ -319,7 +319,7 @@ pub fn create_note(vault: &Path, dir_rel: &str, raw_name: &str) -> std::io::Resu
     let target = unique_target(&dir, &name)?;
     fs::write(&target, "")?;
     let rel = rel_to_string(target.strip_prefix(vault).unwrap());
-    // M3b D4：路径被（重新）创建 → 清 tombstone（best effort；回合开头有权威判定兜底）
+    // D4：路径被（重新）创建 → 清 tombstone（best effort；回合开头有权威判定兜底）
     if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &rel) {
         log::warn!("清 tombstone 失败 {rel}: {e}");
     }
@@ -385,7 +385,7 @@ pub fn rename_entry(
     } else {
         unique_target(&parent, &new_name)?
     };
-    // M3b：重命名 = 旧路径消失 → 记旧路径 tombstone（文件夹展开），
+    // 重命名 = 旧路径消失 → 记旧路径 tombstone（文件夹展开），
     // 对端收敛为「旧路径删除 + 新路径推送」，内容在新路径保留（铁律）。
     // 顺序硬约定：先只读快照（路径 + hash），fs::rename 成功后才写墓碑。
     // rename 是原子的，失败即未发生——提前写会留下「旧路径已删除」，
@@ -453,7 +453,7 @@ pub fn move_entry(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let target = unique_target(&new_dir, &name)?;
-    // M3b：移动 = 旧路径消失 → 同 rename 的 tombstone 处理：
+    // 移动 = 旧路径消失 → 同 rename 的 tombstone 处理：
     // 先只读快照，fs::rename 成功后才写墓碑（失败路径不得留下墓碑）。
     let pending = snapshot_tombstones_for_entry(vault, rel_path, conn);
     fs::rename(&old_abs, &target)?;
@@ -467,7 +467,7 @@ pub fn move_entry(
 }
 
 /// 列出条目下全部同步单元（文件）：文件 → 自身；文件夹 → 其下全部笔记（DB）+ 附件（磁盘 walk）。
-/// tombstone 文件夹展开用（M3b）。只列同步单元（笔记/assets），外来文件不列。
+/// tombstone 文件夹展开用。只列同步单元（笔记/assets），外来文件不列。
 pub fn entry_file_list(vault: &Path, rel: &str, conn: &Connection) -> std::io::Result<Vec<String>> {
     let abs = resolve_in_vault(vault, rel)?;
     if abs.is_file() {
@@ -507,7 +507,7 @@ pub fn entry_file_list(vault: &Path, rel: &str, conn: &Connection) -> std::io::R
     Ok(out)
 }
 
-/// M3b：为条目下全部同步单元做只读快照（相对路径 + 内容 hash）。
+/// 为条目下全部同步单元做只读快照（相对路径 + 内容 hash）。
 /// 只读、无墓碑副作用：rename/move 必须等 `fs::rename` 成功后再落墓碑，
 /// 失败路径不得留下任何 tombstone（见 rename_entry / move_entry）。
 fn snapshot_tombstones_for_entry(
@@ -535,7 +535,7 @@ fn write_tombstones(vault: &Path, snapshot: &[(String, String)]) {
     }
 }
 
-/// M3b D4：清除条目下全部同步单元的 tombstone
+/// D4：清除条目下全部同步单元的 tombstone
 fn clear_tombstones_for_entry(vault: &Path, rel: &str, conn: &Connection) {
     if let Ok(files) = entry_file_list(vault, rel, conn) {
         for f in &files {
@@ -622,7 +622,7 @@ fn trash_index_remove(vault: &Path, trash_name: &str) {
     }
 }
 
-// ---------- M4d/M4e：vault 统计与回收站清理 ----------
+// ---------- /vault 统计与回收站清理 ----------
 
 /// vault 规模统计（`vault_stats` 命令的返回体）。
 #[derive(Debug, Serialize, Clone, PartialEq, Default)]
@@ -815,7 +815,7 @@ pub fn trash_entry_ms(name: &str) -> Option<i64> {
 /// 按保留天数清理回收站，返回删除条目数。
 ///
 /// `days == 0` = 从不清理。
-/// **与 M3 tombstone TTL 无关**：trash 是本地找回（不进同步），tombstone 是删除
+/// **与 tombstone TTL 无关**：trash 是本地找回（不进同步），tombstone 是删除
 /// 传播账本（`.lanmark/tombstones.json`，固定 30 天）——清 trash 不影响同步传播删除。
 pub fn trash_prune(vault: &Path, days: u32, now: i64) -> std::io::Result<usize> {
     if days == 0 {
@@ -1091,7 +1091,7 @@ pub fn write_note(
         .unwrap_or_else(|| title_from_stem(&abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()));
     db::upsert_file(conn, rel_path, &title, content, mtime, &hash, true)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    // M3b D4：路径被（重新）写入 = （重新）创建 → 清 tombstone（含同步拉取落地）
+    // D4：路径被（重新）写入 = （重新）创建 → 清 tombstone（含同步拉取落地）
     if let Err(e) = crate::sync::clear_tombstone_if_present(vault, rel_path) {
         log::warn!("清 tombstone 失败 {rel_path}: {e}");
     }
@@ -1115,7 +1115,7 @@ pub fn write_note_bytes(
         .unwrap_or_else(|| title_from_stem(&name));
     db::upsert_file(conn, rel_path, &title, &String::from_utf8_lossy(bytes), mtime, &hash, true)
         .map_err(|e| std::io::Error::other(e))?;
-    // M3b D4：同 write_note
+    // D4：同 write_note
     if let Err(e) = crate::sync::clear_tombstone_if_present(vault, rel_path) {
         log::warn!("清 tombstone 失败 {rel_path}: {e}");
     }
@@ -1155,7 +1155,7 @@ pub fn save_asset(vault: &Path, bytes: &[u8], ext: &str) -> std::io::Result<Stri
         fs::write(&target, bytes)?;
     }
     let rel = format!("{ASSETS_DIR}/{name}");
-    // M3b D4：附件路径被（重新）落盘 → 清 tombstone
+    // D4：附件路径被（重新）落盘 → 清 tombstone
     if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &rel) {
         log::warn!("清 tombstone 失败 {rel}: {e}");
     }
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     /// tmp 路径必须唯一（pid+序号），并发写同一文件不互相踩踏。
-    /// 场景：UI 保存 与 sync push 同时写同一笔记（此前固定 tmp 名，
+    /// 场景：UI 保存与 sync push 同时写同一笔记（此前固定 tmp 名，
     /// 一方 rename ENOENT，或把对方写一半的截断文件落成正式笔记）。
     #[test]
     fn atomic_write_tmp_unique_and_concurrent_safe() {
@@ -1827,7 +1827,7 @@ mod tests {
         // 2b) 附件目录不进树（assets/ 是 save_asset 的图片落盘处，UI 侧隐藏）
         assert!(!paths.contains(&"assets"));
 
-        // 3) 兄弟子块连续：备忘 的两个文件相邻，且按名升序（密 < 租）
+        // 3) 兄弟子块连续：备忘的两个文件相邻，且按名升序（密 < 租）
         assert_eq!(idx("备忘/密码簿.md") + 1, idx("备忘/租房.md"));
     }
 

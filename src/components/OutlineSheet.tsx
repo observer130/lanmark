@@ -5,7 +5,7 @@ import { useDismissable } from "./useDismissable";
 import { OutlineList } from "./OutlineList";
 
 /**
- * 移动端「大纲」底部抽屉（M10）。
+ * 移动端「大纲」底部抽屉。
  *
  * 调研结论（Obsidian / Bear / Craft / Notion）：手机上的目录入口应该是**一个按钮 + 面板**，
  * 而不是藏进侧栏。这里沿用 BlockMenu / InsertMenu 的抽屉语言：遮罩不挂 onClick、

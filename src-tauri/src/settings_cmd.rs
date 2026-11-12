@@ -1,4 +1,4 @@
-//! M4a 设置命令层：`settings_get` / `settings_patch` / `settings_reset`。
+//! 设置命令层：`settings_get` / `settings_patch` / `settings_reset`。
 //!
 //! 写盘纪律（沿用 `vault_set_sync_auto`）：`load_config` → 改目标字段 → `save_config`
 //! （tmp+rename 原子写）；**绝不整体覆盖 `vault_path`**，也绝不把设置写进 vault。
@@ -8,7 +8,7 @@ use crate::commands::CmdResult;
 use crate::settings::{Settings, SettingsPatch};
 use crate::vault::{self, AppConfig};
 
-/// 纯逻辑：读设置。**读侧也要归一化外观**（M7）：M6 的捆绑 `theme` 只在写入路径迁移
+/// 纯逻辑：读设置。**读侧也要归一化外观**：的捆绑 `theme` 只在写入路径迁移
 /// 不够——升级用户第一次 `settings_get` 拿到的会是 `scheme:"night"` / `font:""` 这种
 /// 半成品，前端按新枚举校验后会把配色丢掉（静默回落浅色）。归一化幂等，新配置读出来
 /// 与盘上完全一致；只有旧配置会在这里被「翻译」成新枚举。
@@ -71,7 +71,7 @@ pub fn settings_reset(app: tauri::AppHandle) -> CmdResult<Settings> {
     Ok(next)
 }
 
-/// M4h-4：改设备代号（设置页 / 首启引导）。归一化后落 AppConfig 并刷缓存，
+/// 改设备代号（设置页 / 首启引导）。归一化后落 AppConfig 并刷缓存，
 /// 返回最终生效值（前端以返回值为准）。
 #[tauri::command]
 pub fn device_alias_set(app: tauri::AppHandle, alias: String) -> CmdResult<String> {
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(settings_read_op(&cfg), Settings::default());
     }
 
-    /// M7 读侧迁移：M6 老配置经 serde alias 变成 `scheme:"night"` + `font:""`，
+    /// 读侧迁移：老配置经 serde alias 变成 `scheme:"night"` + `font:""`，
     /// 读出来必须已是新枚举——否则前端按新白名单校验会静默丢掉用户选的深色。
     #[test]
     fn read_migrates_legacy_theme() {
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(out.appearance.font, "sans");
     }
 
-    /// M7：配色与字体经命令层落盘，非法值同样被归一化（前端以返回值为准）。
+    /// 配色与字体经命令层落盘，非法值同样被归一化（前端以返回值为准）。
     #[test]
     fn patch_persists_scheme_and_font_and_normalizes() {
         let mut cfg = AppConfig::default();

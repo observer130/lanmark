@@ -1,4 +1,4 @@
-//! M2 移动端自研小插件：vault 目录选择 + 全部文件访问授权。
+//! 移动端自研小插件：vault 目录选择 + 全部文件访问授权。
 //!
 //! Android 的 scoped storage 下 std::fs 直写共享存储需要 MANAGE_EXTERNAL_STORAGE
 //! （SAF+路径映射仅在 legacy 视图可行，
@@ -30,7 +30,7 @@ pub struct VaultPickerMobile(
     #[cfg(not(target_os = "android"))] (),
 );
 
-/// M4i 返回手势插件（BackPlugin）的桥句柄
+/// 返回手势插件（BackPlugin）的桥句柄
 #[derive(Clone)]
 pub struct BackMobile(
     #[cfg(target_os = "android")] Option<PluginHandle<tauri::Wry>>,
@@ -163,7 +163,7 @@ pub async fn vault_picker_pick_folder(
     }
 }
 
-/// M4i 返回手势插件，独立 Builder → 独立插件名 `back`。
+/// 返回手势插件，独立 Builder → 独立插件名 `back`。
 ///
 /// 插件名取自 `Builder::new(…)` 而非 Kotlin 类名：`invoke("plugin:<名>|…")`
 /// 与 `addPluginListener` 都按它匹配。与 vault-picker 分开注册，避免两个
@@ -204,7 +204,7 @@ fn owned_state_back(state: tauri::State<'_, BackMobile>) -> BackMobile {
     state.inner().clone()
 }
 
-/// M4i 返回手势：前端声明「当前返回该做什么」。
+/// 返回手势：前端声明「当前返回该做什么」。
 ///
 /// 返回在 Kotlin 侧拦（MainActivity 的 dispatchKeyEvent / OnBackPressedCallback），
 /// 但「该关抽屉还是退出」只有前端知道 —— 由前端在浮层开关时下发处理器名：

@@ -1,10 +1,10 @@
-//! M2 手机端同步服务器：axum + JSON over HTTP，监听 0.0.0.0:4180（被占则 +1 重试）。
+//! 手机端同步服务器：axum + JSON over HTTP，监听 0.0.0.0:4180（被占则 +1 重试）。
 //! 手机 = 局域网同步中心节点；桌面端（客户端）发现/配对后驱动双向同步回合。
 //! 端点幂等可重放；token 仅防误连（传输全程明文 HTTP——自签 TLS + 证书固定至今没做，仍是未清偿项）。
 //!
 //! 并发说明：客户端侧串行同步；服务端 push/delete 另由 `ServerCtx::write_lock`
 //! 串行化（handler 跑在 spawn_blocking 线程池里，并非"单线程 runtime 天然串行"）。
-//! 文件写入走 M1 的 tmp+rename。
+//! 文件写入走的 tmp+rename。
 
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::PathBuf;
@@ -37,7 +37,7 @@ pub const PUSH_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// 单批文件数上限（客户端按 8 个一批，512 留足余量）
 pub const PUSH_MAX_FILES: usize = 512;
 /// 生产单实例下 10 个足够；测试并行各起常驻服务器（无停机机制），
-/// 范围太窄会 AddrInUse（M3 测试矩阵扩到 80+ 后 4180..4200 已不够，再放宽）
+/// 范围太窄会 AddrInUse（测试矩阵扩到 80+ 后 4180..4200 已不够，再放宽）
 const MAX_PORT_TRIES: u16 = 60;
 
 /// vault 内同步元数据（.lanmark/sync.json）：设备名 + 配对码 + 已发 token + 设备身份
@@ -48,7 +48,7 @@ pub struct SyncConfig {
     pub pairing_code: String,
     #[serde(default)]
     pub tokens: Vec<String>,
-    /// M4h-3：设备身份。桌面端 `ServerProfile.id` 绑它而非 `hash(url+token)`
+    /// 设备身份。桌面端 `ServerProfile.id` 绑它而非 `hash(url+token)`
     /// ——原来 IP 一变就得重新配对，token 变新 → id 变新 → 基线文件 `sync-<id>.json`
     /// 换名 → 下回合全库无基线 → 大量「双方都改」→ 冲突副本激增
     /// 语义同 `pairing_code`：**随 vault**，不是设备全局。
@@ -66,7 +66,7 @@ pub fn load_sync_config(vault: &std::path::Path) -> SyncConfig {
         .and_then(|s| serde_json::from_str::<SyncConfig>(&s).ok());
     match existing {
         Some(mut cfg) => {
-            // M4h-3 迁移：M2/M3 的 sync.json 没有 deviceId → 就地补上并落盘。
+            // 迁移：/的 sync.json 没有 deviceId → 就地补上并落盘。
             // **必须落盘**：不落盘的话每次读都生成新 id，桌面端身份永远对不上。
             if cfg.device_id.is_empty() {
                 cfg.device_id = gen_device_id();
@@ -77,7 +77,7 @@ pub fn load_sync_config(vault: &std::path::Path) -> SyncConfig {
         None => {
             // 首次：生成码与身份并**立即落盘**。落盘是必须的——服务器 handler 每次
             // 请求都从磁盘重读配置（切库后凭据要实时跟随），不落盘就会「返回给调用方
-            // 的码」和「handler 重新生成的码」不是同一个（曾因此在 M4h 回归里翻车）。
+            // 的码」和「handler 重新生成的码」不是同一个（曾因此在回归里翻车）。
             let cfg = SyncConfig {
                 device_name: "Lanmark 手机".into(),
                 pairing_code: gen_pairing_code(),
@@ -103,7 +103,7 @@ pub fn save_sync_config(vault: &std::path::Path, cfg: &SyncConfig) -> std::io::R
     Ok(())
 }
 
-/// 8 位数字配对码：sha256(time_ns + pid + vault path) 取数字，防误连足够（M4 前不加密）
+/// 8 位数字配对码：sha256(time_ns + pid + vault path) 取数字，防误连足够（前不加密）
 fn gen_pairing_code() -> String {
     let mut material = format!(
         "{}{}{:?}",
@@ -122,7 +122,7 @@ fn gen_pairing_code() -> String {
         .concat()
 }
 
-/// M4h-3 设备身份：随机 16 位十六进制。**与 pairing_code 不同，它不参与鉴权**，
+/// 设备身份：随机 16 位十六进制。**与 pairing_code 不同，它不参与鉴权**，
 /// 只是「这台设备是谁」的稳定标识；泄露无害（对方仍需 token 才能读写）。
 fn gen_device_id() -> String {
     use sha2::{Digest, Sha256};
@@ -164,11 +164,11 @@ pub struct ServerCtx {
     pub cfg: Mutex<SyncConfig>,
     /// /pair 爆破保护：连续失败计数 + 锁定截止时间
     pair_guard: Mutex<PairGuard>,
-    /// M3f：push 落盘/delete 生效后通知前端刷新（手机 UI 无客户端循环）；
+    /// push 落盘/delete 生效后通知前端刷新（手机 UI 无客户端循环）；
     /// 生产由 spawn 从 AppState.sync_notify 取（Tauri setup 注册的 emit 闭包），
     /// 测试注入计数器或保持 None（无操作）
     ui_notify: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// M4h-2：待授权的配对请求（「手机点允许」取代抄 8 位码）
+    /// 待授权的配对请求（「手机点允许」取代抄 8 位码）
     pending: Mutex<Vec<PendingPair>>,
     /// 写路径互斥。push 的「读当前 hash → 仲裁 → 落盘/留副本」不是原子的，
     /// 而 handler 跑在 `spawn_blocking` 的线程池里（旧注释"runtime 单线程、
@@ -178,7 +178,7 @@ pub struct ServerCtx {
     write_lock: Mutex<()>,
 }
 
-/// M4h-2 一次待授权的配对请求。
+/// 一次待授权的配对请求。
 ///
 /// 生命周期：桌面 POST /pair-request 入队 → 手机 UI 轮询看到并「允许/拒绝」
 /// → 桌面 GET /pair-status 取走 token。**nonce 单次消费**（取走即出队），
@@ -229,7 +229,7 @@ impl ServerCtx {
         self
     }
 
-    /// M4h-3：当前设备身份（实时读，切库后跟随新库，同 pairing_code 语义）
+    /// 当前设备身份（实时读，切库后跟随新库，同 pairing_code 语义）
     fn device_id(&self) -> String {
         self.current_config().map(|(_, c)| c.device_id).unwrap_or_default()
     }
@@ -329,7 +329,7 @@ fn const_eq(a: &str, b: &str) -> bool {
 // ---------- 端点 ----------
 
 /// GET /api/v1/info —— 无需鉴权：代号 + vault 统计（不含任何笔记数据）。
-/// M4h-4：`name` 改读设备代号（AppConfig.deviceAlias，设备级不随库漂移），
+/// `name` 改读设备代号（AppConfig.deviceAlias，设备级不随库漂移），
 /// 进程内缓存由 setup 的 ensure_default_alias 预热（handler 拿不到 AppHandle）。
 async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     let app = ctx.app.clone();
@@ -337,7 +337,7 @@ async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
         .await
         .unwrap_or((String::new(), 0, 0));
     let name = crate::alias::current_alias(None);
-    // M4h-3：deviceId 让桌面端按「设备」而不是「URL」记住服务器（IP 变了自动找回）。
+    // deviceId 让桌面端按「设备」而不是「URL」记住服务器（IP 变了自动找回）。
     // 旧服务器无该字段 → 客户端看到空串，回退按名称匹配。
     let device_id = ctx.device_id();
     Json(json!({
@@ -407,10 +407,10 @@ async fn pair(
     Ok(Json(json!({ "token": token, "name": crate::alias::current_alias(None) })))
 }
 
-// ---------- M4h-2：一键授权（取代抄 8 位配对码） ----------
+// ---------- 一键授权（取代抄 8 位配对码） ----------
 //
 // 桌面 POST /pair-request {clientName, nonce} → 手机上出现「允许/拒绝」
-// 桌面 GET  /pair-status?nonce=…            → 轮询等到 approved 时取走 token
+// 桌面 GET /pair-status?nonce=… → 轮询等到 approved 时取走 token
 //
 // 安全感不降反升：8 位数字码只有 10^8 组合，LAN 内可穷尽（现靠退避兜）；
 // 而「**人在手机旁点允许**」是物理确认。
@@ -442,7 +442,7 @@ async fn pair_request(
     if name.is_empty() || name.len() > 64 {
         return Err((StatusCode::BAD_REQUEST, "客户端名非法".into()));
     }
-    // M4h-4 重名消解（语义对标 LocalSend）：队列里已有同名待授权请求时
+    // 重名消解（语义对标 LocalSend）：队列里已有同名待授权请求时
     // 给后来者追加数字尾缀，卡片上「「晨窗台机」请求连接」就能区分两台。
     // 只影响展示，不进任何持久化身份。
     let mut list = ctx
@@ -516,7 +516,7 @@ async fn pair_status(
             Ok(token) => Ok(Json(json!({
                 "status": "approved",
                 "token": token,
-                // M4h-4：服务器（手机）名字回传代号——桌面 profile.name 用它，
+                // 服务器（手机）名字回传代号——桌面 profile.name 用它，
                 // 设备列表/常驻条全程说代号
                 "name": crate::alias::current_alias(None),
             }))),
@@ -688,7 +688,7 @@ pub struct PushBody {
 }
 
 /// POST /api/v1/push —— 客户端推送更新。
-/// 冲突判定（M3a 起）：服务器现 hash ≠ base_hash（含 base 空 + 文件已存在）
+/// 冲突判定：服务器现 hash ≠ base_hash（含 base 空 + 文件已存在）
 /// → 版本元组 (mtime, size, hash) 仲裁：来件新 → 来件落原路径、原版本改名保留；
 /// 来件旧/平手 → 来件改名保留、原路径不动（serverHash 回传操作后最终 hash）。
 /// 内容 hash 校验不符则拒绝该文件。
@@ -716,7 +716,7 @@ async fn push(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
         .map_err(|(s, m)| (s, m))?;
-    // M3f：有成功落盘 = vault 已变更 → 通知手机端 UI 刷新（树/最近/当前笔记）
+    // 有成功落盘 = vault 已变更 → 通知手机端 UI 刷新（树/最近/当前笔记）
     if results.iter().any(|r| r.ok) {
         ctx.notify_ui();
     }
@@ -765,10 +765,10 @@ struct Landed {
     server_hash: String,
 }
 
-/// 服务器侧 push 仲裁（M3a 核心语义变更）：
+/// 服务器侧 push 仲裁（核心语义变更）：
 /// 当前 P 存在且 hash ≠ base_hash（含 base 为空 + 文件已存在 = 竞态创建窗口，
-/// 修掉 M2 该场景静默覆盖的洞）→ 版本元组 (mtime_ms, size, hash) 与当前 P 比较：
-/// - 来件更大 → 来件赢：当前 P 存为服务器侧冲突副本，来件落原路径（M2 既有行为）
+/// 修掉该场景静默覆盖的洞）→ 版本元组 (mtime_ms, size, hash) 与当前 P 比较：
+/// - 来件更大 → 来件赢：当前 P 存为服务器侧冲突副本，来件落原路径（既有行为）
 /// - 来件更小/平手 → 来件降级：来件存冲突副本，当前 P 保留（serverHash = 当前 hash）
 /// 返回 None = 无需仲裁（文件不存在或 base 与现状一致 → 干净落盘）。
 ///
@@ -785,7 +785,7 @@ fn arbitrate_existing(
         Ok(a) if a.is_file() => a,
         _ => return Ok(None),
     };
-    // 读原始字节（非 UTF-8 文件 M2 走 read_note 会 Err 而静默跳过仲裁）
+    // 读原始字节（非 UTF-8 文件走 read_note 会 Err 而静默跳过仲裁）
     let cur_bytes = std::fs::read(&abs).map_err(|e| format!("读取当前版本失败: {e}"))?;
     let cur_hash = fs_ops::content_hash(&cur_bytes);
     if cur_hash == pf.base_hash {
@@ -849,7 +849,7 @@ fn write_pushed_file(
                 .lock()
                 .map_err(|_| "DB 锁中毒".to_string())?;
             let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-            // M3a 仲裁：baseHash 与现状不符 → mtime 元组裁决（取代 M2 无条件改名）
+            // 仲裁：baseHash 与现状不符 → mtime 元组裁决（取代无条件改名）
             let landed = match arbitrate_existing(vault, conn, "note", pf, &bytes)? {
                 Some(l) if l.server_hash != pf.hash => {
                     // 来件被降级：原路径保留，来件已成副本 → 不落盘
@@ -884,7 +884,7 @@ fn write_pushed_file(
         "asset" => {
             // 附件按原路径落盘（内容 hash 已在上方验证）：vault 里的附件可能
             // 不是内容寻址名（Obsidian 导入/演示库的人名文件），路径即身份。
-            // M3a 起附件同样参与 mtime 仲裁（堵 M2 同路径不同内容静默覆盖的洞）
+            // 附件同样参与 mtime 仲裁（堵同路径不同内容静默覆盖的洞）
             if !pf.path.starts_with("assets/") || pf.path.contains("..") {
                 return Err(format!("附件路径非法: {}", pf.path));
             }
@@ -911,7 +911,7 @@ fn write_pushed_file(
             fs_ops::atomic_write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
             // LWW 时间源保真：同笔记分支
             fs_ops::set_file_mtime(&abs, pf.mtime_ms);
-            // M3b D4：push 干净落盘/仲裁获胜 → 清除该路径 tombstone（笔记分支经 write_note 自动清）
+            // D4：push 干净落盘/仲裁获胜 → 清除该路径 tombstone（笔记分支经 write_note 自动清）
             if let Err(e) = crate::sync::clear_tombstone_if_present(vault, &pf.path) {
                 log::warn!("清 tombstone 失败 {}: {e}", pf.path);
             }
@@ -925,7 +925,7 @@ fn write_pushed_file(
 }
 
 /// GET /api/v1/tombstones —— 删除墓碑列表（需鉴权）。
-/// 旧服务器无此端点 → 404，客户端按空列表处理（删除传播静默关闭，退化 M2 行为）。
+/// 旧服务器无此端点 → 404，客户端按空列表处理（删除传播静默关闭，退化行为）。
 /// 顺带做 TTL 清理（30 天，惰性执行）。
 async fn tombstones(
     State(ctx): State<Arc<ServerCtx>>,
@@ -959,7 +959,7 @@ struct DeleteBody {
     paths: Vec<String>,
 }
 
-/// POST /api/v1/delete —— 软删（入回收站，铁律永不硬删）。M2 同步回合不主动调用。
+/// POST /api/v1/delete —— 软删（入回收站，铁律永不硬删）。同步回合不主动调用。
 async fn delete_files(
     State(ctx): State<Arc<ServerCtx>>,
     headers: HeaderMap,
@@ -972,7 +972,7 @@ async fn delete_files(
     let results = tokio::task::spawn_blocking(move || delete_blocking(&ctx2, &body_paths))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
-    // M3f：有成功删除 = vault 已变更 → 通知手机端 UI 刷新（否则目录仍列已删笔记）
+    // 有成功删除 = vault 已变更 → 通知手机端 UI 刷新（否则目录仍列已删笔记）
     if results.iter().any(|r| r.ok) {
         ctx.notify_ui();
     }
@@ -1069,7 +1069,7 @@ pub fn service_instance_name(fullname: &str) -> String {
 }
 
 /// 生产启动：独立线程 + 单线程 tokio runtime（不依赖 tauri runtime 的 feature 组合）。
-/// 返回实际端口。幂等：已启动则直接返回端口。服务器随进程存活（M2 无停止需求）。
+/// 返回实际端口。幂等：已启动则直接返回端口。服务器随进程存活（无停止需求）。
 pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     // 幂等：Android 端 vault 每次打开都会调；进程重建后状态归零会重新走到这里
     {
@@ -1091,14 +1091,14 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     // 保留一份 app 引用给线程退出路径复位 sync_port（否则服务器死后
     // UI 仍报 running，且 spawn 幂等早退无法自愈）
     let app_for_cleanup = Arc::clone(&app);
-    // M3f：UI 刷新通知（Tauri setup 注册的 emit 闭包；测试直接建 ctx 时为 None = 无操作）
+    // UI 刷新通知（Tauri setup 注册的 emit 闭包；测试直接建 ctx 时为 None = 无操作）
     let ui_notify = app.sync_notify.lock().map_err(|_| "sync_notify 锁中毒".to_string())?.clone();
     let ctx = Arc::new(ServerCtx::new(app, cfg).with_ui_notify(ui_notify));
-    // M4h-2：把 ctx 登记给命令层（UI 的「允许/拒绝」要操作它的 pending 队列）
+    // 把 ctx 登记给命令层（UI 的「允许/拒绝」要操作它的 pending 队列）
     register_active_ctx(&ctx);
 
     // mDNS 广播（best effort；Android 需 multicast lock，失败不阻断服务器）。
-    // M4h-4：服务名即设备代号（LocalSend 体验——browse 第一眼是「青柠手机」
+    // 服务名即设备代号（LocalSend 体验——browse 第一眼是「青柠手机」
     // 而非 IP）；拿不到 AppHandle 时回退 vault 名，测试照常。
     let mdns_name = crate::alias::current_alias(None);
     advertise_mdns(port, mdns_name);
@@ -1227,7 +1227,7 @@ fn local_lan_ip() -> Option<String> {
 pub struct SyncPairingInfo {
     pub running: bool,
     pub port: Option<u16>,
-    /// M4h-4：设备代号（AppConfig.deviceAlias；设备级，换库不变）
+    /// 设备代号（AppConfig.deviceAlias；设备级，换库不变）
     pub device_alias: String,
     /// vault 内 sync.json 的设备名（旧版兼容展示；UI 优先用 deviceAlias）
     pub device_name: String,
@@ -1239,10 +1239,10 @@ pub struct SyncPairingInfo {
     /// 解开「诊断要先知道 IP、可我不知道 IP」的死循环——手机面板直接显示它。
     #[serde(default)]
     pub lan_ip: Option<String>,
-    /// M4h-3：设备身份（展示用；桌面端按它记住这台手机）
+    /// 设备身份（展示用；桌面端按它记住这台手机）
     #[serde(default)]
     pub device_id: String,
-    /// M4h-2：待授权配对请求（仅非空时前端渲染卡片）
+    /// 待授权配对请求（仅非空时前端渲染卡片）
     #[serde(default)]
     pub pending_pairs: Vec<PendingPairView>,
 }
@@ -1265,7 +1265,7 @@ pub fn sync_pairing_info(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<Sy
     };
     // D10：本机地址（UDP connect 探默认出口网卡，不真正发包）
     let lan_ip = port.and_then(|p| local_lan_ip().map(|ip| format!("http://{ip}:{p}")));
-    // M4h-2：待授权请求来自活着的 ServerCtx（服务器线程持有）
+    // 待授权请求来自活着的 ServerCtx（服务器线程持有）
     let pending_pairs = crate::sync_server::active_ctx()
         .map(|ctx| list_pending(&ctx))
         .unwrap_or_default();
@@ -1282,14 +1282,14 @@ pub fn sync_pairing_info(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<Sy
     })
 }
 
-/// M4h-2：手机端「允许」一次配对请求（UI 点按钮 → 这里）
+/// 手机端「允许」一次配对请求（UI 点按钮 → 这里）
 #[tauri::command]
 pub fn sync_pair_approve(nonce: String) -> CmdResult<()> {
     let ctx = active_ctx().ok_or("同步服务器未运行")?;
     approve_pending(&ctx, &nonce)
 }
 
-/// M4h-2：手机端「拒绝」一次配对请求
+/// 手机端「拒绝」一次配对请求
 #[tauri::command]
 pub fn sync_pair_reject(nonce: String) -> CmdResult<()> {
     let ctx = active_ctx().ok_or("同步服务器未运行")?;
@@ -1349,7 +1349,7 @@ pub(crate) mod test_util {
         (base, code)
     }
 
-    /// 同 `start_phone_server`，但把 `ServerCtx` 交出来——M4h-2 的一键授权
+    /// 同 `start_phone_server`，但把 `ServerCtx` 交出来——的一键授权
     /// 测试要直接从「手机侧」调 approve/reject（UI 点按钮就是在做这件事）。
     pub(crate) fn start_phone_server_with_ctx(
         phone_vault: &Path,
@@ -1441,7 +1441,7 @@ mod tests {
         assert_eq!(r.status(), StatusCode::OK, "新库 token 应可用");
     }
 
-    /// M3f 回归：服务器侧 push 落盘 / delete 生效后必须通知前端刷新
+    /// 回归：服务器侧 push 落盘 / delete 生效后必须通知前端刷新
     /// （修复前：移动端目录仍列远端已删的笔记，点击报「笔记不存在」）
     #[test]
     fn push_and_delete_notify_ui_on_change() {
@@ -1724,14 +1724,14 @@ mod tests {
         assert_eq!(pushed.len(), 1);
         assert!(pushed[0].ok, "push 应成功: {:?}", pushed[0].error);
         assert!(pushed[0].conflict_saved_as.is_none(), "base_hash 相同不是冲突");
-        // M3a：干净落盘 → serverHash = 所推 hash
+        // 干净落盘 → serverHash = 所推 hash
         let desktop_hash = fs_ops::content_hash(desktop_content.as_bytes());
         assert_eq!(pushed[0].server_hash.as_deref(), Some(desktop_hash.as_str()));
         let after = std::fs::read_to_string(dir.path().join(&note.path)).unwrap();
         assert_eq!(after, desktop_content);
 
         // 8. 仲裁（来件新）：base_hash 与服务器现 hash 不一致且来件 mtime 更新
-        //    → 服务器版本改名保留 + 客户端内容落原路径（M2 行为保留，mtime 定向）
+        // → 服务器版本改名保留 + 客户端内容落原路径（行为保留，mtime 定向）
         let third = "第三方版本";
         let future_ms = fs_ops::now_ms() + 3_600_000;
         let pushed2: Vec<PushResult> = client
@@ -1769,7 +1769,7 @@ mod tests {
         .unwrap()
         .is_some());
 
-        // 8b. 仲裁（来件旧）：来件 mtime 更旧 → 来件降级为冲突副本，原路径保留（M3a 新方向）
+        // 8b. 仲裁（来件旧）：来件 mtime 更旧 → 来件降级为冲突副本，原路径保留（新方向）
         let fourth = "更旧版本";
         let past_ms = fs_ops::now_ms() - 3_600_000;
         let current_hash = fs_ops::content_hash(third.as_bytes());
@@ -1907,7 +1907,7 @@ mod tests {
         assert!(leftovers.is_empty(), "不得残留 tmp: {leftovers:?}");
     }
 
-    /// M3a 仲裁单测（来件新 / 来件旧 / 平手三向）。
+    /// 仲裁单测（来件新 / 来件旧 / 平手三向）。
     /// 直接调 arbitrate_existing——HTTP 层无法钉住服务器侧文件的 mtime
     #[test]
     fn arbitrate_mtime_directions_and_tie() {
@@ -2020,7 +2020,7 @@ mod tests {
         panic!("服务器 2s 内未就绪");
     }
 
-    // ---------- M4h-2：一键授权（取代抄 8 位配对码） ----------
+    // ---------- 一键授权（取代抄 8 位配对码） ----------
 
     /// nonce 全流程：入队 → 手机允许 → 桌面拿到 token；与 /pair 同落盘路径
     #[test]
@@ -2069,7 +2069,7 @@ mod tests {
             .unwrap();
         assert_eq!(st["status"], "approved");
         // name 是**服务器**（手机）的代号——桌面端拿它填 profile.name，
-        // 不是自己提交的 clientName（M4h-4：代号存 AppConfig，词表随机值）
+        // 不是自己提交的 clientName（代号存 AppConfig，词表随机值）
         assert_eq!(st["name"], crate::alias::current_alias(None));
         let token = st["token"].as_str().unwrap().to_string();
         assert_eq!(token, cfg.tokens[0], "签发的就是落盘的那个");
@@ -2231,7 +2231,7 @@ mod tests {
         assert_eq!(post("pc", "n-ok"), 200);
     }
 
-    // ---------- M4h-3：设备身份 ----------
+    // ---------- 设备身份 ----------
 
     /// device_id 首次生成即持久化，再次加载不变（否则桌面端身份永远对不上）
     #[test]
@@ -2246,7 +2246,7 @@ mod tests {
         assert_eq!(a.pairing_code, b.pairing_code, "配对码同样落盘（回归）");
     }
 
-    /// M2/M3 的 sync.json（无 deviceId）→ 加载时补上并落盘
+    /// /的 sync.json（无 deviceId）→ 加载时补上并落盘
     #[test]
     fn legacy_sync_json_gains_device_id() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -2281,7 +2281,7 @@ mod tests {
         let info = crate::sync_client::fetch_info(&base).unwrap();
         assert_eq!(info.app, "lanmark");
         assert_eq!(info.device_id, expected);
-        // M4h-4：name 即设备代号（进程内缓存，词表随机值；同进程内稳定）
+        // name 即设备代号（进程内缓存，词表随机值；同进程内稳定）
         assert!(!info.name.is_empty());
         assert_eq!(info.name, crate::alias::current_alias(None));
     }

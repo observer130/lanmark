@@ -5,12 +5,12 @@ import { useDismissable } from "./useDismissable";
 /**
  * 块菜单：对准 doc 顶层块的「上移 / 下移 / 删除」。
  *
- * 存在的理由（M8 G3）：Crepe 的块移动只走 HTML5 拖拽，触屏没有 `dragstart`、
+ * 存在的理由（G3）：Crepe 的块移动只走 HTML5 拖拽，触屏没有 `dragstart`、
  * 宿主也可能吞掉 HTML5 拖放——所以需要一个**不依赖拖拽**的入口。触发方式有三条，
  * 都汇聚到这个组件：
- *  ① 桌面：点左侧「六个点」手柄（见 `EditorPane` 的 DOM 代理监听）
- *  ② 桌面：在块上右键（`contextmenu`）
- *  ③ 窄屏：长按块（EditorPane 的 touchstart 定时器）
+ * ① 桌面：点左侧「六个点」手柄（见 `EditorPane` 的 DOM 代理监听）
+ * ② 桌面：在块上右键（`contextmenu`）
+ * ③ 窄屏：长按块（EditorPane 的 touchstart 定时器）
  *
  * 布局：桌面是贴着点击位置的浮层；窄屏是底部抽屉（触控目标 ≥44px）。
  * 删除走 ProseMirror 的 history——所以不再加二次确认。但**别以为按 Ctrl+Z 总能救回来**：
@@ -107,8 +107,8 @@ export function BlockMenu({ target, narrow, onMove, onDelete, onClose }: BlockMe
     return (
       <>
         {/* 遮罩**不挂 onClick**：点外部关闭由 useDismissable 的 pointerdown 负责。
-            挂 onClick 会被「打开菜单那个手势的尾巴 click」立刻关掉——长按唤出时尤其明显
-            （手指抬起时 click 落在刚出现的遮罩上，菜单只闪现几十毫秒，2026-10-16 真机实测） */}
+ 挂 onClick 会被「打开菜单那个手势的尾巴 click」立刻关掉——长按唤出时尤其明显
+ （手指抬起时 click 落在刚出现的遮罩上，菜单只闪现几十毫秒，2026-10-16 真机实测） */}
         <div className="fixed inset-0 z-40 bg-black/30" />
         <div
           ref={ref}

@@ -17,7 +17,7 @@ import { BLOCK_ITEMS, type BlockItem, type BlockKind } from "../milkdown/block-i
 import { useDismissable } from "./useDismissable";
 
 /**
- * 「插入块」底部抽屉（M8 批次 2）——移动端补上桌面 hover「+」的等价能力。
+ * 「插入块」底部抽屉——移动端补上桌面 hover「+」的等价能力。
  *
  * 为什么必须有它：窄屏没有 hover，Crepe 的 hover「+」与块手柄都靠 `pointermove` 悬浮显示，
  * 触屏一滚动就发 `pointercancel` 掐断——所以「插入标题/代码块」这条能力在手机上
@@ -61,8 +61,8 @@ export function InsertMenu({
   return (
     <>
       {/* 遮罩**不挂 onClick**：点外部关闭由 useDismissable 的 pointerdown 负责。
-            挂 onClick 会被「打开菜单那个手势的尾巴 click」立刻关掉——长按唤出时尤其明显
-            （手指抬起时 click 落在刚出现的遮罩上，菜单只闪现几十毫秒，2026-10-16 真机实测） */}
+ 挂 onClick 会被「打开菜单那个手势的尾巴 click」立刻关掉——长按唤出时尤其明显
+ （手指抬起时 click 落在刚出现的遮罩上，菜单只闪现几十毫秒，2026-10-16 真机实测） */}
         <div className="fixed inset-0 z-40 bg-black/30" />
       <div
         ref={ref}

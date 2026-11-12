@@ -15,14 +15,14 @@ interface VaultStore {
   activePath: string | null;
   content: string;
   /**
-   * 外部修订号：**只**在「远端内容真的替换了当前笔记」时自增
-   * （`remoteChanged` 拉到新内容 / 同步回合后重载）。
-   *
-   * 编辑器（`MilkdownHost`）订阅它：变化时把 store 内容灌进已挂载的 Crepe，
-   * 否则已挂载的实例仍显示旧文档，用户下一次输入会把「旧文档 + 按键」写回去，
-   * 覆盖刚拉取/推送的新版本（S3）。
-   * 普通保存也会 `set({ content })`，但**不会**动这个号 ⇒ 不重置编辑器、不跳光标。
-   */
+ * 外部修订号：**只**在「远端内容真的替换了当前笔记」时自增
+ * （`remoteChanged` 拉到新内容 / 同步回合后重载）。
+ *
+ * 编辑器（`MilkdownHost`）订阅它：变化时把 store 内容灌进已挂载的 Crepe，
+ * 否则已挂载的实例仍显示旧文档，用户下一次输入会把「旧文档 + 按键」写回去，
+ * 覆盖刚拉取/推送的新版本（S3）。
+ * 普通保存也会 `set({ content })`，但**不会**动这个号 ⇒ 不重置编辑器、不跳光标。
+ */
   externalRev: number;
   /** 上次读取/落盘的文件原文；null = 基线未知（此时不启用 no-op 守卫） */
   savedContent: string | null;
@@ -40,9 +40,9 @@ interface VaultStore {
   /** 收起的目录（relPath 集合；按 vault 持久化到 localStorage） */
   collapsedDirs: Set<string>;
   /**
-   * v0.5.1：侧栏分区展开状态（"favorites" | "trash" 在集合里 = 展开）。
-   * 默认收起（只展示 3 条 + 展开栏）；按 vault 持久化到 localStorage（硬约定 3）。
-   */
+ * v0.5.1：侧栏分区展开状态（"favorites" | "trash" 在集合里 = 展开）。
+ * 默认收起（只展示 3 条 + 展开栏）；按 vault 持久化到 localStorage（硬约定 3）。
+ */
   expandedSections: Set<string>;
   /** 新建对话框状态（null = 关闭） */
   pendingCreate: { kind: "note" | "folder"; parentDir: string } | null;
@@ -58,15 +58,15 @@ interface VaultStore {
   refreshTree: () => Promise<void>;
   refreshMeta: () => Promise<void>;
   reindex: () => Promise<void>;
-  /** M3f：远端同步改动后刷新（服务器侧 push 落盘 / delete 生效 → Rust 推事件） */
+  /** 远端同步改动后刷新（服务器侧 push 落盘 / delete 生效 → Rust 推事件） */
   remoteChanged: () => Promise<void>;
   /**
-   * 把「外部来源」（同步拉取 / 远端推送）的新内容应用到当前笔记：
-   * 更新 content + savedContent，清 dirty，并自增 `externalRev` 让编辑器替换文档。
-   *
-   * 只在 `activePath === path` 且当前无未保存编辑时生效（返回是否应用）。
-   * **普通保存路径不要调用**——它就是 S3 的「外部内容替换」入口。
-   */
+ * 把「外部来源」（同步拉取 / 远端推送）的新内容应用到当前笔记：
+ * 更新 content + savedContent，清 dirty，并自增 `externalRev` 让编辑器替换文档。
+ *
+ * 只在 `activePath === path` 且当前无未保存编辑时生效（返回是否应用）。
+ * **普通保存路径不要调用**——它就是 S3 的「外部内容替换」入口。
+ */
   applyExternalContent: (path: string, content: string) => boolean;
   openNote: (path: string, silent?: boolean) => Promise<void>;
   closeNote: () => Promise<void>;
@@ -82,7 +82,7 @@ interface VaultStore {
   createNoteIn: (name: string, dir: string) => Promise<boolean>;
   /** 对话框确认：创建文件夹（名称可含 `/` 直接建多级）。返回是否成功 */
   createFolderIn: (name: string, dir: string) => Promise<boolean>;
-  /** M4d：切换笔记库（严格顺序）。返回是否成功 */
+  /** 切换笔记库（严格顺序）。返回是否成功 */
   switchVault: (path: string, mode: "open" | "create") => Promise<boolean>;
   toggleDirCollapsed: (path: string) => void;
   /** 展开路径的全部祖先目录（打开笔记/新建文件落在收起目录里时用） */
@@ -100,7 +100,7 @@ interface VaultStore {
 }
 
 /**
- * 读取当前编辑器偏好（M4c）。抽成函数而不是模块级常量：设置可在运行中改，
+ * 读取当前编辑器偏好。抽成函数而不是模块级常量：设置可在运行中改，
  * 常量会在改完设置后继续用旧值。设置 store 未加载时取它与 Rust 一致的默认值。
  */
 function prefs() {
@@ -138,7 +138,7 @@ function saveCollapsed(vaultPath: string | null, set: Set<string>): void {
 }
 
 /* ── 侧栏分区展开状态的 localStorage 持久化（v0.5.1，按 vault 隔离） ──
-   存「已展开」集合：缺省（无记录）= 全部收起，即需求默认态「3 条 + 展开栏」 */
+ 存「已展开」集合：缺省（无记录）= 全部收起，即需求默认态「3 条 + 展开栏」 */
 function metaSectionsKey(vaultPath: string | null): string {
   return `lanmark:meta-sections:${vaultPath ?? ""}`;
 }
@@ -197,7 +197,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   savedContent: null,
   dirty: false,
   savedAt: null,
-  // M4c：初值取「默认打开模式」设置（设置 store 未加载时 = wysiwyg，与 M3 一致）
+  // 初值取「默认打开模式」设置（设置 store 未加载时 = wysiwyg，与一致）
   editorMode: useSettingsStore.getState().settings.editor.defaultMode,
   renamingPath: null,
   searchQuery: "",
@@ -344,11 +344,11 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   /** 远端同步改动后刷新（手机端是服务器、无客户端循环：不刷新则目录仍列
-   * 远端已删的笔记，点击报「笔记不存在」）。DB 已由服务器侧 handler 维护
-   * （write_note upsert / remove_prefix 清三表），此处只重取树与 meta；
-   * 当前打开的笔记若未在编辑则重载内容，防陈旧内容被下一次输入覆盖
-   * （与桌面 runRound 同守卫）；读失败（远端已删）保留当前状态——
-   * 用户编辑保存后按 LWW edit/delete 复活 */
+ * 远端已删的笔记，点击报「笔记不存在」）。DB 已由服务器侧 handler 维护
+ * （write_note upsert / remove_prefix 清三表），此处只重取树与 meta；
+ * 当前打开的笔记若未在编辑则重载内容，防陈旧内容被下一次输入覆盖
+ * （与桌面 runRound 同守卫）；读失败（远端已删）保留当前状态——
+ * 用户编辑保存后按 LWW edit/delete 复活 */
   remoteChanged: async () => {
     if (get().status !== "ready") return;
     await get().refreshTree();
@@ -408,7 +408,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     try {
       const { content } = await vault.readNote(path);
       if (seq !== openSeq) return; // 慢响应：丢弃，避免 activePath 与 content 错位
-      // M4c B1：每次打开笔记都回到「默认打开模式」（而非沿用上一篇的模式）
+      // B1：每次打开笔记都回到「默认打开模式」（而非沿用上一篇的模式）
       set({
         activePath: path,
         content,
@@ -458,18 +458,18 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   /**
-   * 落盘前先做「规范化比较」：内容与磁盘等价就**不写**。
-   *
-   * 为什么必须有这一层：Milkdown 的 trailing 插件会在首次选区事务往文末插一个空段落，
-   * 序列化成 markdown 就是多一个 `\n`。只在格式化层处理不够——`writeNote` 仍会被调用，
-   * 文件 mtime / 同步版本号照样变。这里用 `savedContent`（上次读/写的原文）做基线：
-   *  - `trimDocTail` 永远执行（修尾空行，即使 formatOnSave 关闭）；
-   *  - `formatMarkdown` 仅在设置开启时执行（整理中间空白）；
-   *  - `savedContent === null` 表示基线未知（测试/异常路径），此时照常写。
-   *
-   * 源码模式不把整理结果回写进 `content`：CodeMirror 是受控组件，外部改 value 会动光标。
-   * 只更新 `savedContent` 基线；下一次输入仍按规范化比较，不会重复写盘。
-   */
+ * 落盘前先做「规范化比较」：内容与磁盘等价就**不写**。
+ *
+ * 为什么必须有这一层：Milkdown 的 trailing 插件会在首次选区事务往文末插一个空段落，
+ * 序列化成 markdown 就是多一个 `\n`。只在格式化层处理不够——`writeNote` 仍会被调用，
+ * 文件 mtime / 同步版本号照样变。这里用 `savedContent`（上次读/写的原文）做基线：
+ * - `trimDocTail` 永远执行（修尾空行，即使 formatOnSave 关闭）；
+ * - `formatMarkdown` 仅在设置开启时执行（整理中间空白）；
+ * - `savedContent === null` 表示基线未知（测试/异常路径），此时照常写。
+ *
+ * 源码模式不把整理结果回写进 `content`：CodeMirror 是受控组件，外部改 value 会动光标。
+ * 只更新 `savedContent` 基线；下一次输入仍按规范化比较，不会重复写盘。
+ */
   saveNow: async () => {
     const { activePath, content, dirty, savedContent, editorMode } = get();
     if (!activePath || !dirty) return true;
@@ -513,7 +513,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         set({ savedContent: next, savedAt: Date.now() });
       }
     }
-    // 写盘已成功（哪怕中途切走）都要通知：M3d 触发 C → 自动同步循环
+    // 写盘已成功（哪怕中途切走）都要通知：触发 C → 自动同步循环
     // （轻量 CustomEvent，避免两 store 循环依赖；循环侧 5s 尾沿后回合）
     window.dispatchEvent(new CustomEvent("lanmark:vault-saved"));
     return true;
@@ -570,18 +570,18 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   /**
-   * M4d 切换笔记库（最高风险流程）。
-   *
-   * 严格顺序，任何一步失败都要保住原状：
-   *   1. dirty → saveNow()；失败 → **中止**，不切库（未保存编辑不丢铁律）
-   *   2. 停自动同步循环（先停，防止回合打到半切换状态）
-   *   3. vault_set_path（与 VaultPicker 完全相同的调用路径）
-   *   4. 成功：状态重置 + 重取树/meta + 按 B1 设默认模式 + 该库的折叠状态重载
-   *   5. 失败：保留原 vault 与状态 + 错误提示（绝不出现「已切库但树是旧的」）
-   *
-   * 手机端：Rust 侧 open_vault_at 的 android 分支会幂等启动同步服务器
-   * （端口可能 +1），配对码不变 ⇒ 桌面无需重新配对。
-   */
+ * 切换笔记库（最高风险流程）。
+ *
+ * 严格顺序，任何一步失败都要保住原状：
+ * 1. dirty → saveNow()；失败 → **中止**，不切库（未保存编辑不丢铁律）
+ * 2. 停自动同步循环（先停，防止回合打到半切换状态）
+ * 3. vault_set_path（与 VaultPicker 完全相同的调用路径）
+ * 4. 成功：状态重置 + 重取树/meta + 按 B1 设默认模式 + 该库的折叠状态重载
+ * 5. 失败：保留原 vault 与状态 + 错误提示（绝不出现「已切库但树是旧的」）
+ *
+ * 手机端：Rust 侧 open_vault_at 的 android 分支会幂等启动同步服务器
+ * （端口可能 +1），配对码不变 ⇒ 桌面无需重新配对。
+ */
   switchVault: async (path, mode) => {
     // 停循环 / 换库之前先 flush（S6）：编辑器实例随 activePath 一起被丢弃
     flushEditorToStore();

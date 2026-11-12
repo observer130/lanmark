@@ -58,10 +58,10 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-/** M4h-4：设备代号头（手机/桌面共用）。
- *  展示态 = 代号 + 「点笔改名」；编辑态 = 输入框 + 保存/取消。
- *  改名走 deviceAlias.set（Rust 侧 trim + 24 字截断，**以返回值为准**），
- *  成功后乐观更新 sync store 里的 pairing（桌面下次发现即见新名）。 */
+/** 设备代号头（手机/桌面共用）。
+ * 展示态 = 代号 + 「点笔改名」；编辑态 = 输入框 + 保存/取消。
+ * 改名走 deviceAlias.set（Rust 侧 trim + 24 字截断，**以返回值为准**），
+ * 成功后乐观更新 sync store 里的 pairing（桌面下次发现即见新名）。 */
 function AliasHeader({ alias }: { alias: string }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(alias);
@@ -138,11 +138,11 @@ function AliasHeader({ alias }: { alias: string }) {
 
 /** 手机端面板：服务器状态 + **待授权配对请求** + 本机地址 + 冲突副本可发现性。
  *
- *  M4h-2 起主路径变了：桌面点「连接」→ 这里出现「『青柠台机』请求连接」+ [允许][拒绝]，
- *  取代过去「手机读数、桌面抄 8 位码」。配对码降为兜底。
- *  M4h-4：面板头部是**设备代号**（LocalSend alias 语义）——局域网内 Machine
- *  靠它标识，点笔可改；IP/端口与配对码继续收在兜底区。
- *  轮询在常驻条里做（面板收起时条上也要显示运行状态），这里只做展示。 */
+ * 主路径：桌面点「连接」→ 这里出现「『青柠台机』请求连接」+ [允许][拒绝]，
+ * 取代过去「手机读数、桌面抄 8 位码」。配对码降为兜底。
+ * 面板头部是**设备代号**（LocalSend alias 语义）——局域网内 Machine
+ * 靠它标识，点笔可改；IP/端口与配对码继续收在兜底区。
+ * 轮询在常驻条里做（面板收起时条上也要显示运行状态），这里只做展示。 */
 function ServerPanel() {
   const pairing = useSyncStore((s) => s.pairing);
   const conflictCount = useSyncStore((s) => s.conflictCount);
@@ -158,7 +158,7 @@ function ServerPanel() {
 
   return (
     <div className="space-y-2 px-3">
-      {/* M4h-4：本机代号（点击笔改；改名立即生效，桌面端下次发现即见新名） */}
+      {/* 本机代号（点击笔改；改名立即生效，桌面端下次发现即见新名） */}
       <AliasHeader alias={alias} />
       {/* 待授权请求（仅非空时渲染，强调边框——这是需要用户动手的事） */}
       {pending.map((p) => (
@@ -244,7 +244,7 @@ function ServerPanel() {
         </details>
       )}
 
-      {/* M3e 可发现性：最近回合时间 + 库中冲突副本 */}
+      {/* 可发现性：最近回合时间 + 库中冲突副本 */}
       {pairing.running && (
         <div className="flex items-center gap-3 px-1 text-[11px] text-ink-3">
           <span>
@@ -292,7 +292,7 @@ function ClientPanel() {
 
   const canPair = url.trim().startsWith("http") && code.trim().length === 8;
 
-  // M4h-4：桌面也有代号（手机授权卡片显示「『晨窗台机』请求连接」的就是它）。
+  // 桌面也有代号（手机授权卡片显示「『晨窗台机』请求连接」的就是它）。
   // 桌面平时不轮询 pairing（那是手机的活），这里只在挂载时拉一次——
   // 代号改名不频繁，且改名入口自己会刷新 store。
   const pairing = useSyncStore((s) => s.pairing);
@@ -308,7 +308,7 @@ function ClientPanel() {
     <div className="space-y-3 px-3">
       {/* 本机代号（对方手机上看到的名字；点笔可改） */}
       {selfAlias && <AliasHeader alias={selfAlias} />}
-      {/* 已配对服务器（M3e：在线状态 + 最近同步时间；M4h-4 起 name 即手机代号） */}
+      {/* 已配对服务器（在线状态 + 最近同步时间；name 即手机代号） */}
       {servers.map((s) => {
         const online = probeStates[s.id]?.online ?? null;
         return (
@@ -409,8 +409,8 @@ function ClientPanel() {
         </div>
       )}
 
-      {/* M4h：自动查找同一局域网的手机 → 点「连接」→ 手机上点「允许」
-          （M5-2：原「局域网扫描」勾选框已移除，扫描总是全扫且只在主动点击时发生） */}
+      {/* 自动查找同一局域网的手机 → 点「连接」→ 手机上点「允许」
+ （原「局域网扫描」勾选框已移除，扫描总是全扫且只在主动点击时发生） */}
       <div className="rounded-[10px] border border-line bg-card px-3 py-2.5 shadow-card">
         <div className="flex items-center gap-2">
           <div className="flex-1 text-xs font-medium text-ink">连接手机</div>
@@ -426,7 +426,7 @@ function ClientPanel() {
           {scanning ? "正在查找…" : "自动查找手机"}
         </button>
 
-        {/* 隐私说明跟着扫描动作走（M5-2 从设置页「设备发现」组移入） */}
+        {/* 隐私说明跟着扫描动作走（从设置页「设备发现」组移入） */}
         <p className="mt-1 text-[11px] leading-4 text-ink-3">
           只连本机局域网内的地址，只读取设备名与笔记数，不发送任何笔记内容。
         </p>
@@ -441,7 +441,7 @@ function ClientPanel() {
           </div>
         )}
 
-        {/* 候选设备卡片（M4h-1：mDNS + LAN 探测合并结果；M4h-4：name = 对方代号） */}
+        {/* 候选设备卡片（mDNS + LAN 探测合并结果；name = 对方代号） */}
         {connecting == null && scanned.length > 0 && (
           <ul className="mt-1.5 space-y-1">
             {scanned.map((d) => (
@@ -488,7 +488,7 @@ function ClientPanel() {
           </p>
         )}
 
-        {/* 手动连接：只留 URL 输入；输完同样走「手机点允许」（M4h-2 主路径） */}
+        {/* 手动连接：只留 URL 输入；输完同样走「手机点允许」（主路径） */}
         <details className="mt-2" open={scanned.length === 0 && scanRan}>
           <summary className="cursor-pointer text-[11px] text-ink-3">
             手动连接（输入地址）
@@ -537,7 +537,7 @@ function ClientPanel() {
 }
 
 /** 手动「立即同步」（常驻条按钮）：对所有在线（或未探测）服务器依次回合。
- *  runRound 自带串行锁与同步前 flush；手动触发不静默，错误会浮出到面板。 */
+ * runRound 自带串行锁与同步前 flush；手动触发不静默，错误会浮出到面板。 */
 async function syncAllServers(): Promise<void> {
   const st = useSyncStore.getState();
   for (const s of st.servers) {
@@ -547,7 +547,7 @@ async function syncAllServers(): Promise<void> {
 }
 
 /** 桌面端常驻条状态文案：未配对 / 已连接 / 离线 / 尚未探测。
- *  入参来自组件内订阅的 servers / probeStates（getState 会让状态点失去响应）。 */
+ * 入参来自组件内订阅的 servers / probeStates（getState 会让状态点失去响应）。 */
 function clientStatus(
   servers: { id: string; lastSuccessAt: number | null }[],
   probeStates: Record<string, { online: boolean | null }>,
@@ -749,8 +749,8 @@ export function SyncSection() {
       </div>
 
       {/* 上拉管理面板：锚定在常驻条上方，**与侧栏同宽对齐**。
-          此前是写死的 330px + left-2，比侧栏（288px）宽出 42px 向右突出，
-          视觉上像没对齐（用户走查反馈）。改为 left/right 内缩后左右对称。 */}
+ 此前是写死的 330px + left-2，比侧栏（288px）宽出 42px 向右突出，
+ 视觉上像没对齐（用户走查反馈）。改为 left/right 内缩后左右对称。 */}
       {open && (
         <div className="absolute bottom-full left-2 right-2 z-40 mb-2 rounded-xl border border-line bg-card shadow-pop">
           <div className="flex items-center justify-between pb-1 pl-4 pr-2 pt-2.5">

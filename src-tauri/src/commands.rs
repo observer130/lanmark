@@ -1,5 +1,5 @@
 //! Tauri 命令层：`xxx` 是 3 行的命令封装（IPC 入口），`xxx_op` 是纯逻辑
-//! （接收 &Arc<AppState>，可被集成测试与 M2/M3 的同步引擎直接复用）。
+//! （接收 &Arc<AppState>，可被集成测试与 /的同步引擎直接复用）。
 //! 约定：所有路径参数均为 vault 相对路径（'/' 分隔）；未打开 vault 时返回错误。
 
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ pub struct VaultStatus {
     pub configured: bool,
     pub open: bool,
     pub path: Option<String>,
-    /// M3：自动同步开关（默认 true）
+    /// 自动同步开关（默认 true）
     pub sync_auto: bool,
 }
 
@@ -60,7 +60,7 @@ pub fn vault_status(app: tauri::AppHandle, state: State<Arc<AppState>>) -> CmdRe
 }
 
 /// 按路径打开/创建 vault 并持久化配置。
-/// 文件夹选择由前端完成（JS dialog 桌面跨平台；移动端 M1 用 app 文档目录，M2 改 SAF 选择器），
+/// 文件夹选择由前端完成（JS dialog 桌面跨平台；移动端用 app 文档目录，改 SAF 选择器），
 /// 本命令只接收路径——Rust 侧不依赖任何 cfg(desktop) 的对话框 API。
 #[tauri::command]
 pub async fn vault_set_path(
@@ -89,7 +89,7 @@ pub async fn vault_set_path(
     .map_err(|e| format!("开库任务失败: {e}"))?
 }
 
-/// M3：自动同步开关（app_config_dir/config.json 持久化）
+/// 自动同步开关（app_config_dir/config.json 持久化）
 #[tauri::command]
 pub fn vault_set_sync_auto(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
     let mut cfg = vault::load_config(&app);
@@ -180,7 +180,7 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
         *vg = Some(path.to_path_buf());
         *dg = Some(conn);
     }
-    // M2：Android = 局域网同步中心节点，vault 打开即启动 axum 服务器（幂等；
+    // Android = 局域网同步中心节点，vault 打开即启动 axum 服务器（幂等；
     // 前台服务由 Kotlin 侧保活，见 gen/android SyncService）。桌面默认不做服务器。
     #[cfg(target_os = "android")]
     {
@@ -194,7 +194,7 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
     Ok(())
 }
 
-/// M4d/M4e：开库后按设置惰性清理过期回收站条目。
+/// /开库后按设置惰性清理过期回收站条目。
 ///
 /// 独立于 `open_vault_at`：那个函数有 ~40 个调用点（含大量测试），
 /// 而清理需要读配置，只有拿得到 `AppHandle` 的入口（启动 setup / vault_set_path /
@@ -453,7 +453,7 @@ pub fn asset_save(state: State<Arc<AppState>>, data_base64: String, ext: String)
     asset_save_op(state.inner(), &data_base64, &ext)
 }
 
-// ---------- M4d/M4e：存储统计、回收站、应用信息 ----------
+// ---------- /存储统计、回收站、应用信息 ----------
 
 pub fn vault_stats_op(state: &Arc<AppState>) -> CmdResult<fs_ops::VaultStats> {
     with_vault(state, |vault| fs_ops::vault_stats(vault).map_err(|e| e.to_string()))
@@ -470,7 +470,7 @@ pub async fn vault_stats(state: State<'_, Arc<AppState>>) -> CmdResult<fs_ops::V
 
 /// 清空回收站，返回删除条目数。
 ///
-/// 注意与 M3 tombstone 的区别：这里是**本地找回**用的垃圾桶，
+/// 注意与 tombstone 的区别：这里是**本地找回**用的垃圾桶，
 /// 清它不影响同步的删除传播——tombstone 账本另存 `.lanmark/tombstones.json`。
 pub fn trash_clear_op(state: &Arc<AppState>) -> CmdResult<usize> {
     with_vault(state, |vault| fs_ops::trash_clear(vault).map_err(|e| e.to_string()))
@@ -749,7 +749,7 @@ mod e2e_tests {
         assert!(search_ms < 1_000, "搜索过慢: {search_ms}ms");
     }
 
-    // ---------- M4d 存储统计 ----------
+    // ---------- 存储统计 ----------
 
     #[test]
     fn vault_stats_counts_notes_folders_assets_and_trash() {
@@ -809,7 +809,7 @@ mod e2e_tests {
         assert!(trash_prune_op(&state, 30).is_err());
     }
 
-    // ---------- M4e 回收站清理 ----------
+    // ---------- 回收站清理 ----------
 
     #[test]
     fn trash_clear_removes_all_entries() {

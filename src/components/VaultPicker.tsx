@@ -9,7 +9,7 @@ import { AppMark } from "./AppMark";
 
 /**
  * 首启选库。桌面走系统文件夹选择器；
- * Android（M2 真机验收修正）：Android 16 起 SAF 禁选 Documents/Download（「无法使用此
+ * Android（真机验收修正）：Android 16 起 SAF 禁选 Documents/Download（「无法使用此
  * 文件夹」），SAF+映射路线整体作废——改为「应用私有外部目录」（零权限、std::fs 直写、
  * 同步场景数据以桌面为镜像）+「自定义路径」（MANAGE 授权下非 Documents/Download 直写）。
  */
@@ -28,10 +28,10 @@ export function VaultPicker() {
   const [customPath, setCustomPath] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   /**
-   * 「应用目录」的**真实**路径：必须问插件（`getExternalFilesDir` 按 applicationId 解析），
-   * 不能写死 `com.lanmark.app`——debug 包（`applicationIdSuffix = ".debug"`，见 AGENTS.md「真机调试」）
-   * 与 release 包的路径不同，写死就会显示成另一个包的目录。取不到时退回不带路径的描述。
-   */
+ * 「应用目录」的**真实**路径：必须问插件（`getExternalFilesDir` 按 applicationId 解析），
+ * 不能写死 `com.lanmark.app`——debug 包（`applicationIdSuffix = ".debug"`，见 AGENTS.md「真机调试」）
+ * 与 release 包的路径不同，写死就会显示成另一个包的目录。取不到时退回不带路径的描述。
+ */
   const [appDirPath, setAppDirPath] = useState<string | null>(null);
   useEffect(() => {
     if (!android) return;
@@ -72,7 +72,7 @@ export function VaultPicker() {
       onMouseDown={isLinuxDesktop ? dragWindow : undefined}
     >
       {/* Linux 无边框窗口：首启页也要有窗控/拖拽/缩放边缘（验收修正）；
-          卡片标记 data-no-drag 豁免拖拽，正文文本可正常选中 */}
+ 卡片标记 data-no-drag 豁免拖拽，正文文本可正常选中 */}
       {isLinuxDesktop && (
         <div className="absolute right-2 top-1.5 z-10">
           <WindowControls />
@@ -84,7 +84,7 @@ export function VaultPicker() {
         className="relative w-full max-w-md rounded-2xl border border-line bg-card p-8 text-center shadow-card"
       >
         <AppMark size={56} className="mx-auto mb-4 block" />
-        {/* M4a：未配置 vault 时设置页也可用（设置存在设备配置目录，与 vault 无关） */}
+        {/* 未配置 vault 时设置页也可用（设置存在设备配置目录，与 vault 无关） */}
         <button
           aria-label="设置"
           title="设置"

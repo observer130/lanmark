@@ -1,4 +1,4 @@
-//! M4a 设置：设备级偏好的数据结构与归一化（纯逻辑，可单测）。
+//! 设置：设备级偏好的数据结构与归一化（纯逻辑，可单测）。
 //!
 //! 存哪：`app_config_dir/config.json` 的 `AppConfig` 内嵌小节（见 `vault.rs`）。
 //! 为什么不放 vault 内 `.lanmark/settings.json`：字体是**设备**偏好，换库不该变；
@@ -11,10 +11,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// M7 配色 key（与前端 `ColorSchemeKey` 同序同值）：浅色 / 深色 / 纸页。
-/// `light` 即 M3 以来的硬编码视觉 ⇒ 作默认值，升级用户界面不突变。
+/// 配色 key（与前端 `ColorSchemeKey` 同序同值）：浅色 / 深色 / 纸页。
+/// `light` 即此前的硬编码视觉 ⇒ 作默认值，升级用户界面不突变。
 const SCHEME_KEYS: [&str; 3] = ["light", "dark", "paper"];
-/// M7 编辑区字体 key（与前端 `FontKey` 同序同值）：默认 MiSans / 思源宋体 / 霞鹜文楷。
+/// 编辑区字体 key（与前端 `FontKey` 同序同值）：默认 MiSans / 思源宋体 / 霞鹜文楷。
 /// 字体栈只在 index.css，这里只认 key（不接受用户输入串）。
 const FONT_KEYS: [&str; 3] = ["sans", "serif", "kai"];
 /// 字号 / 行距的合法枚举。
@@ -23,31 +23,31 @@ const LINE_HEIGHT_KEYS: [&str; 3] = ["compact", "normal", "relaxed"];
 const EDITOR_MODE_KEYS: [&str; 3] = ["read", "wysiwyg", "source"];
 const NEW_NOTE_LOCATION_KEYS: [&str; 2] = ["root", "last"];
 /// 自动保存延迟档位（ms）：仅改防抖时长，不改尾沿纪律。
-/// M5-3 整体调大（原 0.3/0.7/1.5/3s）；旧值归一到最近档（见 `nearest_autosave`）。
+/// 档位整体调大（原 0.3/0.7/1.5/3s）；旧值归一到最近档（见 `nearest_autosave`）。
 const AUTOSAVE_KEYS: [u32; 4] = [1500, 3000, 10_000, 20_000];
 /// 回收站保留天数档位（与前端 `TRASH_RETENTION_OPTIONS` 同序同值）+ 0 = 从不
 const TRASH_RETENTION_GEARS: [u32; 3] = [7, 30, 90];
 
 // ---------- 数据结构 ----------
 
-/// M5 减法说明：M4a 曾有字体（界面/正文/等宽/自定义）、源码字号、正文宽度、
+/// 早期版本还有字体（界面/正文/等宽/自定义）、源码字号、正文宽度、
 /// 界面缩放等字段。移除后旧 config.json 里的残留字段由 serde 静默忽略
 /// （无 deny_unknown_fields），下次保存自然清除，无需迁移代码。
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Appearance {
-    /// M7 配色 key；前端据此写 `<html data-scheme>`（**只含颜色 token**）
+    /// 配色 key；前端据此写 `<html data-scheme>`（**只含颜色 token**）
     ///
-    /// `alias = "theme"` 是旧配置的**迁移入口**：M6 把配色与字体捆在一个 `theme`
+    /// `alias = "theme"` 是旧配置的**迁移入口**：把配色与字体捆在一个 `theme`
     /// 字段里（morning/night/paper/wenkai），这里让旧值直接落到 `scheme`，
     /// 再由 `normalize()` 拆出配套的 `font`（见 `legacy_font`）。
     #[serde(alias = "theme")]
     pub scheme: String,
-    /// M7 编辑区字体 key；前端据此写 `<html data-font>`（界面壳字体不随动）
+    /// 编辑区字体 key；前端据此写 `<html data-font>`（界面壳字体不随动）
     ///
     /// 字段级 `default`（空串）覆盖容器级的 `Appearance::default()`：容器级默认会用
     /// `font = "sans"` 填缺字段，那样就分不清「旧配置没这个字段」与「用户选了默认」，
-    /// M6 → M7 的字体推导会失效（见 `normalize`）。
+    /// 字体推导会失效（见 `normalize`）。
     #[serde(default)]
     pub font: String,
     /// 正文字号档位；`md` = 16px（与既往硬编码一致 ⇒ 默认视觉不变）
@@ -102,7 +102,7 @@ impl UpdatePrefs {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            // M7：默认 = 浅色 + 默认字体 = M6 的 morning，升级用户视觉零变化
+            // 默认 = 浅色 + 默认字体 = 晨窗配色的 morning，升级用户视觉零变化
             scheme: "light".into(),
             font: "sans".into(),
             text_size: "md".into(),
@@ -115,7 +115,7 @@ impl Default for EditorPrefs {
     fn default() -> Self {
         Self {
             default_mode: "wysiwyg".into(),
-            // M5-3：默认 3s（原 700ms；档位整体调大，用户仍可选手动档）
+            // 默认 3s（原 700ms；档位整体调大，用户仍可选手动档）
             autosave_ms: 3000,
             format_on_save: true,
             source_line_numbers: true,
@@ -139,7 +139,7 @@ pub struct Settings {
     pub appearance: Appearance,
     pub editor: EditorPrefs,
     pub storage: StoragePrefs,
-    /// M5-4：更新检测偏好（检测本体在 `update.rs`）
+    /// 更新检测偏好（检测本体在 `update.rs`）
     pub update: UpdatePrefs,
 }
 
@@ -165,7 +165,7 @@ fn pick(key: &str, allowed: &[&str], fallback: &str) -> String {
     }
 }
 
-/// M6 捆绑主题 → 配套字体：旧配置只写了 `theme`、没写 `font` 时用它补齐。
+/// 捆绑主题 → 配套字体：旧配置只写了 `theme`、没写 `font` 时用它补齐。
 /// 返回 `None` = 不是旧主题值（新枚举值或脏值），交给 `pick` 兜底。
 fn legacy_font(scheme: &str) -> Option<&'static str> {
     match scheme {
@@ -179,16 +179,16 @@ fn legacy_font(scheme: &str) -> Option<&'static str> {
 impl Appearance {
     /// 逐字段归一化；返回值即前端应采用的最终值。
     ///
-    /// **顺序有讲究**：先按原始 `scheme`（可能是 M6 的 theme 值）补出缺省字体，
+    /// **顺序有讲究**：先按原始 `scheme`（可能是的 theme 值）补出缺省字体，
     /// 再把 scheme 归一化到新枚举——反过来的话 `wenkai`/`paper` 的字体信息就丢了。
-    /// 字体相关的自定义串校验（`sanitize_font_stack`）自 M5 起已移除：字体栈常驻
+    /// 字体相关的自定义串校验（`sanitize_font_stack`）已移除：字体栈常驻
     /// index.css，用户输入不再进入 CSS 变量，这里只认三档 key。
     pub fn normalize(mut self) -> Self {
         if self.font.is_empty() {
             self.font = legacy_font(&self.scheme).unwrap_or("sans").to_string();
         }
         self.scheme = match self.scheme.as_str() {
-            // M6 → M7 迁移：morning/wenkai 都是晨窗配色，night→dark，paper 不变
+            // 迁移：morning/wenkai 都是晨窗配色，night→dark，paper 不变
             "morning" | "wenkai" => "light".to_string(),
             "night" => "dark".to_string(),
             other => pick(other, &SCHEME_KEYS, "light"),
@@ -200,7 +200,7 @@ impl Appearance {
     }
 }
 
-/// 自动保存延迟归一到**最近档**（M5-3）：存量用户的 0.3/0.7s 档归到 1.5s，
+/// 自动保存延迟归一到**最近档**：存量用户的 0.3/0.7s 档归到 1.5s，
 /// 而不是一律回默认 3s——保留「用户选了快档」的意图。并列距离取先出现的档。
 fn nearest_autosave(ms: u32) -> u32 {
     let mut best = AUTOSAVE_KEYS[0];
@@ -264,15 +264,15 @@ mod tests {
 
     #[test]
     fn defaults_match_previous_hardcoded_visuals() {
-        // 默认值必须与 M3 的硬编码等价，否则升级用户界面会突变
+        // 默认值必须与的硬编码等价，否则升级用户界面会突变
         let a = Appearance::default();
-        assert_eq!(a.scheme, "light", "M7：默认配色 = 现状晨窗，升级不突变");
-        assert_eq!(a.font, "sans", "M7：默认字体 = 内置 MiSans");
+        assert_eq!(a.scheme, "light", "默认配色 = 现状晨窗，升级不突变");
+        assert_eq!(a.font, "sans", "默认字体 = 内置 MiSans");
         assert_eq!(a.text_size, "md"); // 16px
         assert_eq!(a.line_height, "normal"); // 1.75
         let e = EditorPrefs::default();
         assert_eq!(e.default_mode, "wysiwyg");
-        assert_eq!(e.autosave_ms, 3000); // M5-3 默认档（原 SAVE_DEBOUNCE_MS 700）
+        assert_eq!(e.autosave_ms, 3000); // 默认档（原 SAVE_DEBOUNCE_MS 700）
         assert!(e.format_on_save, "保存整理默认开");
         assert!(e.source_line_numbers);
         assert_eq!(e.new_note_location, "root");
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn autosave_maps_to_nearest_gear() {
-        // M5-3：旧档位与任意值都归到最近档，保留「选了快档」的意图
+        // 旧档位与任意值都归到最近档，保留「选了快档」的意图
         assert_eq!(nearest_autosave(300), 1500);
         assert_eq!(nearest_autosave(700), 1500);
         assert_eq!(nearest_autosave(1200), 1500);
@@ -370,9 +370,9 @@ mod tests {
     fn settings_serde_roundtrip_is_camel_case() {
         let s = Settings::default();
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains("\"scheme\""), "M7 配色字段进 JSON: {json}");
-        assert!(json.contains("\"font\""), "M7 字体字段进 JSON: {json}");
-        assert!(!json.contains("\"theme\""), "M6 的捆绑 theme 字段不再写回: {json}");
+        assert!(json.contains("\"scheme\""), "配色字段进 JSON: {json}");
+        assert!(json.contains("\"font\""), "字体字段进 JSON: {json}");
+        assert!(!json.contains("\"theme\""), "捆绑 theme 字段不再写回: {json}");
         assert!(json.contains("\"textSize\""), "前端按 camelCase 读: {json}");
         assert!(json.contains("\"formatOnSave\""), "保存整理开关进 JSON: {json}");
         assert!(json.contains("\"trashRetentionDays\""));
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(back, s);
     }
 
-    /// M6 → M7 迁移：旧配置只有一个 `theme`，必须拆成配色 + 配套字体，
+    /// 迁移：旧配置只有一个 `theme`，必须拆成配色 + 配套字体，
     /// 且四套旧主题的视觉都不能变（morning/night/paper/wenkai）。
     #[test]
     fn m6_theme_migrates_to_scheme_and_font() {
@@ -416,10 +416,10 @@ mod tests {
         let legacy = r#"{"appearance":{"textSize":"lg"}}"#;
         let s: Settings = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.appearance.text_size, "lg");
-        assert_eq!(s.appearance.scheme, "light", "M7：老配置无配色字段 ⇒ 容器默认浅色");
+        assert_eq!(s.appearance.scheme, "light", "老配置无配色字段 ⇒ 容器默认浅色");
         // 字体是字段级 default（空串）——留出「缺字段」与「用户选了默认」的区别，
         // 由 normalize 补成 sans（读路径 settings_read_op 也会归一化）
-        assert_eq!(s.appearance.font, "", "M7：老配置无字体字段 ⇒ 空串待归一化");
+        assert_eq!(s.appearance.font, "", "老配置无字体字段 ⇒ 空串待归一化");
         assert_eq!(s.appearance.clone().normalize().font, "sans");
         assert_eq!(s.appearance.line_height, "normal");
         assert_eq!(s.editor.autosave_ms, 3000);
@@ -427,14 +427,14 @@ mod tests {
         // 完全空对象
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());
-        // M5 减法迁移：旧版外观字段（字体/源码字号/行宽/界面缩放）被静默忽略
+        // 减法迁移：旧版外观字段（字体/源码字号/行宽/界面缩放）被静默忽略
         let m5_legacy = r#"{"appearance":{"uiFont":"serif","textFont":"custom",
             "customFonts":{"ui":"Fira Sans","text":"","mono":""},"textSize":"lg",
             "codeSize":"sm","contentWidth":"limited","uiScalePct":125}}"#;
         let s: Settings = serde_json::from_str(m5_legacy).unwrap();
         assert_eq!(s.appearance.text_size, "lg", "仍可识别的字段照常读取");
         assert_eq!(s.appearance.line_height, "normal");
-        // 归一化后（= 应用实际看到的值）其余字段落到 M7 默认
+        // 归一化后（= 应用实际看到的值）其余字段落到默认
         assert_eq!(
             s.appearance.normalize(),
             Appearance {

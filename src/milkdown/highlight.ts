@@ -7,7 +7,7 @@ import { toggleMark } from "@milkdown/kit/prose/commands";
 import { $command, $inputRule, $markSchema, $remark, $useKeymap } from "@milkdown/kit/utils";
 
 /**
- * 荧光笔：`==文字==`（M8 批次 3）。
+ * 荧光笔：`==文字==`。
  *
  * ## 为什么不需要写 micromark 分词器
  * `~~删除~~` 那种语法要靠 micromark 扩展在**词法层**识别；但荧光笔的语义要求低得多——
@@ -18,30 +18,30 @@ import { $command, $inputRule, $markSchema, $remark, $useKeymap } from "@milkdow
  *
  * ## 数据流
  * ```
- * markdown  ──remark 解析──▶ mdast ──切分 text──▶ lanmarkHighlight 节点
- *                                              │ parseMarkdown.match
- *                                              ▼
- *                                          ProseMirror 的 highlight mark
- *                                              │ toMarkdown.runner
- *                                              ▼
- *                                          lanmarkHighlight 节点 ──handler──▶ ==文字==
+ * markdown ──remark 解析──▶ mdast ──切分 text──▶ lanmarkHighlight 节点
+ * │ parseMarkdown.match
+ * ▼
+ * ProseMirror 的 highlight mark
+ * │ toMarkdown.runner
+ * ▼
+ * lanmarkHighlight 节点 ──handler──▶ ==文字==
  * ```
  *
  * ## 两条容易踩的
- *  ① 正则**必须**是「分隔符用反向引用、只有两个字面捕获组」的形状：兜底切分用第 1 组、
- *     Milkdown 的 `markRule` 取**最后一个捕获组**当「要加标记的内容」（`\1` 是反向引用、
- *     不算捕获组，所以最后一个捕获组就是内容）。
- *  ② 递归切分时要**跳过 `inlineCode` / `code` / `html` 子树**，否则代码块里的 `==x==`
- *     会被吃掉。
+ * ① 正则**必须**是「分隔符用反向引用、只有两个字面捕获组」的形状：兜底切分用第 1 组、
+ * Milkdown 的 `markRule` 取**最后一个捕获组**当「要加标记的内容」（`\1` 是反向引用、
+ * 不算捕获组，所以最后一个捕获组就是内容）。
+ * ② 递归切分时要**跳过 `inlineCode` / `code` / `html` 子树**，否则代码块里的 `==x==`
+ * 会被吃掉。
  */
 
 /**
  * 切分用的正则。逐条约束都是有理由的：
- *  - `(?<![=\w\\])` 前面不能是 `=`／词字符／反斜杠 → `a == b`、`a==b`（本意是等号）不误判，
- *    且被转义过的 `\==x==` 不命中
- *  - `(?!\s)` / `(?<!\s)` 内侧不能贴空白 → `== 文字 ==` 不误判（不是高亮）
- *  - `([^\n]+?)` 不跨行
- *  - ``(?![\w=])` 后面不能是词字符或 `=` → 避免把 `==x===` 这类吃掉一半
+ * - `(?<![=\w\\])` 前面不能是 `=`／词字符／反斜杠 → `a == b`、`a==b`（本意是等号）不误判，
+ * 且被转义过的 `\==x==` 不命中
+ * - `(?!\s)` / `(?<!\s)` 内侧不能贴空白 → `== 文字 ==` 不误判（不是高亮）
+ * - `([^\n]+?)` 不跨行
+ * - ``(?![\w=])` 后面不能是词字符或 `=` → 避免把 `==x===` 这类吃掉一半
  */
 const SPLIT_RE = /(?<![=\w\\])==(?!\s)([^\n]+?)(?<!\s)==(?![\w=])/g;
 

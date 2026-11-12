@@ -1,7 +1,7 @@
-//! M4h-1 发现层：mDNS 之外的局域网并发探测。
+//! 发现层：mDNS 之外的局域网并发探测。
 //!
 //! 背景：mDNS 在用户实测的两处网络（家庭 WiFi 多播不可达、公司 LAN 拦截广播）
-//! 都不可用，而它是 M2/M3 唯一的自动发现手段，不可达时只剩手输 IP 一条路
+//! 都不可用，而它是 /唯一的自动发现手段，不可达时只剩手输 IP 一条路
 //! 本模块补一条不依赖多播的路径：直接 TCP 连。
 //!
 //! **代价必须分层**：用户机器本机网段是 /22
@@ -44,7 +44,7 @@ const MAX_CANDIDATES: usize = 1024;
 pub struct ScannedDevice {
     pub name: String,
     pub url: String,
-    /// M4h-3：设备身份（旧服务器无该字段则为空串，调用方回退名称匹配）
+    /// 设备身份（旧服务器无该字段则为空串，调用方回退名称匹配）
     pub device_id: String,
     pub notes: u64,
 }
@@ -143,12 +143,12 @@ pub fn subnet_candidates(ifaces: &[(String, Ipv4Addr, u8)]) -> Vec<NetSegment> {
 }
 
 /// 解析 `ip -4 -o addr` 输出（Linux）为 `(网卡, ip, prefix)`。
-/// 每行形如：`2: wlan0    inet 192.168.1.23/24 brd ... scope global dynamic wlan0`
+/// 每行形如：`2: wlan0 inet 192.168.1.23/24 brd ... scope global dynamic wlan0`
 pub fn parse_ip_addr_output(text: &str) -> Vec<(String, Ipv4Addr, u8)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
-        // `ip -4 -o addr` 的行形如 `2: wlan0    inet 192.168.128.23/22 …`：
+        // `ip -4 -o addr` 的行形如 `2: wlan0 inet 192.168.128.23/22 …`：
         // 带冒号的是**序号**（"2:"），网卡名是紧随其后的那个字段。
         // 只取序号是 0 号位时才认这一行，避免误识别其它含冒号的输出。
         if !cols.first().map(|c| c.ends_with(':')).unwrap_or(false) {

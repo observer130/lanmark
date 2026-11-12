@@ -1,4 +1,4 @@
-//! M2 同步共享层：协议类型、本地/远端清单构建、冲突命名。
+//! 同步共享层：协议类型、本地/远端清单构建、冲突命名。
 //! 协议：文件级 sha256 版本对比、冲突保留双份（铁律：任何裁决都不得静默丢内容）、JSON over HTTP。
 //! 服务器（手机 axum）与客户端（桌面）两侧共用，保证语义一致。
 
@@ -61,9 +61,9 @@ pub struct PushResult {
     pub error: Option<String>,
     /// 服务器侧原有版本被改名保留时的新路径（冲突命名）
     pub conflict_saved_as: Option<String>,
-    /// 该路径在服务器上**操作后的最终 hash**（M3a 新增）：
+    /// 该路径在服务器上**操作后的最终 hash**（新增）：
     /// 干净落盘/来件仲裁获胜 = 所推 hash；来件被仲裁降级 = 原路径现有 hash。
-    /// 旧服务器不返回该字段（None）→ 客户端退化 M2 行为（ok = 落盘）。
+    /// 旧服务器不返回该字段（None）→ 客户端退化行为（ok = 落盘）。
     #[serde(default)]
     pub server_hash: Option<String>,
 }
@@ -96,17 +96,17 @@ pub struct MergeEvent {
 pub struct SyncReport {
     pub pulled: Vec<String>,
     pub pushed: Vec<String>,
-    /// LWW 自动合并明细（M3c；M2 的 Vec<String> 冲突列表由此取代）
+    /// LWW 自动合并明细（；的 Vec<String> 冲突列表由此取代）
     #[serde(default)]
     pub merges: Vec<MergeEvent>,
-    /// 已同步的删除（本地软删 / 服务器 /delete，均进回收站，M3b）
+    /// 已同步的删除（本地软删 / 服务器 /delete，均进回收站）
     #[serde(default)]
     pub deleted: Vec<String>,
     pub skipped: usize,
     pub errors: Vec<String>,
 }
 
-// ---------- tombstone（M3b 删除传播） ----------
+// ---------- tombstone（删除传播） ----------
 
 /// 删除墓碑：一端删除 → 另一端软删（铁律：永不硬删）。
 /// `mtime_ms` = 删除时刻（LWW 裁决时间源，与编辑侧的文件 mtime 比较）；
@@ -293,7 +293,7 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
 
 /// 版本元组：`(mtime_ms, size, hash_hex)`，字典序比较，**大者赢**。
 /// mtime 不同 → mtime 新者赢；同毫秒 → size 大者赢；size 同 → hash 字典序大者赢
-/// （hash 相同 = 内容相同，本不会进裁决）。M3b 删除参与裁决时取
+/// （hash 相同 = 内容相同，本不会进裁决）。删除参与裁决时取
 /// `(tombstone.mtime_ms, 0, tombstone.hash)`——size 记 0，mtime 平手时编辑恒赢删除。
 pub fn version_gt(a: (i64, i64, &str), b: (i64, i64, &str)) -> bool {
     (a.0, a.1, a.2) > (b.0, b.1, b.2)

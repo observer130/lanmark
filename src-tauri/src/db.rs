@@ -70,7 +70,7 @@ pub fn remove_prefix(conn: &Connection, prefix: &str) -> Result<()> {
     Ok(())
 }
 
-/// 列出前缀（自身 + 子树）下的全部索引笔记路径。M3b tombstone 文件夹展开用。
+/// 列出前缀（自身 + 子树）下的全部索引笔记路径。tombstone 文件夹展开用。
 /// 同 remove_prefix：substr 按字符计数，不用 LIKE。
 pub fn list_prefix_paths(conn: &Connection, prefix: &str) -> Result<Vec<String>> {
     let with_slash = format!("{prefix}/");
@@ -113,7 +113,7 @@ pub fn rename_paths(conn: &Connection, old_prefix: &str, new_prefix: &str) -> Re
     Ok(())
 }
 
-#[allow(dead_code)] // M3 同步引擎将使用（按路径查索引）
+#[allow(dead_code)] // 同步引擎将使用（按路径查索引）
 pub fn get_file(
     conn: &Connection,
     path: &str,
@@ -206,7 +206,7 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// M1 用 LIKE 子串匹配（中文友好、零分词依赖）；数据量级到 1e4 后再上 FTS5 trigram。
+/// 用 LIKE 子串匹配（中文友好、零分词依赖）；数据量级到 1e4 后再上 FTS5 trigram。
 pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let q = query.trim();
     if q.is_empty() {

@@ -6,8 +6,8 @@
  * 序列化成 markdown 就是末尾多一个空行——用户看到的是「点一下笔记，文本里自动多了空行」。
  *
  * 这里钉住两件事：
- *  1. 该行为确实存在（防止上游/配置变化后我们误以为已经不用防）；
- *  2. 经过 trimDocTail / compareKey 后，它不得产生任何可落盘差异。
+ * 1. 该行为确实存在（防止上游/配置变化后我们误以为已经不用防）；
+ * 2. 经过 trimDocTail / compareKey 后，它不得产生任何可落盘差异。
  */
 import { describe, expect, it } from "vitest";
 import { editorViewCtx } from "@milkdown/kit/core";
