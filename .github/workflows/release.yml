@@ -12,8 +12,38 @@ permissions:
 
 # 构建失败不应留下半成品 release：release 正文先由 gh release create 建好，
 # 产物上传失败时 release 页仍只有说明，不误导下载。
+#
+# 并发：同一个 tag 的重跑/强推必须串行。旧 run 若晚到会把过期的 latest.json
+# 覆盖新 run 的结果（更新器按 latest.json 判定版本）。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # 前置闸门：tag 必须与三处版本号一致，否则产物内版本与 release 页/更新器
+  # 对不上（更新器按 latest.json 的 version 比较，可能静默不更新）。
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag 与三处版本号一致
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          for f in package.json src-tauri/tauri.conf.json; do
+            V=$(jq -r .version "$f")
+            if [ "v$V" != "$TAG" ]; then
+              echo "::error::$f 版本 $V 与 tag $TAG 不一致"
+              exit 1
+            fi
+          done
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
+          if [ "v$CARGO" != "$TAG" ]; then
+            echo "::error::src-tauri/Cargo.toml 版本 $CARGO 与 tag $TAG 不一致"
+            exit 1
+          fi
+
   desktop-linux:
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +91,7 @@ jobs:
           fail_on_unmatched_files: true
 
   desktop-windows:
+    needs: preflight
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,6 +156,7 @@ jobs:
           fail_on_unmatched_files: true
 
   android:
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,14 +202,29 @@ jobs:
           LANMARK_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           LANMARK_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: pnpm tauri android build --apk --target aarch64
-      # 签名指纹佐证：连续两次构建应得到相同证书（固定性证明）
+      # 签名固定性：不只是「不是 debug 签名」，还必须等于**预期证书指纹**。
+      # 只排除 debug 的话，换错 release keystore 也能通过，用户端覆盖安装会
+      # INSTALL_FAILED_UPDATE_INCOMPATIBLE（属于发错包）。
       - name: 校验签名指纹
+        env:
+          EXPECTED_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
         run: |
           APK=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
           "$BT/apksigner" verify --print-certs "$APK" | tee /tmp/certs.txt
           if grep -q "CN=Android Debug" /tmp/certs.txt; then
             echo "::error::产物仍是 debug 签名——release keystore 未生效"
+            exit 1
+          fi
+          if [ -z "$EXPECTED_SHA256" ]; then
+            echo "::error::未配置 RELEASE_CERT_SHA256 secret，无法确认签名与历史版本一致"
+            echo "取值方法：apksigner verify --print-certs <已发布APK> | grep 'SHA-256'"
+            exit 1
+          fi
+          ACTUAL=$(grep -i "SHA-256" /tmp/certs.txt | head -1 | awk -F': ' '{print $NF}' | tr -d ' :' | tr 'A-F' 'a-f')
+          EXPECT=$(echo "$EXPECTED_SHA256" | tr -d ' :' | tr 'A-F' 'a-f')
+          if [ "$ACTUAL" != "$EXPECT" ]; then
+            echo "::error::APK 证书指纹不符（实际 $ACTUAL，预期 $EXPECT）——keystore 换过或配错"
             exit 1
           fi
       - name: 重命名为 release 资产名
