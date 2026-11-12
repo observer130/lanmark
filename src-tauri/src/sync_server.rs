@@ -763,6 +763,7 @@ fn push_blocking(
 }
 
 /// push 落盘结果：冲突副本去向 + 原路径**操作后的最终 hash**
+#[derive(Clone)]
 struct Landed {
     conflict_saved_as: Option<String>,
     server_hash: String,
@@ -847,20 +848,24 @@ fn write_pushed_file(
             if !pf.path.ends_with(".md") {
                 return Err("笔记必须以 .md 结尾".into());
             }
-            let conn_guard = ctx
-                .app
-                .db
-                .lock()
-                .map_err(|_| "DB 锁中毒".to_string())?;
-            let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-            // 仲裁：baseHash 与现状不符 → mtime 元组裁决（取代无条件改名）
-            let landed = match arbitrate_existing(vault, conn, "note", pf, &bytes)? {
-                Some(l) if l.server_hash != pf.hash => {
-                    // 来件被降级：原路径保留，来件已成副本 → 不落盘
-                    return Ok(l);
-                }
-                other => other,
+            // 仲裁只在需要 DB（落冲突副本要进索引）时持锁；后面的建目录/写盘
+            // 不再占着连接，否则一次 48 MiB 的附件写入会把手机端 UI 的保存拖住
+            let landed = {
+                let conn_guard = ctx
+                    .app
+                    .db
+                    .lock()
+                    .map_err(|_| "DB 锁中毒".to_string())?;
+                let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+                // 仲裁：baseHash 与现状不符 → mtime 元组裁决（取代无条件改名）
+                arbitrate_existing(vault, conn, "note", pf, &bytes)?
             };
+            if let Some(l) = &landed {
+                if l.server_hash != pf.hash {
+                    // 来件被降级：原路径保留，来件已成副本 → 不落盘
+                    return Ok(l.clone());
+                }
+            }
             // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）；
             // 目录须通过符号链接逃逸校验（否则 create_dir_all 会在 vault 外建目录）
             if let Some(parent) = fs_ops::resolve_in_vault(vault, &pf.path)
@@ -871,11 +876,19 @@ fn write_pushed_file(
                 std::fs::create_dir_all(&parent).map_err(|e| format!("创建目录失败: {e}"))?;
             }
             // write_note：tmp+rename 原子落盘 + 更新索引（非 UTF-8 字节级保真）
-            match std::str::from_utf8(&bytes) {
-                Ok(content) => fs_ops::write_note(vault, &pf.path, content, conn),
-                Err(_) => fs_ops::write_note_bytes(vault, &pf.path, &bytes, conn),
+            {
+                let conn_guard = ctx
+                    .app
+                    .db
+                    .lock()
+                    .map_err(|_| "DB 锁中毒".to_string())?;
+                let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+                match std::str::from_utf8(&bytes) {
+                    Ok(content) => fs_ops::write_note(vault, &pf.path, content, conn),
+                    Err(_) => fs_ops::write_note_bytes(vault, &pf.path, &bytes, conn),
+                }
+                .map_err(|e| format!("写入失败: {e}"))?;
             }
-            .map_err(|e| format!("写入失败: {e}"))?;
             // LWW 时间源保真：保留源端保存时间，服务器 mtime 不得是落地时刻
             if let Ok(abs) = fs_ops::resolve_in_vault(vault, &pf.path) {
                 fs_ops::set_file_mtime(&abs, pf.mtime_ms);
@@ -892,19 +905,21 @@ fn write_pushed_file(
             if !pf.path.starts_with("assets/") || pf.path.contains("..") {
                 return Err(format!("附件路径非法: {}", pf.path));
             }
-            let conn_guard = ctx
-                .app
-                .db
-                .lock()
-                .map_err(|_| "DB 锁中毒".to_string())?;
-            let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
-            let landed = match arbitrate_existing(vault, conn, "asset", pf, &bytes)? {
-                Some(l) if l.server_hash != pf.hash => {
-                    // 来件被降级：原路径保留，来件已成副本 → 不落盘
-                    return Ok(l);
-                }
-                other => other,
+            let landed = {
+                let conn_guard = ctx
+                    .app
+                    .db
+                    .lock()
+                    .map_err(|_| "DB 锁中毒".to_string())?;
+                let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+                arbitrate_existing(vault, conn, "asset", pf, &bytes)?
             };
+            if let Some(l) = &landed {
+                if l.server_hash != pf.hash {
+                    // 来件被降级：原路径保留，来件已成副本 → 不落盘
+                    return Ok(l.clone());
+                }
+            }
             let abs = fs_ops::resolve_in_vault(vault, &pf.path).map_err(|e| e.to_string())?;
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
