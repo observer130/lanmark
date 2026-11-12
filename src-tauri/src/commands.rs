@@ -294,14 +294,23 @@ pub struct NoteContent {
 /// 读取笔记内容，同时记入「最近」
 pub fn note_read_op(state: &Arc<AppState>, path: &str) -> CmdResult<NoteContent> {
     reject_dot_path(path)?;
-    with_vault(state, |vault| {
-        let content = fs_ops::read_note(vault, path).map_err(|e| e.to_string())?;
-        with_db(state, |conn| {
-            db::record_recent(conn, path, fs_ops::now_ms(), 50).map_err(|e| e.to_string())?;
-            let title = fs_ops::title_from_stem(path.rsplit('/').next().unwrap_or(path));
-            Ok(NoteContent { content, title })
-        })
-    })
+    let content = with_vault(state, |vault| {
+        fs_ops::read_note(vault, path).map_err(|e| e.to_string())
+    })?;
+    // 「最近打开」进的是可重建索引：DB 忙/锁中毒/未开库都不该让用户连笔记都打不开。
+    // 此前 record_recent 的 `?` 会把读笔记整条链路拖垮。
+    match state.db.lock() {
+        Ok(guard) => {
+            if let Some(conn) = guard.as_ref() {
+                if let Err(e) = db::record_recent(conn, path, fs_ops::now_ms(), 50) {
+                    log::warn!("记录最近打开失败 {path}: {e}");
+                }
+            }
+        }
+        Err(_) => log::warn!("DB 锁中毒，跳过记录最近打开: {path}"),
+    }
+    let title = fs_ops::title_from_stem(path.rsplit('/').next().unwrap_or(path));
+    Ok(NoteContent { content, title })
 }
 
 #[derive(Serialize)]

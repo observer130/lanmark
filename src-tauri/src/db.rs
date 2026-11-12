@@ -23,8 +23,25 @@ CREATE TABLE IF NOT EXISTS favorites (
 );
 "#;
 
+/// 索引 schema 版本。**加/改 files 表的列时 +1**：旧库不迁移，直接重建缓存表。
+///
+/// 为什么敢重建：`files` 是 vault 文件的可重建缓存（`reindex` 一次就回来）。
+/// `favorites` / `recents` 不是——它们没有文件镜像，删库即永久丢失，
+/// 所以重建时**只丢 files**，这两张表原样保留（路径失效由读取端跳过）。
+const SCHEMA_VERSION: i32 = 1;
+
 pub fn init_db(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA)
+    let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if v != 0 && v != SCHEMA_VERSION {
+        log::warn!("索引 schema v{v} → v{SCHEMA_VERSION}：重建 files 表（收藏/最近保留）");
+        conn.execute_batch("DROP TABLE IF EXISTS files;")?;
+    }
+    conn.execute_batch(SCHEMA)?;
+    // 新建库时 v=0 → 建表后同样打上版本号
+    if v != SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+    Ok(())
 }
 
 pub fn upsert_file(
@@ -349,4 +366,28 @@ mod tests {
         assert!(get_file(&c, "新目录/顶.md").unwrap().is_none());
         assert!(list_recents(&c, 10).unwrap().is_empty());
     }
+
+    /// 索引 schema 升级：旧版本 → 丢 files 重建，收藏与最近原样保留。
+    #[test]
+    fn schema_version_rebuilds_cache_but_keeps_user_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        upsert_file(&conn, "a.md", "A", "正文", 1, "h", true).unwrap();
+        assert!(favorite_toggle(&conn, "a.md", 1).unwrap(), "首次切换 = 收藏");
+        record_recent(&conn, "a.md", 1, 10).unwrap();
+
+        // 模拟「旧客户端留下的更高版本」
+        conn.pragma_update(None, "user_version", 999).unwrap();
+        init_db(&conn).unwrap();
+
+        // 缓存表被重建（空），用户数据还在
+        assert!(get_file(&conn, "a.md").unwrap().is_none(), "files 应被重建");
+        assert_eq!(list_favorites(&conn).unwrap().len(), 1, "收藏不能被清");
+        assert!(!list_recents(&conn, 10).unwrap().is_empty(), "最近不能被清");
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
 }
