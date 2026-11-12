@@ -936,9 +936,17 @@ async fn tombstones(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Tombstone>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
-    let app = ctx.app.clone();
+    let ctx2 = ctx.clone();
     let list = tokio::task::spawn_blocking(move || -> Result<Vec<Tombstone>, (StatusCode, String)> {
-        let vault = ctx2_vault(&app)?;
+        // 账本是整读整写的 read-modify-write：不拿写锁时，purge 的旧快照会把
+        // 并发 /delete 刚记下的墓碑覆盖掉（表现为「删了没传出去」）。
+        let _guard = ctx2
+            .write_lock
+            .lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "写锁中毒".to_string()))?;
+        let vault = ctx2
+            .vault()
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
         let now = crate::fs_ops::now_ms();
         crate::sync::purge_expired_tombstones(&vault, now)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tombstone 清理失败: {e}")))?;
@@ -947,15 +955,6 @@ async fn tombstones(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
     Ok(Json(list?))
-}
-
-/// 当前 vault（阻塞线程内用）
-fn ctx2_vault(app: &Arc<AppState>) -> Result<PathBuf, (StatusCode, String)> {
-    app.vault
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "vault 锁中毒".to_string()))?
-        .clone()
-        .ok_or_else(|| (StatusCode::CONFLICT, "尚未打开 vault".to_string()))
 }
 
 #[derive(Deserialize)]

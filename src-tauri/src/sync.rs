@@ -2,7 +2,7 @@
 //! 协议：文件级 sha256 版本对比、冲突保留双份（铁律：任何裁决都不得静默丢内容）、JSON over HTTP。
 //! 服务器（手机 axum）与客户端（桌面）两侧共用，保证语义一致。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -211,8 +211,13 @@ pub fn purge_expired_tombstones(vault: &Path, now_ms: i64) -> std::io::Result<us
 /// 若以 DB 为准就同步不出去，外部删除还会被桌面「推回来」复活。
 /// 逐文件读磁盘字节算 hash/mtime/size（读失败跳过，与旧实现一致）。
 pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
+    // 只在取路径时持锁：全库 walk + 逐文件 sha256 在 1e4 文件量级是秒级的，
+    // 持着 vault 锁会让 check_token / /pair / /info 一起排队（此前就踩过）。
+    // 路径是 clone 出去的快照，切库瞬间最多读到旧库的清单，下回合自然纠正。
+    let vault: PathBuf = with_vault(state, |v| Ok(v.clone()))?;
     let mut out = Vec::new();
-    with_vault(state, |vault| {
+    {
+        let vault = &vault;
         for path in fs_ops::collect_note_paths(vault).map_err(|e| e.to_string())? {
             let abs = vault.join(&path);
             let Ok(bytes) = std::fs::read(&abs) else { continue };
@@ -239,8 +244,8 @@ pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
         for meta in asset_walk(vault).map_err(|e| e.to_string())? {
             out.push(meta);
         }
-        Ok(out)
-    })
+    }
+    Ok(out)
 }
 
 /// walk assets/，逐文件计算 sha256（内容寻址目录，文件数有限）
