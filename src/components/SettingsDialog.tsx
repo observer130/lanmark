@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
-  Check,
   Copy,
   Download,
   FolderOpen,
@@ -23,6 +22,7 @@ import { useSettingsStore, type SectionKey } from "../stores/settings";
 import { useUpdateStore } from "../stores/update";
 import { update as updateApi } from "../lib/update";
 import { useVaultStore } from "../stores/vault";
+import { CopyButton, Switch } from "./ui/Controls";
 import { vault, type AppInfo, type VaultStats } from "../lib/vault";
 import { isAndroid } from "../lib/sync";
 import { useSyncStore } from "../stores/sync";
@@ -40,7 +40,7 @@ import {
 import { dragWindow, isLinuxDesktop } from "./WindowControls";
 
 /**
- * M4a 设置面板外壳。
+ * 设置面板外壳。
  *
  * 形态：宽屏（≥768）居中模态；窄屏（<768，与 `useIsNarrow` 同一阈值）全屏覆盖页。
  * 未配置 vault 时也可用——设置存在设备配置目录，与 vault 无关。
@@ -103,34 +103,6 @@ function Segmented<T extends string | number>({
   );
 }
 
-function Switch({
-  on,
-  onToggle,
-  label,
-}: {
-  on: boolean;
-  onToggle: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      onClick={onToggle}
-      className={`relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors ${
-        on ? "bg-accent" : "bg-ink/20"
-      }`}
-    >
-      <span
-        className={`absolute top-[3px] h-4 w-4 rounded-full bg-white shadow-sm transition-all ${
-          on ? "left-[19px]" : "left-[3px]"
-        }`}
-      />
-    </button>
-  );
-}
-
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="mb-5">
@@ -144,7 +116,7 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
 
 /* ── 分组内容 ── */
 
-/** 外观（M7：配色与字体**两个独立按钮**；界面字体不随动，仍常驻 index.css） */
+/** 外观（配色与字体**两个独立按钮**；界面字体不随动，仍常驻 index.css） */
 function AppearanceSection() {
   const a = useSettingsStore((s) => s.settings.appearance);
   const patch = useSettingsStore((s) => s.patch);
@@ -232,28 +204,12 @@ function EditorSection() {
 
 /** 只读行 + 复制（复用 SyncSection 的 CopyButton 视觉） */
 function CopyRow({ value, title }: { value: string; title?: string }) {
-  const [copied, setCopied] = useState(false);
   return (
     <div className="flex items-center gap-1.5">
       <span className="max-w-[22rem] truncate text-xs text-ink-2" title={title ?? value}>
         {value}
       </span>
-      <button
-        title="复制"
-        aria-label="复制"
-        onClick={() => {
-          void navigator.clipboard?.writeText(value).then(
-            () => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            },
-            () => {},
-          );
-        }}
-        className="shrink-0 rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
-      >
-        {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
-      </button>
+      <CopyButton text={value} />
     </div>
   );
 }
@@ -453,8 +409,8 @@ function SyncSection2() {
         </Row>
       </Group>
 
-      {/* M5-2：原「设备发现」组（局域网扫描开关）已移除——扫描只在点
-          「自动查找手机」时发生，且开关从不持久化，属无意义设置。 */}
+      {/* 原「设备发现」组（局域网扫描开关）已移除——扫描只在点
+ 「自动查找手机」时发生，且开关从不持久化，属无意义设置。 */}
 
       {/* 配对 UI 只有一套：关掉设置面板并展开侧栏的同步面板 */}
       <Group title="设备配对">
@@ -471,10 +427,10 @@ function SyncSection2() {
   );
 }
 
-/** M5-4/M5-5/M5-6 更新组：检测（全平台）+ 应用内更新（Windows/Linux）。
- *  Windows 走 updater 插件：拉 latest.json 验签下载 NSIS 包并静默安装，
- *  装完自动退出应用；Linux 走自定义自更新（验签 tar.gz 替换二进制后重启）；
- *  Android 插件不支持，保持「打开发布页」。 */
+/** 更新组：检测（全平台）+ 应用内更新（Windows/Linux）。
+ * Windows 走 updater 插件：拉 latest.json 验签下载 NSIS 包并静默安装，
+ * 装完自动退出应用；Linux 走自定义自更新（验签 tar.gz 替换二进制后重启）；
+ * Android 插件不支持，保持「打开发布页」。 */
 function UpdateGroup({ platform }: { platform?: string }) {
   const info = useUpdateStore((s) => s.info);
   const checking = useUpdateStore((s) => s.checking);
@@ -483,7 +439,7 @@ function UpdateGroup({ platform }: { platform?: string }) {
   const setError = useUpdateStore.setState;
   const autoCheck = useSettingsStore((s) => s.settings.update.autoCheck);
   const patch = useSettingsStore((s) => s.patch);
-  // 安装进度（M5-5）：仅 Windows 应用内安装时出现，属组件内瞬时 UI 态
+  // 安装进度：仅 Windows 应用内安装时出现，属组件内瞬时 UI 态
   const [installing, setInstalling] = useState(false);
   const [downloaded, setDownloaded] = useState(0);
   const [contentLength, setContentLength] = useState<number | null>(null);
@@ -499,7 +455,7 @@ function UpdateGroup({ platform }: { platform?: string }) {
   };
 
   /** Windows 应用内安装：updater 插件 check → 验签下载 → 运行 NSIS 安装器
-   *  （安装器启动后插件会退出应用，promise 不必等待返回）。 */
+ * （安装器启动后插件会退出应用，promise 不必等待返回）。 */
   const installInApp = async () => {
     setInstalling(true);
     setDownloaded(0);
@@ -527,8 +483,8 @@ function UpdateGroup({ platform }: { platform?: string }) {
     }
   };
 
-  /** M5-6 Linux 自更新：下载 tar.gz + .sig → minisign 验签 → 替换二进制 →
-   *  自动重启（Rust 侧完成；下载大文件耗时，成功即重启，无需复位 installing）。 */
+  /** Linux 自更新：下载 tar.gz + .sig → minisign 验签 → 替换二进制 →
+ * 自动重启（Rust 侧完成；下载大文件耗时，成功即重启，无需复位 installing）。 */
   const installLinux = async () => {
     if (!info?.htmlUrl) return;
     const tag = tagFromUrl(info.htmlUrl);
@@ -663,11 +619,11 @@ function AboutSection() {
   }, []);
 
   /**
-   * E3：一键复制诊断信息（纯函数 buildDiagnostics，见文件末尾）。
-   *
-   * 目的：替代完整错误上报。用户遇到问题把这段贴出来，
-   * 就能判断是「库没打开 / 同步没连上 / 版本太旧」哪一类，不必来回追问。
-   */
+ * E3：一键复制诊断信息（纯函数 buildDiagnostics，见文件末尾）。
+ *
+ * 目的：替代完整错误上报。用户遇到问题把这段贴出来，
+ * 就能判断是「库没打开 / 同步没连上 / 版本太旧」哪一类，不必来回追问。
+ */
   const diagnostics = () =>
     buildDiagnostics({
       info,
@@ -731,8 +687,8 @@ function AboutSection() {
             <span className="text-xs text-ink-3">—</span>
           )}
         </Row>
-        {/* M6d：内置字体署名。**MiSans 的许可要求「在软件中特别注明使用了 MiSans」**，
-            删掉这行即违约（licenses/fonts/README.md 有完整义务清单）。 */}
+        {/* 内置字体署名。**MiSans 的许可要求「在软件中特别注明使用了 MiSans」**，
+ 删掉这行即违约（licenses/fonts/README.md 有完整义务清单）。 */}
         <Row
           label="内置字体"
           hint="编辑区字体随应用分发以保证三端一致；许可：MiSans © 小米科技（免费商用），其余 SIL OFL 1.1"
@@ -940,7 +896,7 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
     syncLines.push(
       i.pairing.running ? `同步中心: 运行中 · 端口 ${i.pairing.port}` : "同步中心: 未运行",
     );
-    // M4h-4：代号是排障第一线索（对端看到的本机名）；deviceName 仅旧版兼容
+    // 代号是排障第一线索（对端看到的本机名）；deviceName 仅旧版兼容
     const alias = i.pairing.deviceAlias || i.pairing.deviceName;
     if (alias) syncLines.push(`设备代号: ${alias}`);
     if (i.pairing.lanIp) syncLines.push(`本机地址: ${i.pairing.lanIp}`);

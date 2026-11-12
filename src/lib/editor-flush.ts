@@ -10,12 +10,12 @@
  * 改变 activePath / editorMode 的动作在改之前先同步调用它，把结果写回 store。
  *
  * 三条约束：
- *  1. **不能有依赖**（尤其不能 import store）：vault store 会 import 本模块，
- *     反向依赖即成环。这里只存一个闭包。
- *  2. 返回值 `null` = 与最近一次放行的内容无变化（`compareKey` 相同），
- *     调用方**不要**写 store，否则会把「伪变更」变成 dirty。
- *  3. 只有「即将改变编辑器身份」的动作可以调用它；`MilkdownHost` 的 cleanup
- *     绝对不许写 store——那时 activePath 可能已经是新笔记，会把旧内容写进新文件。
+ * 1. **不能有依赖**（尤其不能 import store）：vault store 会 import 本模块，
+ * 反向依赖即成环。这里只存一个闭包。
+ * 2. 返回值 `null` = 与最近一次放行的内容无变化（`compareKey` 相同），
+ * 调用方**不要**写 store，否则会把「伪变更」变成 dirty。
+ * 3. 只有「即将改变编辑器身份」的动作可以调用它；`MilkdownHost` 的 cleanup
+ * 绝对不许写 store——那时 activePath 可能已经是新笔记，会把旧内容写进新文件。
  *
  * 返回值由调用方负责落库；本模块不碰 store、不碰磁盘。
  */

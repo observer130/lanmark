@@ -12,7 +12,7 @@ import { fileExt, isImageFile, pickImageFiles } from "./image";
 
 const file = (name: string, type = "") => new File([new Uint8Array([1])], name, { type });
 
-describe("拖入文件的图片筛选（M8 走查修复）", () => {
+describe("拖入文件的图片筛选（走查修复）", () => {
   it("有 MIME 时按 MIME 认", () => {
     expect(isImageFile(file("a.bin", "image/png"))).toBe(true);
     expect(isImageFile(file("a.bin", "text/plain"))).toBe(false);

@@ -22,10 +22,10 @@ import {
  * 配置）。这里收敛成一份，两边都必须经由 `createProductCrepe` 建实例。
  *
  * ⚠️ **Crepe 的两个配置通道不能混**（2026-10-13 实测踩过）：
- *  - feature **开关** → 构造函数的 `features`
- *  - feature **配置** → 构造函数的 `featureConfigs`（独立字段）
+ * - feature **开关** → 构造函数的 `features`
+ * - feature **配置** → 构造函数的 `featureConfigs`（独立字段）
  * 把 `{ buildToolbar }` 之类塞进 `features[CrepeFeature.Toolbar]` 会**静默无效**——
- * 不报错、不生效，只有界面上少了个按钮。M8 批次 3 加荧光笔按钮时要走 `featureConfigs`。
+ * 不报错、不生效，只有界面上少了个按钮。加荧光笔按钮时要走 `featureConfigs`。
  */
 
 /**

@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * M4b 外观设置的前端测试（M5 减法后：字号/行距 + 编辑器 + 存储链路；M6 增主题；
- * M7 主题拆成配色/字体两个独立设置）。
+ * 外观设置的前端测试（减法后：字号/行距 + 编辑器 + 存储链路；增主题；
+ * 主题拆成配色/字体两个独立设置）。
  *
  * 覆盖三件事：
  * 1. 枚举 → CSS 值映射（字号四档 / 行距）
  * 2. 应用与回滚链路（乐观更新、以 Rust 返回值为准、失败复原变量与外观属性）
  * 3. `editorKey` 回归护栏：外观**不得**进入 key（否则改字号/配色/字体会重建 Crepe
- *    实例，触发伪 markdownUpdated → 打开笔记被重写，硬约定 1）
+ * 实例，触发伪 markdownUpdated → 打开笔记被重写，硬约定 1）
  */
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -56,18 +56,18 @@ describe("applyCssVars：变量写入", () => {
     document.documentElement.removeAttribute("style");
   });
 
-  it("写入全部外观变量（M5 减法后只剩字号/行距两项）", () => {
+  it("写入全部外观变量（只剩字号/行距两项）", () => {
     applyCssVars(app({ textSize: "xl", lineHeight: "relaxed" }));
     const st = document.documentElement.style;
     expect(st.getPropertyValue("--lanmark-text-size")).toBe("20px");
     expect(st.getPropertyValue("--lanmark-line-height")).toBe("2");
-    // M5 减法：字体/行宽/界面缩放变量不再由设置写入（常驻 index.css）
+    // 减法：字体/行宽/界面缩放变量不再由设置写入（常驻 index.css）
     expect(st.getPropertyValue("--lanmark-font-text")).toBe("");
     expect(st.getPropertyValue("--lanmark-content-max")).toBe("");
   });
 });
 
-describe("applyScheme / applyFont：外观属性写入（M7 解耦）", () => {
+describe("applyScheme / applyFont：外观属性写入", () => {
   beforeEach(() => {
     document.documentElement.removeAttribute("data-scheme");
     document.documentElement.removeAttribute("data-font");
@@ -104,7 +104,7 @@ describe("applyScheme / applyFont：外观属性写入（M7 解耦）", () => {
     expect(document.documentElement.dataset.font).toBeUndefined();
   });
 
-  /** M6c：首帧防闪白靠 index.html 内联脚本读这两个缓存，写入点必须与属性同步 */
+  /** 首帧防闪白靠 index.html 内联脚本读这两个缓存，写入点必须与属性同步 */
   it("同步维护首帧启动缓存（index.html 内联脚本读它们）", () => {
     applyScheme("dark");
     applyFont("kai");
@@ -160,8 +160,8 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     expect(document.documentElement.style.getPropertyValue("--lanmark-text-size")).toBe("16px");
   });
 
-  /** M6c：读失败是暂时的，不能顺手把配色/字体重置成默认——那会覆盖首帧启动缓存，
-   *  等于把用户选的外观降级掉，且下次启动又闪白。 */
+  /** 读失败是暂时的，不能顺手把配色/字体重置成默认——那会覆盖首帧启动缓存，
+ * 等于把用户选的外观降级掉，且下次启动又闪白。 */
   it("load 失败不覆盖配色/字体（保住启动缓存）", async () => {
     // 模拟「首帧内联脚本已按缓存落位」的状态
     localStorage.setItem(SCHEME_CACHE_KEY, "dark");
@@ -176,7 +176,7 @@ describe("settings store：加载 / 乐观更新 / 回滚", () => {
     expect(localStorage.getItem(FONT_CACHE_KEY)).toBe("kai");
   });
 
-  it("load → 配色/字体属性同步落地（M7）", async () => {
+  it("load → 配色/字体属性同步落地", async () => {
     invoke.mockResolvedValueOnce({
       appearance: { ...DEFAULT_APPEARANCE, scheme: "dark", font: "kai" },
       editor: useSettingsStore.getState().settings.editor,
@@ -281,7 +281,7 @@ describe("D3：设置页「管理设备与配对」跳转侧栏同步面板", ()
   });
 
   /** 真机走查发现：窄屏下只置 syncPanelRequest 不够——侧栏抽屉是收起的，
-   *  同步面板会在 `-translate-x-full` 的容器里展开、被挤出屏幕左侧。 */
+ * 同步面板会在 `-translate-x-full` 的容器里展开、被挤出屏幕左侧。 */
   it("同时请求展开侧栏抽屉（窄屏必需，否则面板被裁到屏幕外）", () => {
     useSettingsStore.setState({ dialogOpen: true, syncPanelRequest: 0, navDrawerRequest: 0 });
     useSettingsStore.getState().requestSyncPanel();

@@ -1,4 +1,4 @@
-//! M2 桌面端同步客户端：mDNS 发现、配对、同步回合驱动。
+//! 桌面端同步客户端：mDNS 发现、配对、同步回合驱动。
 //! 手机是服务器（App 内嵌 axum），桌面是客户端；回合幂等可重放：
 //! manifest 四分类（仅服务器→拉 / 仅本地→推 / hash 同→跳 / hash 异→冲突双份）。
 
@@ -29,8 +29,8 @@ type PullBatch = (Vec<crate::sync::PullFile>, Vec<(String, String)>);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerProfile {
-    /// M4h-3：**必须等于 `device_id`**（服务器 `/info` 返回的身份）。
-    /// M2/M3 时期是 `hash(url+token)[..8]` —— 那样 IP 一变就得重配对，token 变新
+    /// **必须等于 `device_id`**（服务器 `/info` 返回的身份）。
+    /// 早期是 `hash(url+token)[..8]` —— 那样 IP 一变就得重配对，token 变新
     /// → id 变新 → 基线文件 `sync-<id>.json` 换名 → 下回合全库无基线 →
     /// 大量「双方都改」→ 冲突副本激增。
     /// 改绑设备身份后 IP 变化只需改 `url`，基线不丢。
@@ -39,14 +39,14 @@ pub struct ServerProfile {
     pub url: String,
     #[serde(default)]
     pub token: String,
-    /// 最近一次回合成功时间（unix ms；M3e 状态 UI 展示，重启不丢）
+    /// 最近一次回合成功时间（unix ms；状态 UI 展示，重启不丢）
     #[serde(default)]
     pub last_success_at: Option<i64>,
-    /// M4h-3：设备身份（来自 `/info` 的 `deviceId`）。
+    /// 设备身份（来自 `/info` 的 `deviceId`）。
     /// 旧服务器无该字段 → 空串，回退按名称匹配（`match_by_identity`）。
     #[serde(default)]
     pub device_id: String,
-    /// M4h-3：上次已知端口（IP 变了按 device_id 找回时优先试它，少扫 10 个端口）
+    /// 上次已知端口（IP 变了按 device_id 找回时优先试它，少扫 10 个端口）
     #[serde(default)]
     pub port: Option<u16>,
 }
@@ -85,16 +85,16 @@ pub fn load_servers(app: &tauri::AppHandle) -> Vec<ServerProfile> {
         .unwrap_or_default()
 }
 
-/// M4h-3 一次性迁移：把 M2/M3 的旧 profile 换绑到设备身份。
+/// 一次性迁移：把旧版的 profile 换绑到设备身份。
 ///
 /// 旧 profile 的 `id = hash(url+token)[..8]`，基线文件叫 `sync-<旧id>.json`。
 /// 迁移步骤：
-///   1. 探测每个旧 profile 的 `/info` 拿 `deviceId`
-///   2. 新 id = `d<deviceId>`；**把基线文件改名**（`sync-<旧id>.json` →
-///      `sync-<新id>.json`）而不是重建——重建等于丢掉「上轮已知状态」，
-///      下个回合会把全部差异判成「双方都改」，正是 P4 要修的现象
-///      （测试钉住「迁移前后 skipped 计数一致」）
-///   3. 探测不到的（离线）保持原样，下次同步时再迁
+/// 1. 探测每个旧 profile 的 `/info` 拿 `deviceId`
+/// 2. 新 id = `d<deviceId>`；**把基线文件改名**（`sync-<旧id>.json` →
+///    `sync-<新id>.json`）而不是重建——重建等于丢掉「上轮已知状态」，
+///    下个回合会把全部差异判成「双方都改」，正是 P4 要修的现象
+///    （测试钉住「迁移前后 skipped 计数一致」）
+/// 3. 探测不到的（离线）保持原样，下次同步时再迁
 ///
 /// 幂等：已有 `device_id` 的 profile 直接跳过。
 /// 返回迁移成功的数量。
@@ -150,7 +150,7 @@ fn port_of_url(url: &str) -> Option<u16> {
     port.split('/').next()?.parse().ok()
 }
 
-/// M4h-3：按设备身份匹配 profile。
+/// 按设备身份匹配 profile。
 ///
 /// 优先 `device_id`（稳定身份，IP/端口变了也算同一台）；对方是旧版本服务器
 /// （`/info` 无 `deviceId`）时回退按**名称**匹配——名称匹配可能误配，
@@ -173,7 +173,7 @@ pub fn match_by_identity<'a>(
         .find(|s| s.device_id.is_empty() && s.name == name)
 }
 
-/// M4h-3：profile 的稳定 id。有 deviceId 就用它（`d<id>` 前缀便于人眼区分），
+/// profile 的稳定 id。有 deviceId 就用它（`d<id>` 前缀便于人眼区分），
 /// 否则（旧服务器）沿用老的 `hash(url+token)` 方案。
 pub fn profile_id(device_id: &str, url: &str, token: &str) -> String {
     if !device_id.is_empty() {
@@ -296,7 +296,7 @@ fn push_batch(
     resp.json().map_err(|e| format!("推送响应解析失败: {e}"))
 }
 
-/// GET /api/v1/tombstones：旧服务器 404 → 空列表（删除传播静默关闭，退化 M2 行为，不报错）
+/// GET /api/v1/tombstones：旧服务器 404 → 空列表（删除传播静默关闭，退化行为，不报错）
 fn fetch_tombstones(
     c: &reqwest::blocking::Client,
     url: &str,
@@ -330,6 +330,12 @@ fn delete_batch(
         .json(&serde_json::json!({ "paths": paths }))
         .send()
         .map_err(|e| format!("删除传播失败: {e}"))?;
+    // 旧服务端没有 /delete：降级成「不传播删除」而不是整回合失败
+    //（否则一个旧手机能让桌面端所有同步卡死，连拉取都做不了）
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        log::warn!("服务器无 /delete（旧版本），本次跳过删除传播");
+        return Ok(Vec::new());
+    }
     if !resp.status().is_success() {
         return Err(format!("删除传播失败（HTTP {}）", resp.status()));
     }
@@ -488,8 +494,8 @@ fn save_sync_state(vault: &Path, id: &str, state: &HashMap<String, String>) -> R
 
 /// 同步回合核心（分阶段；`sync_round` = 各阶段的默认编排）。
 /// 分阶段两个目的：1) 测试可在阶段之间注入服务器侧改动，确定性构造
-/// 「manifest 已过期」的竞态（M2 单体回合只能在 HTTP 层测竞态）；
-/// 2) M3b/M3c 的新阶段（tombstone 处理、LWW 裁决）挂在这里，不堆进单一函数。
+/// 「manifest 已过期」的竞态（单体回合只能在 HTTP 层测竞态）；
+/// 2) /的新阶段（tombstone 处理、LWW 裁决）挂在这里，不堆进单一函数。
 pub(crate) struct RoundCore {
     state: Arc<AppState>,
     profile: ServerProfile,
@@ -503,7 +509,7 @@ pub(crate) struct RoundCore {
     /// 本地 tombstone（回合开头 D4 判定后；步骤 3/4 消费与更新）
     local_tombstones: Vec<crate::sync::Tombstone>,
     /// 上轮基线（上次回合结束时服务器的 hash 快照）
-    #[allow(dead_code)] // 分类在 new() 内消费；M3c 起阶段间需要时再放开
+    #[allow(dead_code)] // 分类在 new() 内消费；后续阶段间需要时再放开
     base_prev: HashMap<String, String>,
     /// 仅服务器有 → 拉
     to_pull: Vec<String>,
@@ -512,7 +518,7 @@ pub(crate) struct RoundCore {
     /// 双方都改（两端 hash 均 ≠ 基线）→ (path, 服务器 hash)
     conflicts: Vec<(String, String)>,
     /// 本回合基线（步骤 8）：起点 = 回合开始时的服务器清单，
-    /// 拉取/推送结果按「操作后最终 hash」更新（M3a G3 修复）
+    /// 拉取/推送结果按「操作后最终 hash」更新（G3 修复）
     baseline: HashMap<String, String>,
     report: SyncReport,
 }
@@ -529,7 +535,7 @@ impl RoundCore {
             .ok_or("尚未打开 vault")?;
 
         // 0. 本地重索引：外部改动（其他编辑器/App 直接改 vault 文件）后 DB 缓存
-        //    可能缺文件或 hash 过时——同步回合必须以磁盘为准（M1 契约：磁盘是事实源）
+        // 可能缺文件或 hash 过时——同步回合必须以磁盘为准（契约：磁盘是事实源）
         {
             let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
             let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
@@ -541,12 +547,12 @@ impl RoundCore {
         let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
         let server_tombstones = fetch_tombstones(&c, &url, &profile.token)?;
 
-        // M3b：本地 tombstone TTL 清理（30 天）
+        // 本地 tombstone TTL 清理（30 天）
         if let Err(e) = crate::sync::purge_expired_tombstones(&vault, fs_ops::now_ms()) {
             log::warn!("tombstone TTL 清理失败: {e}");
         }
         // 回合开头 D4 判定：本地 tombstone 的路径重新出现在磁盘上（回收站恢复/重建）
-        let local_tombstones = {
+        let mut local_tombstones = {
             let mut keep: Vec<crate::sync::Tombstone> = Vec::new();
             for t in crate::sync::load_tombstones(&vault) {
                 let abs = vault.join(&t.path);
@@ -582,6 +588,44 @@ impl RoundCore {
             local.iter().cloned().map(|m| (m.path.clone(), m)).collect();
         let base_prev = load_sync_state(&vault, &profile.id);
 
+        // 外部删除也算删除（评审决策）：上回合本地还有、现在磁盘上确已不存在 → 补记墓碑。
+        // 只认「路径真的不存在」——读失败（被别的进程占用、权限）不能被误判成删除，
+        // 否则一次临时 IO 错误就会把整篇笔记从所有设备上删掉。
+        let now_ms = fs_ops::now_ms();
+        let mut external_deleted: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut pending_tombstones: Vec<(String, String)> = Vec::new();
+        for (path, hash) in &base_prev {
+            if local_map.contains_key(path) || vault.join(path).exists() {
+                continue;
+            }
+            // 已经记过墓碑（App 内删除 / 上回合传播）→ 不重复记，也不刷新删除时刻
+            if local_tombstones.iter().any(|t| &t.path == path) {
+                continue;
+            }
+            pending_tombstones.push((path.clone(), hash.clone()));
+            external_deleted.insert(path.clone());
+        }
+        if !pending_tombstones.is_empty() {
+            match crate::sync::record_tombstones(&vault, &pending_tombstones, now_ms) {
+                Ok(()) => {
+                    for (path, hash) in &pending_tombstones {
+                        local_tombstones.push(crate::sync::Tombstone {
+                            path: path.clone(),
+                            hash: hash.clone(),
+                            mtime_ms: now_ms,
+                            deleted_at: now_ms,
+                        });
+                    }
+                }
+                // 记账失败就本轮不当作删除（宁可下回合再来，也不能删了却传不出去）
+                Err(e) => {
+                    log::warn!("补记外部删除墓碑失败（{} 条，本回合按未删除处理）: {e}", pending_tombstones.len());
+                    external_deleted.clear();
+                }
+            }
+        }
+
         let mut report = SyncReport::default();
         let mut to_pull: Vec<String> = Vec::new();
         let mut to_push: Vec<(String, String)> = Vec::new(); // (path, base_hash)
@@ -590,6 +634,8 @@ impl RoundCore {
         // 2. 四分类（仅服务器有→拉 / 仅本地有→推 / hash 同→跳 / hash 异→三方对比）
         for (path, sm) in &server_map {
             match local_map.get(path) {
+                // 本地「外部删除」的路径不拉回：否则文件管理器里的删除会被同步撤销
+                None if external_deleted.contains(path) => {}
                 None => to_pull.push(path.clone()),
                 Some(lm) => {
                     if lm.hash == sm.hash {
@@ -603,7 +649,7 @@ impl RoundCore {
                             // 只有本地改了 → 推送
                             to_push.push((path.clone(), sm.hash.clone()));
                         } else {
-                            // 双方都改（或无基线，如首次同步/重新配对）→ 双份（M3c：LWW 裁决）
+                            // 双方都改（或无基线，如首次同步/重新配对）→ 双份（LWW 裁决）
                             conflicts.push((path.clone(), sm.hash.clone()));
                         }
                     }
@@ -715,6 +761,9 @@ impl RoundCore {
             for r in results {
                 if r.ok {
                     self.report.deleted.push(r.path.clone());
+                    // 删除已双端生效：基线里不该再留着这个路径，
+                    // 否则墓碑 TTL 过期后「外部删除检测」会把它当成又删了一次，无限续期
+                    self.baseline.remove(&r.path);
                 } else {
                     self.report
                         .errors
@@ -754,11 +803,11 @@ impl RoundCore {
         Ok(files.into_iter().next())
     }
 
-    /// 步骤 5（M3c）：edit/edit LWW 裁决——
+    /// 步骤 5：edit/edit LWW 裁决——
     /// 版本元组 (mtime, size, hash) 比较，较新者留原路径、较旧者自动降级为**可见**冲突副本
     /// （用户无需任何操作；副本进目录树，下回合随同步传遍全端）：
-    /// - 本地新（或平手）→ M2 既有行为：服务器版本拉为本地冲突副本，本地以服务器 hash 为 base 推送
-    /// - 服务器新（M2 没有的方向）→ 先把本地当前字节存为冲突副本，再拉服务器 P 覆写本地
+    /// - 本地新（或平手）→ 既有行为：服务器版本拉为本地冲突副本，本地以服务器 hash 为 base 推送
+    /// - 服务器新（没有的方向）→ 先把本地当前字节存为冲突副本，再拉服务器 P 覆写本地
     ///
     /// **两阶段（B1）**：冲突拉取是网络 IO（单次最长 `CLIENT_TIMEOUT`=30s），
     /// 必须在**锁外**完成；全部拉完后只取一次 DB 锁做裁决/落盘。
@@ -928,7 +977,7 @@ impl RoundCore {
     }
 
     /// 步骤 7：推送（批量 8；base_hash 空 = 服务器没有，非空 = 客户端所见服务器旧版）。
-    /// M3a（步骤 8 配套）：基线取 `serverHash`（操作后最终 hash）；
+    /// （步骤 8 配套）：基线取 `serverHash`（操作后最终 hash）；
     /// 推送被服务器仲裁降级（serverHash ≠ 所推 hash）→ 纠正拉取服务器 P 对齐本地
     fn push_phase(&mut self) -> Result<(), String> {
         // take 出来再分块：块内 corrective_pull 要 &mut self，与 to_push 借用冲突
@@ -988,7 +1037,7 @@ impl RoundCore {
                         Err(e) => {
                             self.report.errors.push(e);
                             // 兜底：基线 = 所推 hash → 下回合「只有服务器改」快进拉取
-                            //（M2 行为：内容在服务器侧副本中安全，无丢失）
+                            //（行为：内容在服务器侧副本中安全，无丢失）
                             self.baseline.insert(r.path.clone(), pf.hash.clone());
                         }
                     },
@@ -1007,7 +1056,7 @@ impl RoundCore {
                         }
                         self.baseline.insert(r.path.clone(), sh.clone());
                     }
-                    // 旧服务器（无 serverHash 字段）→ M2 行为：ok = 落盘成功
+                    // 旧服务器（无 serverHash 字段）→ 行为：ok = 落盘成功
                     None => {
                         self.report.pushed.push(r.path.clone());
                         self.baseline.insert(r.path.clone(), pf.hash.clone());
@@ -1018,7 +1067,7 @@ impl RoundCore {
         Ok(())
     }
 
-    /// M3a：推送被服务器仲裁降级后，拉服务器 P 现值对齐本地。
+    /// 推送被服务器仲裁降级后，拉服务器 P 现值对齐本地。
     /// 先拉后覆写（hash 校验通过才落盘）；输家内容已有服务器侧冲突副本，无丢失。
     /// 返回 (实拉 hash, 服务器 P 的 mtime_ms)。
     fn corrective_pull(&mut self, path: &str, expect_hash: &str) -> Result<(String, i64), String> {
@@ -1090,7 +1139,7 @@ fn split_push_batches(
     batches
 }
 
-/// 一个完整同步回合（M2 + serverHash 基线修复
+/// 一个完整同步回合（+ serverHash 基线修复
 /// + 仲裁降级纠正拉取 + tombstone 删除传播）。阻塞；调用方负责放到 blocking 线程。
 pub fn sync_round(state: &Arc<AppState>, profile: &ServerProfile) -> Result<SyncReport, String> {
     let mut core = RoundCore::new(state, profile)?;
@@ -1164,9 +1213,9 @@ pub async fn sync_discover() -> CmdResult<Vec<Discovered>> {
         .map_err(|e| format!("发现任务失败: {e}"))
 }
 
-// ---------- M4h-1：LAN 扫描发现 ----------
+// ---------- LAN 扫描发现 ----------
 
-/// 扫描结果（含 deviceId，供 M4h-3 按设备身份匹配）
+/// 扫描结果（含 deviceId，供按设备身份匹配）
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
@@ -1177,7 +1226,7 @@ pub struct ScanResult {
     pub scanned_subnet: bool,
 }
 
-/// LAN 发现（M4h-1）：mDNS 一级 best effort → L1 邻居表 → L2 本机网段并发探测。
+/// LAN 发现：mDNS 一级 best effort → L1 邻居表 → L2 本机网段并发探测。
 ///
 /// **命中即停**：mDNS 或已知地址命中就不再扫描——家庭网
 /// 一次 browse 就够，公司网才退到扫描。整个命令走 `spawn_blocking`，
@@ -1224,7 +1273,7 @@ pub async fn sync_scan_lan(
             let known = match_by_identity(&servers, &d.device_id, &d.name).is_some();
             (!known, d.name.clone())
         });
-        let _ = &app; // M4h-4：扫描结果 name 即 /info 的代号，无需客户端再加工
+        let _ = &app; // 扫描结果 name 即 /info 的代号，无需客户端再加工
         Ok(ScanResult {
             devices,
             truncated: out.truncated,
@@ -1235,7 +1284,7 @@ pub async fn sync_scan_lan(
     .map_err(|e| format!("扫描任务失败: {e}"))?
 }
 
-// ---------- M4h-2：桌面侧「一键授权」客户端 ----------
+// ---------- 桌面侧「一键授权」客户端 ----------
 
 /// 配对请求的轮询结局（前端四态：等待 / 批准 / 拒绝 / 超时）
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1249,7 +1298,7 @@ pub struct PairAttempt {
     pub reason: Option<String>,
 }
 
-/// 客户端名：M4h-4 起是**设备代号**（AppConfig.deviceAlias；手机端授权卡片
+/// 客户端名：**设备代号**（AppConfig.deviceAlias；手机端授权卡片
 /// 显示「『青柠台机』请求连接」）。首启由 setup 预热进程内缓存并落默认值
 /// （桌面 = HOSTNAME，手机 = 词表随机），用户可在设置里改；
 /// 缓存未命中（纯逻辑测试）时回退 HOSTNAME 语义。
@@ -1448,7 +1497,7 @@ pub async fn sync_pair(
     tauri::async_runtime::spawn_blocking(move || {
         let (token, name) = pair(&url, &code)?;
         let url = normalize_url(&url)?;
-        // M4h-3：配对后立刻取 deviceId，让 profile 从第一次起就绑设备身份
+        // 配对后立刻取 deviceId，让 profile 从第一次起就绑设备身份
         let device_id = fetch_info(&url).map(|i| i.device_id).unwrap_or_default();
         let mut servers = load_servers(&app);
         let profile = ServerProfile {
@@ -1475,7 +1524,7 @@ pub async fn sync_pair(
 
 /// 已配对服务器列表。
 ///
-/// M4h-3：这里顺带做一次**惰性 profile 迁移**——M2/M3 的旧 profile 用
+/// 这里顺带做一次**惰性 profile 迁移**——/的旧 profile 用
 /// `hash(url+token)` 当 id，IP 一变就得重配对且基线文件会换名。
 /// 迁移要探测设备（拿 deviceId），是网络动作，所以放在「打开同步面板」这条
 /// 用户可见的路径上做，而不是每次 `load_servers` 都做（那会让同步回合变慢）。
@@ -1492,7 +1541,7 @@ pub async fn sync_servers(app: tauri::AppHandle) -> CmdResult<Vec<ServerProfile>
                 None => 0,
             };
             if n > 0 {
-                log::info!("M4h-3：{n} 个已配对设备换绑到设备身份（IP 变化不再需要重配）");
+                log::info!("{n} 个已配对设备换绑到设备身份（IP 变化不再需要重配）");
                 save_servers(&app, &servers)?;
             }
         }
@@ -1537,7 +1586,9 @@ pub async fn sync_now(
 ) -> CmdResult<SyncReport> {
     use std::sync::atomic::Ordering;
     if SYNC_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Err("同步回合进行中，请稍候".into());
+        // 返回 Ok + busy 而不是 Err：这是「另一回合在跑，本次跳过」，
+        // 不是错误；前端也不必再靠中文文案判断要不要弹红条。
+        return Ok(SyncReport { busy: true, ..Default::default() });
     }
     let _guard = SyncGuard;
     let servers = load_servers(&app);
@@ -1548,9 +1599,8 @@ pub async fn sync_now(
     let state = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || sync_round(&state, &profile))
         .await
-        .map_err(|e| format!("同步任务失败: {e}"))?
-        .map_err(|e| e)?;
-    // M3e：回合成功 → 记最近成功时间（profile JSON 持久化，重启不丢）
+        .map_err(|e| format!("同步任务失败: {e}"))??;
+    // 回合成功 → 记最近成功时间（profile JSON 持久化，重启不丢）
     let mut servers = load_servers(&app);
     if let Some(s) = servers.iter_mut().find(|s| s.id == id) {
         s.last_success_at = Some(fs_ops::now_ms());
@@ -1559,13 +1609,13 @@ pub async fn sync_now(
     Ok(report)
 }
 
-/// `/api/v1/info` 的响应体（M4h-1 起多带 `deviceId`）
+/// `/api/v1/info` 的响应体（多带 `deviceId`）
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InfoResponse {
     pub app: String,
     pub name: String,
-    /// M4h-3：设备身份。**旧服务器无该字段 → 空串**，调用方回退名称匹配
+    /// 设备身份。**旧服务器无该字段 → 空串**，调用方回退名称匹配
     pub device_id: String,
     pub notes: u64,
     pub assets: u64,
@@ -1573,7 +1623,7 @@ pub struct InfoResponse {
 
 /// GET `/api/v1/info`（无鉴权、3s 超时）——探测与扫描共用的唯一入口。
 ///
-/// 校验 `app == "lanmark"`：M4h-1 的 LAN 扫描会连到任意开着 4180 端口的主机，
+/// 校验 `app == "lanmark"`：的 LAN 扫描会连到任意开着 4180 端口的主机，
 /// 没有这个校验就会把别人的服务当成笔记库列给用户。
 pub fn fetch_info(url: &str) -> Result<InfoResponse, String> {
     let c = reqwest::blocking::Client::builder()
@@ -1595,7 +1645,7 @@ pub fn fetch_info(url: &str) -> Result<InfoResponse, String> {
     Ok(info)
 }
 
-/// M3 自动同步循环的轻量探测（阻塞，可单测）：GET /info（无鉴权、3s 超时）。
+/// 自动同步循环的轻量探测（阻塞，可单测）：GET /info（无鉴权、3s 超时）。
 /// 不读清单、不算 hash——单线程服务器上被刷请求会停摆，循环每 60s 一探测必须廉价。
 /// 网络错误/超时/非 2xx 一律 online=false（探测永不抛错：循环按退避继续）。
 pub(crate) fn probe_server(url: &str, name: &str) -> ProbeResult {
@@ -1621,7 +1671,7 @@ pub async fn sync_probe(app: tauri::AppHandle, id: String) -> CmdResult<ProbeRes
     .map_err(|e| format!("探测任务失败: {e}"))?
 }
 
-/// M3 P2（mDNS 连续监听兜底）：探测连续失败后 browse 到同名服务器 → 更新 url 重连。
+/// P2（mDNS 连续监听兜底）：探测连续失败后 browse 到同名服务器 → 更新 url 重连。
 /// 与 pair 同纪律：normalize_url 校验 + 原子写 profile。
 #[tauri::command]
 pub fn sync_server_set_url(app: tauri::AppHandle, id: String, url: String) -> CmdResult<ServerProfile> {
@@ -1843,7 +1893,7 @@ mod tests {
 
     #[test]
     fn sync_round_conflict_keeps_both_versions() {
-        // 两端离线各改同一篇 → 同步后双份都在、无丢失（M2 验收项 3）
+        // 两端离线各改同一篇 → 同步后双份都在、无丢失（验收项 3）
         let phone_dir = tempfile::TempDir::new().unwrap();
         let phone = Arc::new(AppState::default());
         open_vault_at(&phone, phone_dir.path()).unwrap();
@@ -1860,7 +1910,7 @@ mod tests {
         assert_eq!(r0.pulled.len(), 1, "{r0:?}");
 
         // 离线：两端各改同一篇。桌面 mtime 钉到未来 → LWW 桌面（本地）赢，
-        // 测试原意（M2 冲突双份断言）在 LWW 下保持成立
+        // 测试原意（冲突双份断言）在 LWW 下保持成立
         note_write_op(&desk, &note.path, "桌面版本").unwrap();
         set_mtime(&desk, &note.path, fs_ops::now_ms() + 3_600_000);
         note_write_op(&phone, &note.path, "手机版本").unwrap();
@@ -2125,7 +2175,7 @@ mod tests {
         let stale_hash = manifest.iter().find(|m| m.path == note.path).unwrap().hash.clone();
 
         // 2) 桌面基于旧版修改；服务器在 manifest 之后被改成「手机版本二」。
-        //    显式设定 mtime：桌面版本更新（M3a 仲裁下来件获胜，M2 断言保持成立）
+        // 显式设定 mtime：桌面版本更新（仲裁下来件获胜，断言保持成立）
         note_write_op(&desk, &note.path, "桌面版本").unwrap();
         set_mtime(&desk, &note.path, fs_ops::now_ms() + 3_600_000);
         note_write_op(&phone, &note.path, "手机版本二").unwrap();
@@ -2138,7 +2188,7 @@ mod tests {
         assert!(results[0].ok, "竞态 push 应成功: {:?}", results[0].error);
         let server_copy = results[0].conflict_saved_as.clone().expect("服务器侧应有冲突副本");
         assert!(server_copy.contains("冲突"), "服务器侧冲突命名: {server_copy}");
-        // M3a：来件获胜 → serverHash = 所推 hash
+        // 来件获胜 → serverHash = 所推 hash
         assert_eq!(results[0].server_hash.as_deref(), Some(pushed_hash.as_str()));
 
         // 服务器：原路径 = 桌面版本，冲突副本 = 手机版本二（双份都在）
@@ -2160,7 +2210,7 @@ mod tests {
         // 三份内容都在，无丢失：桌面（桌面版本 + 手机版本二副本）、服务器同
     }
 
-    // ---------- M3a 双客户端集成 ----------
+    // ---------- 双客户端集成 ----------
 
     /// 三端（手机服务器 + 桌面×2）顺序改动 → 收敛，终轮全跳过
     #[test]
@@ -2324,7 +2374,7 @@ mod tests {
         core.push_phase().unwrap();
         let report = core.finish().unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        // M3c：降级产生一条 LWW 合并事件（server 赢，输家 = 本次推送的 A 旧版）
+        // 降级产生一条 LWW 合并事件（server 赢，输家 = 本次推送的 A 旧版）
         assert_eq!(report.merges.len(), 1, "降级应产生合并事件: {report:?}");
         assert_eq!(report.merges[0].winner, "server", "{:?}", report.merges[0]);
         assert_eq!(report.merges[0].path, p.path);
@@ -2368,7 +2418,7 @@ mod tests {
         assert_eq!(r.skipped, snap_phone.len());
     }
 
-    /// M3c 客户端 LWW（服务器更新方向，M2 没有的分支）：双端离线改同一篇，
+    /// 客户端 LWW（服务器更新方向，没有的分支）：双端离线改同一篇，
     /// 较新者先同步 → 较旧者回合时服务器版本更新 → 先存本地副本再拉取覆写，
     /// 全程无人工操作；副本下回合传遍全端
     #[test]
@@ -2495,7 +2545,7 @@ mod tests {
         );
     }
 
-    // ---------- M3b tombstone ----------
+    // ---------- tombstone ----------
 
     /// 删除传播：hash 相同（删后没再改）→ 三端软删，回收站都有，不再拉回复活
     #[test]
@@ -2551,7 +2601,7 @@ mod tests {
             assert!(found, "{label} 回收站应保留被删内容");
         }
 
-        // 后续回合：不拉回复活（M2 会复活，M3b 修掉）
+        // 后续回合：不拉回复活（会复活，修掉）
         let r = sync_round(&deskA, &profile_a).unwrap();
         assert!(r.pulled.iter().all(|x| x != &p.path), "不得拉回已删文件: {r:?}");
         assert!(!dA.path().join(&p.path).exists());
@@ -2843,7 +2893,7 @@ mod tests {
             .filter_map(|e| std::fs::read(e.path()).ok())
             .collect();
         for expect in ["一".as_bytes().to_vec(), "二".as_bytes().to_vec()] {
-            assert!(contents.iter().any(|c| *c == expect), "B 回收站缺内容: {expect:?}");
+            assert!(contents.contains(&expect), "B 回收站缺内容: {expect:?}");
         }
 
         // 终态：三端快照一致（文件夹内笔记全没了，根级附件都在）
@@ -3311,12 +3361,12 @@ mod tests {
             "manifest 必须反映磁盘"
         );
         // pull 服务的 hash 与内容一致（客户端校验必过）
-        let (files, missing) = pull_batch(&c, &base, &token, &[note.path.clone()]).unwrap();
+        let (files, missing) = pull_batch(&c, &base, &token, std::slice::from_ref(&note.path)).unwrap();
         assert!(missing.is_empty());
         assert_eq!(files[0].hash, crate::fs_ops::content_hash("外部改过的内容".as_bytes()));
     }
 
-    /// M3 探测：在线服务器 → online + 设备统计；离线（未监听端口）→ online=false 不抛错
+    /// 探测：在线服务器 → online + 设备统计；离线（未监听端口）→ online=false 不抛错
     #[test]
     fn probe_server_online_and_offline() {
         let phone_dir = tempfile::TempDir::new().unwrap();
@@ -3347,13 +3397,13 @@ mod tests {
     #[test]
     fn normalize_url_rules() {
         assert_eq!(normalize_url(" http://1.2.3.4:4180/ ").unwrap(), "http://1.2.3.4:4180");
-        assert!(normalize_url("https://x").is_err(), "M2 仅明文 http");
+        assert!(normalize_url("https://x").is_err(), "仅明文 http");
         assert!(normalize_url("ftp://x").is_err());
         assert!(normalize_url("1.2.3.4").is_err());
         assert!(normalize_url("").is_err());
     }
 
-    // ---------- M4h-3：profile 换绑设备身份 + 基线迁移 ----------
+    // ---------- profile 换绑设备身份 + 基线迁移 ----------
 
     #[test]
     fn profile_id_binds_device_identity() {
@@ -3485,7 +3535,7 @@ mod tests {
         assert!(r1.errors.is_empty(), "{:?}", r1.errors);
         assert_eq!(r1.pulled.len(), 1);
 
-        // 迁移（模拟升级到 M4h-3 后的首次启动）
+        // 迁移（模拟升级到后的首次启动）
         assert_eq!(migrate_profiles_to_device_id(desk_dir.path(), &mut servers), 1);
         assert_eq!(servers[0].device_id, device_id);
 
@@ -3522,7 +3572,7 @@ mod tests {
         assert_eq!(port_of_url("nonsense"), None);
     }
 
-    // ---------- M4h-2：桌面侧一键授权客户端 ----------
+    // ---------- 桌面侧一键授权客户端 ----------
 
     /// 端到端：桌面发起请求 → 手机侧批准 → 桌面拿到 profile（id 绑设备身份）
     #[test]
@@ -3559,7 +3609,7 @@ mod tests {
         let device_id = crate::sync_server::load_sync_config(phone_dir.path()).device_id;
         assert_eq!(profile.device_id, device_id, "profile 绑设备身份");
         assert_eq!(profile.id, format!("d{device_id}"));
-        // M4h-4：name = 服务器侧设备代号（AppConfig；测试进程内为缓存默认值）
+        // name = 服务器侧设备代号（AppConfig；测试进程内为缓存默认值）
         assert_eq!(profile.name, crate::alias::current_alias(None));
         assert!(!profile.name.is_empty());
         assert!(!profile.token.is_empty());
@@ -3720,4 +3770,55 @@ mod tests {
             "未拉的路径不得写进基线，否则下回合会静默覆盖服务器版本: {saved:?}"
         );
     }
+
+    /// 回归（P2-A5）：在文件管理器里删掉的文件，同步时必须当作「删除」传播，
+    /// 而不是被对端按「仅服务器有」拉回来。
+    #[test]
+    fn external_delete_propagates_as_delete() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let note = note_create_op(&phone, "", "会被外部删掉").unwrap();
+        note_write_op(&phone, &note.path, "正文").unwrap();
+
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _name) = pair(&base, &code).unwrap();
+
+        let (dir, state) = client_vault();
+        let profile = ServerProfile {
+            id: "dev-ext-del".into(),
+            name: "desk".into(),
+            url: base,
+            token,
+            last_success_at: None,
+            device_id: "ext-del".into(),
+            port: None,
+        };
+
+        // 回合 1：拉下来，基线建立
+        let r1 = sync_round(&state, &profile).unwrap();
+        assert!(r1.errors.is_empty(), "{:?}", r1.errors);
+        assert!(dir.path().join(&note.path).is_file(), "应先同步到本地");
+
+        // 模拟文件管理器删除：不经过 App，因此没有墓碑
+        std::fs::remove_file(dir.path().join(&note.path)).unwrap();
+
+        // 回合 2：识别为删除 → 记墓碑 + 传播 /delete
+        let r2 = sync_round(&state, &profile).unwrap();
+        assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+        assert!(
+            !phone_dir.path().join(&note.path).exists(),
+            "服务器侧也应删掉（进回收站），而不是把文件留着重推回来"
+        );
+        assert!(
+            load_tombstones(dir.path()).iter().any(|t| t.path == note.path),
+            "本地应留下墓碑"
+        );
+        // 基线里不该再留着已删路径（否则墓碑 TTL 过期后会无限续期）
+        assert!(
+            !load_sync_state(dir.path(), &profile.id).contains_key(&note.path),
+            "删除生效后基线应移除该路径"
+        );
+    }
+
 }

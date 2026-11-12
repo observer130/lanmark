@@ -283,10 +283,10 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
             {vaultPath ?? ""}
           </div>
         </div>
-        {/* M4f 收尾（用户反馈）：「重新扫描」从顶栏移到「设置 → 存储」——
-            它与设置页那个按钮完全重复，而设置入口原先独占底部一整行横幅太占位置。
-            重索引在开库与每回合同步时都会自动跑，这个按钮只在「外部程序改了
-            vault 且不想等同步」时才需要，属低频操作，收进设置页更合理。 */}
+        {/* 收尾（用户反馈）：「重新扫描」从顶栏移到「设置 → 存储」——
+ 它与设置页那个按钮完全重复，而设置入口原先独占底部一整行横幅太占位置。
+ 重索引在开库与每回合同步时都会自动跑，这个按钮只在「外部程序改了
+ vault 且不想等同步」时才需要，属低频操作，收进设置页更合理。 */}
         {/* 触控 44px 仅窄屏；md: 恢复桌面紧凑尺寸（原 p-1.5，约 26px） */}
         <button
           title="设置"
@@ -302,8 +302,8 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
       </div>
 
       {/* 桌面侧栏面板切换（Typora 式）：文件 / 大纲。
-          窄屏强制文件面板——移动端的大纲入口是编辑器右下角悬浮按钮 + 底部抽屉，
-          不把目录藏进 85vw 抽屉（调研见 OutlineSheet 注释）。 */}
+ 窄屏强制文件面板——移动端的大纲入口是编辑器右下角悬浮按钮 + 底部抽屉，
+ 不把目录藏进 85vw 抽屉（调研见 OutlineSheet 注释）。 */}
       {!narrow && (
         <div className="px-3 pt-1">
           <div
@@ -401,10 +401,10 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
               <MetaList items={recents} onOpen={openNoteAndClose} />
 
               {/* 笔记本树：新建入口统一在标题右侧。
-                  点击弹对话框（命名 + 选位置），不再「先建默认名再内联重命名」。
-                  M4i：手机上这里是**唯一**的新建入口 —— 曾加过编辑器右下角的
-                  悬浮按钮（FAB），但它悬在正文上挡字，且「新建」是导航/管理动作，
-                  属于侧栏而非编辑器，已移除。按钮触控尺寸 44px。 */}
+ 点击弹对话框（命名 + 选位置），不再「先建默认名再内联重命名」。
+ 手机上这里是**唯一**的新建入口 —— 曾加过编辑器右下角的
+ 悬浮按钮（FAB），但它悬在正文上挡字，且「新建」是导航/管理动作，
+ 属于侧栏而非编辑器，已移除。按钮触控尺寸 44px。 */}
               <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
                 <span className="text-[11px] font-medium text-ink-3">笔记本</span>
                 <span className="flex gap-0.5">
@@ -431,8 +431,8 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
               <TreeView tree={tree} onNavigate={onNavigate} />
 
               {/* 回收站（v0.5.1）：`.lanmark/trash` 的条目，可恢复到删除前位置。
-                  放在笔记本树之后（顺序：收藏—最近—笔记本—回收站）。
-                  条目不可打开（trash 里的笔记不属于工作区），只提供恢复。 */}
+ 放在笔记本树之后（顺序：收藏—最近—笔记本—回收站）。
+ 条目不可打开（trash 里的笔记不属于工作区），只提供恢复。 */}
               <TrashSection
                 items={trash}
                 expanded={expandedSections.has("trash")}
@@ -451,10 +451,10 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
       )}
 
       {/* 同步（侧栏底边单行收纳）：
-          常驻只剩一行（状态+开关+同步），管理/配对在点击行后的上拉面板里 */}
+ 常驻只剩一行（状态+开关+同步），管理/配对在点击行后的上拉面板里 */}
       <SyncSection />
 
-      {/* 新建笔记 / 新建文件夹 对话框 */}
+      {/* 新建笔记 / 新建文件夹对话框 */}
       <CreateDialog />
     </aside>
   );

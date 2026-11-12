@@ -1,8 +1,8 @@
-//! M2 同步共享层：协议类型、本地/远端清单构建、冲突命名。
+//! 同步共享层：协议类型、本地/远端清单构建、冲突命名。
 //! 协议：文件级 sha256 版本对比、冲突保留双份（铁律：任何裁决都不得静默丢内容）、JSON over HTTP。
 //! 服务器（手机 axum）与客户端（桌面）两侧共用，保证语义一致。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -61,9 +61,9 @@ pub struct PushResult {
     pub error: Option<String>,
     /// 服务器侧原有版本被改名保留时的新路径（冲突命名）
     pub conflict_saved_as: Option<String>,
-    /// 该路径在服务器上**操作后的最终 hash**（M3a 新增）：
+    /// 该路径在服务器上**操作后的最终 hash**（新增）：
     /// 干净落盘/来件仲裁获胜 = 所推 hash；来件被仲裁降级 = 原路径现有 hash。
-    /// 旧服务器不返回该字段（None）→ 客户端退化 M2 行为（ok = 落盘）。
+    /// 旧服务器不返回该字段（None）→ 客户端退化行为（ok = 落盘）。
     #[serde(default)]
     pub server_hash: Option<String>,
 }
@@ -96,17 +96,22 @@ pub struct MergeEvent {
 pub struct SyncReport {
     pub pulled: Vec<String>,
     pub pushed: Vec<String>,
-    /// LWW 自动合并明细（M3c；M2 的 Vec<String> 冲突列表由此取代）
+    /// LWW 自动合并明细（；的 Vec<String> 冲突列表由此取代）
     #[serde(default)]
     pub merges: Vec<MergeEvent>,
-    /// 已同步的删除（本地软删 / 服务器 /delete，均进回收站，M3b）
+    /// 已同步的删除（本地软删 / 服务器 /delete，均进回收站）
     #[serde(default)]
     pub deleted: Vec<String>,
     pub skipped: usize,
     pub errors: Vec<String>,
+    /// 另一回合正在跑（客户端串行锁），本次调用没有做任何事。
+    /// 单独给字段而不是 Err：前端此前靠 `msg.includes("进行中")` 判，
+    /// 文案一改就把「正常跳过的噪声」变成红色错误提示。
+    #[serde(default)]
+    pub busy: bool,
 }
 
-// ---------- tombstone（M3b 删除传播） ----------
+// ---------- tombstone（删除传播） ----------
 
 /// 删除墓碑：一端删除 → 另一端软删（铁律：永不硬删）。
 /// `mtime_ms` = 删除时刻（LWW 裁决时间源，与编辑侧的文件 mtime 比较）；
@@ -211,8 +216,13 @@ pub fn purge_expired_tombstones(vault: &Path, now_ms: i64) -> std::io::Result<us
 /// 若以 DB 为准就同步不出去，外部删除还会被桌面「推回来」复活。
 /// 逐文件读磁盘字节算 hash/mtime/size（读失败跳过，与旧实现一致）。
 pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
+    // 只在取路径时持锁：全库 walk + 逐文件 sha256 在 1e4 文件量级是秒级的，
+    // 持着 vault 锁会让 check_token / /pair / /info 一起排队（此前就踩过）。
+    // 路径是 clone 出去的快照，切库瞬间最多读到旧库的清单，下回合自然纠正。
+    let vault: PathBuf = with_vault(state, |v| Ok(v.clone()))?;
     let mut out = Vec::new();
-    with_vault(state, |vault| {
+    {
+        let vault = &vault;
         for path in fs_ops::collect_note_paths(vault).map_err(|e| e.to_string())? {
             let abs = vault.join(&path);
             let Ok(bytes) = std::fs::read(&abs) else { continue };
@@ -239,8 +249,8 @@ pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
         for meta in asset_walk(vault).map_err(|e| e.to_string())? {
             out.push(meta);
         }
-        Ok(out)
-    })
+    }
+    Ok(out)
 }
 
 /// walk assets/，逐文件计算 sha256（内容寻址目录，文件数有限）
@@ -262,16 +272,16 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
         }
         // 原子写的半成品不进清单：tmp 在 rename 前一瞬存在，写失败时也可能残留；
         // 一旦被同步出去，对端会多一个永远修不好的孤儿附件。
-        if entry.file_name().to_string_lossy().ends_with(fs_ops::TMP_SUFFIX) {
+        // 非 UTF-8 文件名同样跳过（与 collect_notes 同纪律：清单里表达不了）
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.ends_with(fs_ops::TMP_SUFFIX) {
             continue;
         }
         let path = entry.path();
         let bytes = std::fs::read(&path)?;
-        let rel = format!(
-            "{}/{}",
-            fs_ops::ASSETS_DIR,
-            entry.file_name().to_string_lossy()
-        );
+        let rel = format!("{}/{}", fs_ops::ASSETS_DIR, name);
         out.push(FileMeta {
             path: rel,
             kind: "asset".into(),
@@ -293,7 +303,7 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
 
 /// 版本元组：`(mtime_ms, size, hash_hex)`，字典序比较，**大者赢**。
 /// mtime 不同 → mtime 新者赢；同毫秒 → size 大者赢；size 同 → hash 字典序大者赢
-/// （hash 相同 = 内容相同，本不会进裁决）。M3b 删除参与裁决时取
+/// （hash 相同 = 内容相同，本不会进裁决）。删除参与裁决时取
 /// `(tombstone.mtime_ms, 0, tombstone.hash)`——size 记 0，mtime 平手时编辑恒赢删除。
 pub fn version_gt(a: (i64, i64, &str), b: (i64, i64, &str)) -> bool {
     (a.0, a.1, a.2) > (b.0, b.1, b.2)

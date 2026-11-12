@@ -2,15 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { isAndroid } from "../lib/sync";
 
 /**
- * M4i 移动端返回手势（仅 Android）。
+ * 移动端返回手势（仅 Android）。
  *
  * 分工：**原生管「返回发生了」，前端管「返回该做什么」**。
  *
  * - 下行：前端在浮层开关时调 `set_ui_back_handler` 报告当前状态
- *   （`drawer` / `overlay` / `none`）；因为返回由系统直接派发给原生，
- *   原生没机会先问前端。
+ * （`drawer` / `overlay` / `none`）；因为返回由系统直接派发给原生，
+ * 原生没机会先问前端。
  * - 上行：原生只在**有浮层**时拦下返回，用 `evaluateJavascript` 派发 DOM
- *   CustomEvent `lanmark:back`；这里监听它并关掉浮层。
+ * CustomEvent `lanmark:back`；这里监听它并关掉浮层。
  *
  * **不用 `addPluginListener`**：真机 2510DRK44C / Android 16 实测注册后
  * Kotlin 侧 `hasListener=false`，事件收不到。直接派发 DOM 事件更可靠

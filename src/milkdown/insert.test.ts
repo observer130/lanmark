@@ -1,11 +1,11 @@
 /**
- * M8 批次 2「插入块」的行为护栏。
+ * 「插入块」的行为护栏。
  *
  * 两条不变量是这一层最容易踩的坑：
- *  ① **不许删用户的字**——Crepe 斜杠菜单每条命令前面都挂了 `clearTextInCurrentBlockCommand`
- *     （用来抹掉用户敲的 `/h2`），照抄就会把当前块的正文整段删掉。
- *  ② **块类不许劈开正文**——`addBlockTypeCommand` = `replaceSelectionWith`，光标在「你好」中间时
- *     会得到 `你` + 块 + `好`。菜单是点按钮打开的、不是敲 `/`，语义应是「在下方插入一块」。
+ * ① **不许删用户的字**——Crepe 斜杠菜单每条命令前面都挂了 `clearTextInCurrentBlockCommand`
+ * （用来抹掉用户敲的 `/h2`），照抄就会把当前块的正文整段删掉。
+ * ② **块类不许劈开正文**——`addBlockTypeCommand` = `replaceSelectionWith`，光标在「你好」中间时
+ * 会得到 `你` + 块 + `好`。菜单是点按钮打开的、不是敲 `/`，语义应是「在下方插入一块」。
  */
 import { describe, it, expect } from "vitest";
 import { editorViewCtx } from "@milkdown/kit/core";
@@ -34,7 +34,7 @@ async function mountWithCaretInLastParagraph(md: string) {
 
 const DOC = "# 测试\n\n## 这是二级标题\n\n这是一行文本\n\n你好\n";
 
-describe("插入块（M8 批次 2）", () => {
+describe("插入块", () => {
   it.each([
     ["h1", "# 你好"],
     ["h2", "## 你好"],
@@ -110,11 +110,11 @@ describe("插入块（M8 批次 2）", () => {
   });
 });
 
-describe("荧光笔输入规则（M8 走查修复：不再借 Milkdown 的 markRule）", () => {
+describe("荧光笔输入规则（不再借 Milkdown 的 markRule）", () => {
   /**
-   * 上游 `markRule` 会算出越界的 `to` 交给 `doc.nodesBetween`，prosemirror-model 直接抛
-   * `Cannot read properties of undefined (reading 'nodeSize')`。这条用例钉住「不抛、且 mark 正确」。
-   */
+ * 上游 `markRule` 会算出越界的 `to` 交给 `doc.nodesBetween`，prosemirror-model 直接抛
+ * `Cannot read properties of undefined (reading 'nodeSize')`。这条用例钉住「不抛、且 mark 正确」。
+ */
   const RE = /(?<![=\w])(==)(?!\s)([^\n]+?)(?<!\s)\1(?![\w=])$/;
 
   async function setup(text = "前缀") {

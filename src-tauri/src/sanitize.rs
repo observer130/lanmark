@@ -16,7 +16,7 @@ pub fn sanitize_filename(raw: &str) -> String {
     let mapped: String = raw
         .trim()
         .chars()
-        .filter(|c| c.is_control() == false)
+        .filter(|c| !c.is_control())
         .map(|c| match c {
             ' ' | '\t' => '-',
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',

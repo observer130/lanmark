@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * M5-4 更新检测 store 测试。
+ * 更新检测 store 测试。
  *
  * 两条路径的纪律差异是重点：
  * - autoCheck：受 settings.update.autoCheck 门控、skipped 不改状态、失败静默

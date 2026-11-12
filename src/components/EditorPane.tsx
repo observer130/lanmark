@@ -116,9 +116,9 @@ function selectTopBlock(view: LMView, index: number): boolean {
 }
 
 /** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留。
- *  readOnly=true 时为「阅读模式」：关掉斜杠菜单/块手柄/链接浮层等交互特性，
- *  并将 ProseMirror 设为不可编辑（粘贴/拖入监听也一并跳过）。
- *  （导出供组件级测试直接挂载，见 EditorPane.external.test.ts。） */
+ * readOnly=true 时为「阅读模式」：关掉斜杠菜单/块手柄/链接浮层等交互特性，
+ * 并将 ProseMirror 设为不可编辑（粘贴/拖入监听也一并跳过）。
+ * （导出供组件级测试直接挂载，见 EditorPane.external.test.ts。） */
 export function MilkdownHost({
   content,
   notePath,
@@ -191,10 +191,10 @@ export function MilkdownHost({
     let { body: editorBody, map: wikiMap } = protectWikilinks(body);
     const baseDir = parentDir(notePath);
     /**
-     * 编辑器序列化 → 落盘用的完整 markdown。
-     * `markdownUpdated` / teardown flush / 外部替换**必须共用这一条管线**，
-     * 否则 flush 出来的内容与放行基线不一致，会制造伪 dirty。
-     */
+ * 编辑器序列化 → 落盘用的完整 markdown。
+ * `markdownUpdated` / teardown flush / 外部替换**必须共用这一条管线**，
+ * 否则 flush 出来的内容与放行基线不一致，会制造伪 dirty。
+ */
     const serialize = (md: string): string =>
       trimDocTail(
         joinFrontmatter(fm, vaultUrlsToRelative(restoreWikilinks(md, wikiMap), baseDir)),
@@ -202,7 +202,7 @@ export function MilkdownHost({
     let view: LMView | null = null;
     // 基线文档：只有 doc 树真正相对基线变化过，才放行 markdownUpdated。
     // （Crepe create 后会异步触发一次「同 doc 重序列化」事件——列表 - 会变 *、
-    //  补尾行——若放行就会「打开笔记=重写文件」）
+    // 补尾行——若放行就会「打开笔记=重写文件」）
     let lastKnownDoc: LMDoc | null = null;
     // 最近一次**放行**的完整 markdown（含 frontmatter / wikilink 还原）。
     // trailing 插件会在首次选区事务插一个空段落；doc 确实变了，但序列化结果只多一个尾空行。
@@ -233,10 +233,10 @@ export function MilkdownHost({
       // 阅读模式：ProseMirror 设为不可编辑（命令式插入仍可能绕过，故监听器也一并跳过）
       if (readOnly) view.setProps({ editable: () => false });
       /**
-       * 显示层改写：相对图片 src → vault 协议 URL。
-       * 打开笔记与外部内容替换后都要跑一次，否则换进来的新文档图片会裂。
-       * 只改显示，不改源文件；addToHistory=false 避免「打开笔记」垫一步历史。
-       */
+ * 显示层改写：相对图片 src → vault 协议 URL。
+ * 打开笔记与外部内容替换后都要跑一次，否则换进来的新文档图片会裂。
+ * 只改显示，不改源文件；addToHistory=false 避免「打开笔记」垫一步历史。
+ */
       const applyImageDisplay = () => {
         if (!view) return;
         const tr = view.state.tr;
@@ -314,20 +314,20 @@ export function MilkdownHost({
       const ctx = await crepe.editor.action((c) => c);
 
       /**
-       * 外部内容替换（S3）：同步/远端重载后，把新正文灌进**已挂载**的实例。
-       *
-       * 为什么不能只 `set({content})`：Crepe 只在挂载时读 content（挂载 effect 依赖
-       * `[]`），已挂载实例不会自己更新；用户下一次按键会把「旧文档 + 改动」写回，
-       * 覆盖刚拉取/推送的新版本，而且没有冲突副本。
-       *
-       * 用 Milkdown `replaceAll` 宏的同一原语（parser 解析 → 整篇 replace），但显式带
-       * `addToHistory=false`：
-       *  - listener 插件的 `apply()` 见到该 meta 直接 return，**不会排 200ms 防抖**，
-       *    因此不会触发 onChange、不会写文件；
-       *  - 不进撤销栈：换的是「服务器上的文档」，不是用户的一步编辑。
-       * （`@milkdown/kit/utils` 的 `replaceAll` 宏没有 meta 通道，这里是它 4 行核心
-       *  + meta，语义等价；见提交说明里的取舍。）
-       */
+ * 外部内容替换（S3）：同步/远端重载后，把新正文灌进**已挂载**的实例。
+ *
+ * 为什么不能只 `set({content})`：Crepe 只在挂载时读 content（挂载 effect 依赖
+ * `[]`），已挂载实例不会自己更新；用户下一次按键会把「旧文档 + 改动」写回，
+ * 覆盖刚拉取/推送的新版本，而且没有冲突副本。
+ *
+ * 用 Milkdown `replaceAll` 宏的同一原语（parser 解析 → 整篇 replace），但显式带
+ * `addToHistory=false`：
+ * - listener 插件的 `apply()` 见到该 meta 直接 return，**不会排 200ms 防抖**，
+ * 因此不会触发 onChange、不会写文件；
+ * - 不进撤销栈：换的是「服务器上的文档」，不是用户的一步编辑。
+ * （`@milkdown/kit/utils` 的 `replaceAll` 宏没有 meta 通道，这里是它 4 行核心
+ * + meta，语义等价；见提交说明里的取舍。）
+ */
       let appliedExternalRev = revAtMount;
       const applyExternalContent = () => {
         const rev = externalRevRef.current;
@@ -357,7 +357,7 @@ export function MilkdownHost({
       // create 期间就来了外部重载（revAtMount 之后）：基线刚建立，补一次
       if (externalRevRef.current !== revAtMount) applyExternalContent();
 
-      // ── 块级操作面（M8：不依赖拖拽的通路，拖放落点也走同一个原语）──────────
+      // ── 块级操作面（不依赖拖拽的通路，拖放落点也走同一个原语）──────────
       const api: EditorApi = {
         insertBlock: (kind) => {
           insertBlock(ctx, kind);
@@ -398,14 +398,14 @@ export function MilkdownHost({
           view.dispatch(view.state.tr.delete(block.from, block.to).scrollIntoView());
         },
         /**
-         * 撤销一步。
-         *
-         * 为什么按钮不能直接派发 `keydown`：手机没有 Ctrl 键，而 history 的快捷键
-         * 只挂在 ProseMirror 自己的 DOM 上——点按钮时焦点在按钮上，键压根到不了编辑器
-         * （桌面端块菜单删块后 Ctrl+Z 无效，也是同一条原因）。所以这里直接调
-         * prosemirror-history 的 `undo`，并把焦点交回正文：撤完通常要继续打字，
-         * 手机上也能顺带把键盘带出来。
-         */
+ * 撤销一步。
+ *
+ * 为什么按钮不能直接派发 `keydown`：手机没有 Ctrl 键，而 history 的快捷键
+ * 只挂在 ProseMirror 自己的 DOM 上——点按钮时焦点在按钮上，键压根到不了编辑器
+ * （桌面端块菜单删块后 Ctrl+Z 无效，也是同一条原因）。所以这里直接调
+ * prosemirror-history 的 `undo`，并把焦点交回正文：撤完通常要继续打字，
+ * 手机上也能顺带把键盘带出来。
+ */
         undo: () => {
           const v = view;
           if (!v || undoDepth(v.state) === 0) return false;
@@ -414,13 +414,13 @@ export function MilkdownHost({
         },
         canUndo: () => (view ? undoDepth(view.state) > 0 : false),
         /**
-         * 跳到第 index 个顶层标题。
-         *
-         * 只 dispatch 选区事务 + 手算滚动位置：
-         *  - 不建事务去改 doc，所以不会触发 markdownUpdated（硬约定 1）；
-         *  - 不用 `scrollIntoView`：WebKit 嵌套滚动容器上它会算错/静默失败，
-         *    这里按 `.editor-host` 的矩形差直接设 scrollTop（标题顶边留 12px）。
-         */
+ * 跳到第 index 个顶层标题。
+ *
+ * 只 dispatch 选区事务 + 手算滚动位置：
+ * - 不建事务去改 doc，所以不会触发 markdownUpdated（硬约定 1）；
+ * - 不用 `scrollIntoView`：WebKit 嵌套滚动容器上它会算错/静默失败，
+ * 这里按 `.editor-host` 的矩形差直接设 scrollTop（标题顶边留 12px）。
+ */
         gotoHeading: (index) => {
           const v = view;
           if (!v) return false;
@@ -464,10 +464,10 @@ export function MilkdownHost({
       onReadyRef.current?.(api);
 
       /**
-       * 正文**内容列**（去掉 `.ProseMirror` 自身 padding 后的左右边界）。
-       * 只用于「左侧留白」的命中判定；坐标定位走 `block-move.ts` 的
-       * `topBlockIndexFromPoint`，两者是同一个口径（见那里的注释）。
-       */
+ * 正文**内容列**（去掉 `.ProseMirror` 自身 padding 后的左右边界）。
+ * 只用于「左侧留白」的命中判定；坐标定位走 `block-move.ts` 的
+ * `topBlockIndexFromPoint`，两者是同一个口径（见那里的注释）。
+ */
       const contentColumn = () => {
         const rect = view!.dom.getBoundingClientRect();
         const cs = getComputedStyle(view!.dom);
@@ -478,12 +478,12 @@ export function MilkdownHost({
       };
 
       /**
-       * 块菜单的触发判定。
-       *  - 窄屏（长按）：**任意位置**都开——移动端 WebView 没有可用的原生右键菜单，
-       *    而长按正文是这里唯一的块级入口（窄屏触屏约定）。
-       *  - 桌面：只认「正文内容列左侧的留白」与「六个点手柄」两处，**不抢正文右键**——
-       *    正文右键要留给 WebView 原生的复制/粘贴/查词菜单，全局抢占是实打实的回退。
-       */
+ * 块菜单的触发判定。
+ * - 窄屏（长按）：**任意位置**都开——移动端 WebView 没有可用的原生右键菜单，
+ * 而长按正文是这里唯一的块级入口（窄屏触屏约定）。
+ * - 桌面：只认「正文内容列左侧的留白」与「六个点手柄」两处，**不抢正文右键**——
+ * 正文右键要留给 WebView 原生的复制/粘贴/查词菜单，全局抢占是实打实的回退。
+ */
       const shouldOpenBlockMenu = (e: MouseEvent) => {
         if (narrowRef.current) return true;
         const target = e.target as HTMLElement | null;
@@ -501,23 +501,23 @@ export function MilkdownHost({
       };
 
       /**
-       * 「六个点」手柄点击 → 块菜单。
-       *
-       * 走 DOM 代理而不是给 Crepe 打补丁：`BlockEdit` 的 feature 配置只有
-       * `handleAddIcon` / `handleDragIcon`（图标字符串）与定位钩子，**没有任何点击回调**，
-       * 无法在配置层接。手柄 DOM（`.milkdown-block-handle` + 两个 `.operation-item`，
-       * 后一个才是拖拽点）因此是硬编码依赖——Crepe 改结构时这里会静默失效，
-       * 但**不会**让功能不可用：右键留白与 `Alt-↑/↓` 仍在。改动 Crepe 版本后请复核。
-       */
+ * 「六个点」手柄点击 → 块菜单。
+ *
+ * 走 DOM 代理而不是给 Crepe 打补丁：`BlockEdit` 的 feature 配置只有
+ * `handleAddIcon` / `handleDragIcon`（图标字符串）与定位钩子，**没有任何点击回调**，
+ * 无法在配置层接。手柄 DOM（`.milkdown-block-handle` + 两个 `.operation-item`，
+ * 后一个才是拖拽点）因此是硬编码依赖——Crepe 改结构时这里会静默失效，
+ * 但**不会**让功能不可用：右键留白与 `Alt-↑/↓` 仍在。改动 Crepe 版本后请复核。
+ */
       /**
-       * 触屏长按唤出块菜单。**不能靠 `contextmenu`**：真机上长按 ProseMirror 正文根本
-       * 不派发该事件（WebView 把它当成选字手势），2026-10-16 Android 走查实测——
-       * 现象是「长按毫无反应」，而这条路径在桌面 Chrome 里永远绿。
-       *
-       * 与选字**不冲突**：手机上选字走**双击**（真机实测双击即选中整段并弹出气泡条，
-       * 高亮按钮可达），长按在编辑器里本来什么都不做。所以分工是
-       * 「长按 = 块菜单（对应桌面的六个点手柄）、双击 = 选字」。
-       */
+ * 触屏长按唤出块菜单。**不能靠 `contextmenu`**：真机上长按 ProseMirror 正文根本
+ * 不派发该事件（WebView 把它当成选字手势），2026-10-16 Android 走查实测——
+ * 现象是「长按毫无反应」，而这条路径在桌面 Chrome 里永远绿。
+ *
+ * 与选字**不冲突**：手机上选字走**双击**（真机实测双击即选中整段并弹出气泡条，
+ * 高亮按钮可达），长按在编辑器里本来什么都不做。所以分工是
+ * 「长按 = 块菜单（对应桌面的六个点手柄）、双击 = 选字」。
+ */
       let pressTimer: number | null = null;
       let pressAt: { x: number; y: number } | null = null;
       const cancelPress = () => {
@@ -563,20 +563,20 @@ export function MilkdownHost({
       };
 
       /**
-       * 文件拖入（仅处理图片文件，文本拖拽仍走 ProseMirror 默认行为）。
-       *
-       * ⚠️ **`dragover` 必须一律 preventDefault，不能只在 `types` 含 "Files" 时才接受**：
-       * WebKit 系（Linux 的 WebKitGTK / Safari）在 `dragover` 阶段**不暴露** "Files"——文件
-       * 拖拽只报 `text/uri-list`，有时连 `types` 都是空的。此时不 preventDefault，浏览器就
-       * 判定「这里不接受拖放」，**`drop` 事件根本不会派发**，表现成「图片拖不进编辑器」。
-       *
-       * 而且 `dragover` 阶段**没有任何可靠办法判断这次拖拽带不带文件**（WebKit 故意隐藏），
-       * 所以别去穷举 `types` 的取值——那又是一次猜测。一律接受，真正的内容过滤放在 `drop`：
-       * 那里 `dataTransfer.files` 才是可读的。
-       *
-       * 本机探针看不见这个问题：Chrome 在 `dragover` 就会报 `types: ["Files"]`
-       * （2026-10-13 Linux 桌面走查实测，与外部拖入同一条教训）。
-       */
+ * 文件拖入（仅处理图片文件，文本拖拽仍走 ProseMirror 默认行为）。
+ *
+ * ⚠️ **`dragover` 必须一律 preventDefault，不能只在 `types` 含 "Files" 时才接受**：
+ * WebKit 系（Linux 的 WebKitGTK / Safari）在 `dragover` 阶段**不暴露** "Files"——文件
+ * 拖拽只报 `text/uri-list`，有时连 `types` 都是空的。此时不 preventDefault，浏览器就
+ * 判定「这里不接受拖放」，**`drop` 事件根本不会派发**，表现成「图片拖不进编辑器」。
+ *
+ * 而且 `dragover` 阶段**没有任何可靠办法判断这次拖拽带不带文件**（WebKit 故意隐藏），
+ * 所以别去穷举 `types` 的取值——那又是一次猜测。一律接受，真正的内容过滤放在 `drop`：
+ * 那里 `dataTransfer.files` 才是可读的。
+ *
+ * 本机探针看不见这个问题：Chrome 在 `dragover` 就会报 `types: ["Files"]`
+ * （2026-10-13 Linux 桌面走查实测，与外部拖入同一条教训）。
+ */
       const onDragOver = (e: DragEvent) => {
         if (e.dataTransfer) e.preventDefault();
       };
@@ -674,7 +674,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     toggleFavorite,
     favorites,
   } = useVaultStore();
-  // M4c B3：源码模式行号开关。用订阅而非 getState()：改设置要立刻反映到
+  // B3：源码模式行号开关。用订阅而非 getState()：改设置要立刻反映到
   // 已打开的编辑器上（CodeMirror 的 basicSetup 变化会触发 reconfigure）
   const sourceLineNumbers = useSettingsStore((s) => s.settings.editor.sourceLineNumbers);
 
@@ -685,18 +685,18 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   const [insertMenu, setInsertMenu] = useState(false);
   const [modeMenu, setModeMenu] = useState(false);
   /**
-   * 窄屏头部「撤回」按钮的置灰状态。
-   * 真源是 ProseMirror 的 undo 栈（`api.canUndo()`），这里只是它的 React 镜像：
-   * 每次 `markdownUpdated`（=每次真实 doc 变化，含撤销本身）后重算。不这么做就得
-   * 给编辑器装一个 update 回调，等于为了一个按钮改产品配置（见 product.ts 的约束）。
-   */
+ * 窄屏头部「撤回」按钮的置灰状态。
+ * 真源是 ProseMirror 的 undo 栈（`api.canUndo()`），这里只是它的 React 镜像：
+ * 每次 `markdownUpdated`（=每次真实 doc 变化，含撤销本身）后重算。不这么做就得
+ * 给编辑器装一个 update 回调，等于为了一个按钮改产品配置（见 product.ts 的约束）。
+ */
   const [canUndo, setCanUndo] = useState(false);
   /** 窄屏「笔记目录」抽屉 */
   const [outlineOpen, setOutlineOpen] = useState(false);
   /**
-   * 软键盘是否弹出（Android 16 边到边 + 忽略 adjustResize：innerHeight 不变，
-   * 只有 visualViewport.height 缩）。键盘挡住的底部区域不放悬浮按钮。
-   */
+ * 软键盘是否弹出（Android 16 边到边 + 忽略 adjustResize：innerHeight 不变，
+ * 只有 visualViewport.height 缩）。键盘挡住的底部区域不放悬浮按钮。
+ */
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   /** 源码模式引用：大纲按行号跳转要直接操作 CodeMirror 的 view */
   const sourceRef = useRef<ReactCodeMirrorRef>(null);
@@ -715,10 +715,10 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   }, []);
 
   /**
-   * 菜单的置灰状态。用 `planMove` **预演**而不是自己算索引：标题搬的是整节，
-   * 而且「同级上一节」的判据（跳过更深标题、遇更高级就停）只有 block-move 知道——
-   * 这里再推一遍必然漂移，最后表现成「按钮能点但没反应」。
-   */
+ * 菜单的置灰状态。用 `planMove` **预演**而不是自己算索引：标题搬的是整节，
+ * 而且「同级上一节」的判据（跳过更深标题、遇更高级就停）只有 block-move 知道——
+ * 这里再推一遍必然漂移，最后表现成「按钮能点但没反应」。
+ */
   const menuStateAt = useCallback((api: EditorApi, index: number) => {
     return {
       canMoveUp: api.planMove(index, -1) !== null,
@@ -819,7 +819,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     return (
       <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
         {/* Linux 无边框窗口：未开笔记也要有拖拽区与窗控（验收修正：窗控必须永远可达）。
-            padding 与有笔记时的头部保持一致，避免开笔记前后窗控横移 */}
+ padding 与有笔记时的头部保持一致，避免开笔记前后窗控横移 */}
         {isLinuxDesktop && (
           <div
             onMouseDown={dragWindow}
@@ -857,8 +857,8 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     // 层级（宽屏 main 是行向 item，交叉轴拉伸，不受影响）。
     <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
       {/* 头部：窄屏时左侧让出悬浮抽屉按钮的宽度（按钮占 12→46px），避免遮挡标题。
-          Linux 无边框窗口（decorations:false）：头部空白即拖拽区，双击最大化；
-          右端是自绘窗控（头部融合方案：窗控并入编辑器头部右端，空白处拖拽/双击最大化）。 */}
+ Linux 无边框窗口（decorations:false）：头部空白即拖拽区，双击最大化；
+ 右端是自绘窗控（头部融合方案：窗控并入编辑器头部右端，空白处拖拽/双击最大化）。 */}
       <div
         onMouseDown={isLinuxDesktop ? dragWindow : undefined}
         className={`flex items-center gap-0 py-2.5 md:gap-2 ${
@@ -873,7 +873,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           title={activePath}
         >
           {/* 窄屏：未保存只用一个压在文件夹图标角上的小圆点（见下），
-              不再占一整块「未保存…」的文字宽度——那 60 多 px 正是标题被挤掉的元凶 */}
+ 不再占一整块「未保存…」的文字宽度——那 60 多 px 正是标题被挤掉的元凶 */}
           <span className="relative shrink-0">
             <Folder size={13} />
             {narrow && dirty && (
@@ -911,9 +911,9 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         ) : null}
 
         {/* 窄屏「撤回」（2026-10-20 走查补）：手机没有 Ctrl 键，而 history 的快捷键只挂在
-            ProseMirror 自己的 DOM 上——不给按钮就等于没有撤销。只在所见即所得下渲染
-            （源码模式走 CodeMirror 自己的历史，这次不做）；阅读模式没有可撤的编辑。
-            置灰状态来自 `api.canUndo()`，经 `markdownUpdated` 每次 doc 变化后同步。 */}
+ ProseMirror 自己的 DOM 上——不给按钮就等于没有撤销。只在所见即所得下渲染
+ （源码模式走 CodeMirror 自己的历史，这次不做）；阅读模式没有可撤的编辑。
+ 置灰状态来自 `api.canUndo()`，经 `markdownUpdated` 每次 doc 变化后同步。 */}
         {narrow && editorMode === "wysiwyg" && (
           <button
             type="button"
@@ -932,8 +932,8 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           </button>
         )}
 
-        {/* 窄屏「插入块」入口（M8 批次 2）：补上桌面 hover「+」的等价能力。
-            44px 触控目标只属于窄屏，桌面端不渲染（hover「+」够用，且头部已挤） */}
+        {/* 窄屏「插入块」入口：补上桌面 hover「+」的等价能力。
+ 44px 触控目标只属于窄屏，桌面端不渲染（hover「+」够用，且头部已挤） */}
         {narrow && editorMode !== "read" && editorMode !== "source" && (
           <button
             type="button"
@@ -946,10 +946,10 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
           </button>
         )}
 
-        {/* 收藏：**窄屏不渲染**（M8 批次 2）。理由：① 它只有 23px，违反窄屏
-            ≥44px；② 同一动作侧栏树行长按/右键菜单里已有（TreeView 的「收藏 / 取消收藏」），
-            窄屏不算能力缺失；③ 385px 下腾出的 31px 让面包屑从 28px 回到 ~109px（可读）。
-            桌面端保留：那里头部宽裕，且星标能一眼看出收藏态。 */}
+        {/* 收藏：**窄屏不渲染**。理由：① 它只有 23px，违反窄屏
+ ≥44px；② 同一动作侧栏树行长按/右键菜单里已有（TreeView 的「收藏 / 取消收藏」），
+ 窄屏不算能力缺失；③ 385px 下腾出的 31px 让面包屑从 28px 回到 ~109px（可读）。
+ 桌面端保留：那里头部宽裕，且星标能一眼看出收藏态。 */}
         {!narrow && (
           <button
             title="收藏 / 取消收藏"
@@ -964,7 +964,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         )}
 
         {/* 模式切换：桌面是阅读 / 所见即所得 / 源码三段内联；**窄屏收成一个 44px 按钮 + 抽屉**
-            （三段每段只有 31px，违反 ≥44px 的触控目标，且挤掉面包屑），见 ModeMenu 注释 */}
+ （三段每段只有 31px，违反 ≥44px 的触控目标，且挤掉面包屑），见 ModeMenu 注释 */}
         {narrow ? (
           <button
             type="button"
@@ -1064,8 +1064,8 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         </div>
       </div>
 
-      {/* 移动端「笔记目录」入口（M10）：不占窄屏头部（头部已满），
-          悬浮在编辑卡右下角；标题少于 2 个时没有目录价值，直接不渲染。 */}
+      {/* 移动端「笔记目录」入口：不占窄屏头部（头部已满），
+ 悬浮在编辑卡右下角；标题少于 2 个时没有目录价值，直接不渲染。 */}
       {narrow && !keyboardOpen && outlineItems.length >= 2 && (
         <button
           type="button"
@@ -1078,7 +1078,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         </button>
       )}
 
-      {/* 编辑模式抽屉（M8 批次 2，窄屏） */}
+      {/* 编辑模式抽屉（窄屏） */}
       {narrow && (
         <ModeMenu
           open={modeMenu}
@@ -1091,7 +1091,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         />
       )}
 
-      {/* 插入块抽屉（M8 批次 2，窄屏） */}
+      {/* 插入块抽屉（窄屏） */}
       {narrow && (
         <InsertMenu
           open={insertMenu}
@@ -1100,7 +1100,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         />
       )}
 
-      {/* 笔记目录抽屉（M10，窄屏） */}
+      {/* 笔记目录抽屉（窄屏） */}
       {narrow && (
         <OutlineSheet
           open={outlineOpen}
@@ -1113,7 +1113,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
         />
       )}
 
-      {/* 块菜单：上移 / 下移 / 删除（M8 G3）。三条触发路径见 BlockMenu 注释 */}
+      {/* 块菜单：上移 / 下移 / 删除（G3）。三条触发路径见 BlockMenu 注释 */}
       <BlockMenu
         target={blockMenu}
         narrow={narrow}

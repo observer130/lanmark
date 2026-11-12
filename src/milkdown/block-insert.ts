@@ -19,7 +19,7 @@ import { createTable } from "@milkdown/kit/preset/gfm";
 import { currentTopBlockIndex, topBlockAt } from "./block-move";
 
 /**
- * 「插入块」——移动端头部「+」菜单的执行层（M8 批次 2）。
+ * 「插入块」——移动端头部「+」菜单的执行层。
  *
  * 与 Crepe 斜杠菜单的**唯一也是关键的区别**：**不要**调 `clearTextInCurrentBlockCommand`。
  * 那条命令会把当前块的文字整段删掉——它在斜杠菜单里是对的（用来抹掉用户敲的 `/h2`），

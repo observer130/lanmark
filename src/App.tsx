@@ -69,7 +69,7 @@ function App() {
     }
   }, [navDrawerRequest]);
 
-  // M4i：返回手势——原生管「返回发生了」，这里管「返回该做什么」。
+  // 返回手势——原生管「返回发生了」，这里管「返回该做什么」。
   // 优先级：抽屉 → 浮层 → 退出确认（后者在原生侧，见 BackPlugin.resolve）
   useEffect(() => {
     // 用 getState 读最新值：闭包若捕获渲染时的 state 会读到陈旧的开关状态
@@ -103,15 +103,15 @@ function App() {
   useEffect(() => {
     void useVaultStore.getState().init();
     void useSyncStore.getState().loadSyncAuto();
-    // M4a：设置在启动时与 vault.init() 并行加载；拿到结果立即写 CSS 变量
+    // 设置在启动时与 vault.init() 并行加载；拿到结果立即写 CSS 变量
     // （不能等 vault 打开——首启页也要按用户字号渲染）。
-    // M5-4：设置加载完成后才启动自动更新检查（autoCheck 依赖 update.autoCheck
+    // 设置加载完成后才启动自动更新检查（autoCheck 依赖 update.autoCheck
     // 开关的落盘值，链式保证不读默认值）
     void useSettingsStore
       .getState()
       .load()
       .then(() => useUpdateStore.getState().autoCheck());
-    // 退出/切后台前尽力落盘（best effort）。M5-3 自动保存档位调大到最长 20s 后，
+    // 退出/切后台前尽力落盘（best effort）。自动保存档位调大到最长 20s 后，
     // 只靠 beforeunload 不够：Android 返回退出/划掉时 WebView 常不发 beforeunload，
     // 但会先走 visibilitychange → hidden。saveNow 在非 dirty 时是幂等 no-op，
     // 切后台多触发几次没有副作用，反而把「待保存窗口」压到最短。
@@ -140,7 +140,7 @@ function App() {
   // 见 src/lib/ime-anchor.ts 的实测记录。
   useEffect(() => installImeAnchorGuard(), []);
 
-  // M3f：手机端是同步服务器，远端 push/delete 会改动本地 vault（Rust 侧
+  // 手机端是同步服务器，远端 push/delete 会改动本地 vault（Rust 侧
   // 成功后 emit lanmark:vault-changed）。手机无客户端循环（桌面 runRound
   // 回合后自行刷新，且桌面不启动服务器），不刷新则目录仍列远端已删的
   // 笔记，点击报「笔记不存在」
@@ -170,7 +170,7 @@ function App() {
     };
   }, []);
 
-  // M3 自动同步循环：仅桌面端（手机是服务器，无循环）+ vault 已打开 + 开关开。
+  // 自动同步循环：仅桌面端（手机是服务器，无循环）+ vault 已打开 + 开关开。
   // 桌面应用完全关闭后无后台同步（app 模型；手机侧才是常驻中心）
   useEffect(() => {
     if (isAndroid() || status !== "ready" || syncAuto !== true) {
@@ -216,12 +216,12 @@ function App() {
         <ResizeEdges />
         {narrow ? (
           <>
-            {/* 窄屏：侧栏为 **半屏抽屉 + 遮罩**（M4i，Gmail / Obsidian Mobile 式）。
-                 此前是全屏铺满：右侧没有可点的遮罩区，看着不像抽屉，用户只能靠
-                 点条目或再点一次汉堡关掉它（走查反馈「像桌面端」的根因之一）。
-                 改为 w-[85vw]（屏宽留出一竖条），右侧露出的部分即遮罩——点它关
-                 抽屉，这是 Material Navigation Drawer 的标准行为。
-                 内部列表沿用 truncate + min-w-0 flex-1，不依赖固定宽度。 */}
+            {/* 窄屏：侧栏为 **半屏抽屉 + 遮罩**（Gmail / Obsidian Mobile 式）。
+ 此前是全屏铺满：右侧没有可点的遮罩区，看着不像抽屉，用户只能靠
+ 点条目或再点一次汉堡关掉它（走查反馈「像桌面端」的根因之一）。
+ 改为 w-[85vw]（屏宽留出一竖条），右侧露出的部分即遮罩——点它关
+ 抽屉，这是 Material Navigation Drawer 的标准行为。
+ 内部列表沿用 truncate + min-w-0 flex-1，不依赖固定宽度。 */}
             <div
               className={`fixed inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
                 navOpen ? "opacity-100" : "pointer-events-none opacity-0"
@@ -236,7 +236,7 @@ function App() {
               <Sidebar narrow={narrow} onNavigate={() => setNavOpen(false)} />
             </div>
             {/* 悬浮抽屉按钮：占头部左侧 ~56px，EditorPane 窄屏头部需让出该宽度。
-                触控尺寸放大到 44px（M4i：原来只有 32px，手机上偏小） */}
+ 触控尺寸放大到 44px（原来只有 32px，手机上偏小） */}
             <button
               aria-label="打开侧栏"
               onClick={() => setNavOpen(true)}
@@ -245,8 +245,8 @@ function App() {
               <Menu size={18} />
             </button>
             {/* flex-col 接续高度链：让 EditorPane 的 flex-1 生效，编辑卡占满剩余高度。
-                `min-h-0` 同样不能删：列向 flex 项默认 min-height:auto 会按内容撑高，
-                长笔记下整列长出屏幕，编辑区就没有滚动范围了（详见 EditorPane 的 main）。 */}
+ `min-h-0` 同样不能删：列向 flex 项默认 min-height:auto 会按内容撑高，
+ 长笔记下整列长出屏幕，编辑区就没有滚动范围了（详见 EditorPane 的 main）。 */}
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <EditorPane narrow={narrow} />
             </div>

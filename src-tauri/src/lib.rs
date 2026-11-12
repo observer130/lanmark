@@ -1,7 +1,7 @@
 mod commands;
 mod db;
 mod fs_ops;
-// 设备代号（alias，M4h-4）：仅内部 API 供 sync_server / sync_client 读，无命令
+// 设备代号（alias）：仅内部 API 供 sync_server / sync_client 读，无命令
 mod alias;
 mod lan_scan;
 mod mobile;
@@ -68,9 +68,9 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        // M2 移动端小插件：vault 目录选择（SAF + 全部文件访问授权），见 src/mobile.rs
+        // 移动端小插件：vault 目录选择（SAF + 全部文件访问授权），见 src/mobile.rs
         .plugin(mobile::init())
-        // M4i 返回手势（独立插件名 "back"，与 vault-picker 分开注册，见 mobile.rs）
+        // 返回手势（独立插件名 "back"，与 vault-picker 分开注册，见 mobile.rs）
         .plugin(mobile::init_back())
         // 日志：stdout（无头 E2E / 终端可见 WebView console）+ 日志文件。
         // debug 构建日志落仓库 .cache/logs：本机安全软件（勒索防护类）会拦截
@@ -105,12 +105,12 @@ pub fn run() {
             }
             let handle = app.handle().clone();
             let state = app.state::<Arc<AppState>>().inner().clone();
-            // M5-5：应用内更新（updater 插件，桌面限定——Android/iOS 官方不支持；
+            // 应用内更新（updater 插件，桌面限定——Android/iOS 官方不支持；
             // 版本检测在 update.rs，安装走本插件拉 latest.json 验签装包。
             // cfg 不能放 builder 链中间的方法上，故在 setup 里注册）
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
-            // M3f：同步服务器改动 vault（push 落盘/delete 生效）→ 推事件让前端刷新。
+            // 同步服务器改动 vault（push 落盘/delete 生效）→ 推事件让前端刷新。
             // 手机端是服务器、无客户端循环（桌面 runRound 回合后自行刷新，且桌面不启动服务器）
             if let Ok(mut slot) = state.sync_notify.lock() {
                 let nh = handle.clone();
@@ -121,7 +121,7 @@ pub fn run() {
                     );
                 }));
             }
-            // M4h-4：首启初始化设备代号（桌面默认 HOSTNAME / 手机词表随机），
+            // 首启初始化设备代号（桌面默认 HOSTNAME / 手机词表随机），
             // 并预热进程内缓存——HTTP handler 拿不到 AppHandle，全靠缓存说代号
             crate::alias::ensure_default_alias(&handle);
             tauri::async_runtime::spawn(async move {
@@ -136,7 +136,7 @@ pub fn run() {
                             if let Err(e) = commands::open_vault_at(&state, &path) {
                                 eprintln!("自动打开 vault 失败: {e}");
                             } else {
-                                // M4e：开库后惰性清理过期回收站条目
+                                // 开库后惰性清理过期回收站条目
                                 commands::prune_trash_after_open(&prune_handle, &state);
                             }
                         })
@@ -196,11 +196,11 @@ pub fn run() {
             mobile::vault_picker_request_all_files_access,
             mobile::vault_picker_app_dir,
             mobile::vault_picker_pick_folder,
-            // M4i：前端上报「当前返回该做什么」（浮层状态变化时下发）
+            // 前端上报「当前返回该做什么」（浮层状态变化时下发）
             mobile::set_ui_back_handler,
-            // M5-4：GitHub release 更新检测（关于页）
+            // GitHub release 更新检测（关于页）
             update::update_check,
-            // M5-6：Linux 自更新（裸二进制 tar.gz，官方插件不支持）
+            // Linux 自更新（裸二进制 tar.gz，官方插件不支持）
             #[cfg(target_os = "linux")]
             update::update_install_linux,
         ])

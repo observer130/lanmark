@@ -1,5 +1,5 @@
 //! Tauri 命令层：`xxx` 是 3 行的命令封装（IPC 入口），`xxx_op` 是纯逻辑
-//! （接收 &Arc<AppState>，可被集成测试与 M2/M3 的同步引擎直接复用）。
+//! （接收 &Arc<AppState>，可被集成测试与 /的同步引擎直接复用）。
 //! 约定：所有路径参数均为 vault 相对路径（'/' 分隔）；未打开 vault 时返回错误。
 
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ pub struct VaultStatus {
     pub configured: bool,
     pub open: bool,
     pub path: Option<String>,
-    /// M3：自动同步开关（默认 true）
+    /// 自动同步开关（默认 true）
     pub sync_auto: bool,
 }
 
@@ -60,7 +60,7 @@ pub fn vault_status(app: tauri::AppHandle, state: State<Arc<AppState>>) -> CmdRe
 }
 
 /// 按路径打开/创建 vault 并持久化配置。
-/// 文件夹选择由前端完成（JS dialog 桌面跨平台；移动端 M1 用 app 文档目录，M2 改 SAF 选择器），
+/// 文件夹选择由前端完成（JS dialog 桌面跨平台；移动端用 app 文档目录，改 SAF 选择器），
 /// 本命令只接收路径——Rust 侧不依赖任何 cfg(desktop) 的对话框 API。
 #[tauri::command]
 pub async fn vault_set_path(
@@ -71,7 +71,13 @@ pub async fn vault_set_path(
 ) -> CmdResult<String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
-        return Err(format!("目录不存在: {path}"));
+        // create 模式：目录不存在就地创建。此前是前端 catch 到「目录不存在」
+        // 中文错误串后再补一次 vault_ensure_dir + 重试——文案一改链路就断。
+        if mode == "create" {
+            std::fs::create_dir_all(&p).map_err(|e| format!("创建目录失败: {e}"))?;
+        } else {
+            return Err(format!("目录不存在: {path}"));
+        }
     }
     // 开库含全量 reindex（大库可达数秒）：同步命令跑在 Tauri 主线程会冻 UI，
     // Android 上有 ANR 风险 → 阻塞主体挪出主线程
@@ -79,9 +85,8 @@ pub async fn vault_set_path(
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
         pick_and_set_op(&state, &p, &mode)?;
         // 读旧配置只改 vault_path：syncAuto 等既有字段不得被开库重置
-        let mut cfg = vault::load_config(&app);
-        cfg.vault_path = Some(path.clone());
-        vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+        vault::update_config(&app, |cfg| cfg.vault_path = Some(path.clone()))
+            .map_err(|e| format!("保存配置失败: {e}"))?;
         prune_trash_after_open(&app, &state);
         Ok(path)
     })
@@ -89,12 +94,11 @@ pub async fn vault_set_path(
     .map_err(|e| format!("开库任务失败: {e}"))?
 }
 
-/// M3：自动同步开关（app_config_dir/config.json 持久化）
+/// 自动同步开关（app_config_dir/config.json 持久化）
 #[tauri::command]
 pub fn vault_set_sync_auto(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
-    let mut cfg = vault::load_config(&app);
-    cfg.sync_auto = enabled;
-    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+    vault::update_config(&app, |cfg| cfg.sync_auto = enabled)
+        .map_err(|e| format!("保存配置失败: {e}"))?;
     Ok(enabled)
 }
 
@@ -180,7 +184,7 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
         *vg = Some(path.to_path_buf());
         *dg = Some(conn);
     }
-    // M2：Android = 局域网同步中心节点，vault 打开即启动 axum 服务器（幂等；
+    // Android = 局域网同步中心节点，vault 打开即启动 axum 服务器（幂等；
     // 前台服务由 Kotlin 侧保活，见 gen/android SyncService）。桌面默认不做服务器。
     #[cfg(target_os = "android")]
     {
@@ -194,7 +198,7 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
     Ok(())
 }
 
-/// M4d/M4e：开库后按设置惰性清理过期回收站条目。
+/// /开库后按设置惰性清理过期回收站条目。
 ///
 /// 独立于 `open_vault_at`：那个函数有 ~40 个调用点（含大量测试），
 /// 而清理需要读配置，只有拿得到 `AppHandle` 的入口（启动 setup / vault_set_path /
@@ -294,14 +298,23 @@ pub struct NoteContent {
 /// 读取笔记内容，同时记入「最近」
 pub fn note_read_op(state: &Arc<AppState>, path: &str) -> CmdResult<NoteContent> {
     reject_dot_path(path)?;
-    with_vault(state, |vault| {
-        let content = fs_ops::read_note(vault, path).map_err(|e| e.to_string())?;
-        with_db(state, |conn| {
-            db::record_recent(conn, path, fs_ops::now_ms(), 50).map_err(|e| e.to_string())?;
-            let title = fs_ops::title_from_stem(path.rsplit('/').next().unwrap_or(path));
-            Ok(NoteContent { content, title })
-        })
-    })
+    let content = with_vault(state, |vault| {
+        fs_ops::read_note(vault, path).map_err(|e| e.to_string())
+    })?;
+    // 「最近打开」进的是可重建索引：DB 忙/锁中毒/未开库都不该让用户连笔记都打不开。
+    // 此前 record_recent 的 `?` 会把读笔记整条链路拖垮。
+    match state.db.lock() {
+        Ok(guard) => {
+            if let Some(conn) = guard.as_ref() {
+                if let Err(e) = db::record_recent(conn, path, fs_ops::now_ms(), 50) {
+                    log::warn!("记录最近打开失败 {path}: {e}");
+                }
+            }
+        }
+        Err(_) => log::warn!("DB 锁中毒，跳过记录最近打开: {path}"),
+    }
+    let title = fs_ops::title_from_stem(path.rsplit('/').next().unwrap_or(path));
+    Ok(NoteContent { content, title })
 }
 
 #[derive(Serialize)]
@@ -453,7 +466,7 @@ pub fn asset_save(state: State<Arc<AppState>>, data_base64: String, ext: String)
     asset_save_op(state.inner(), &data_base64, &ext)
 }
 
-// ---------- M4d/M4e：存储统计、回收站、应用信息 ----------
+// ---------- /存储统计、回收站、应用信息 ----------
 
 pub fn vault_stats_op(state: &Arc<AppState>) -> CmdResult<fs_ops::VaultStats> {
     with_vault(state, |vault| fs_ops::vault_stats(vault).map_err(|e| e.to_string()))
@@ -470,7 +483,7 @@ pub async fn vault_stats(state: State<'_, Arc<AppState>>) -> CmdResult<fs_ops::V
 
 /// 清空回收站，返回删除条目数。
 ///
-/// 注意与 M3 tombstone 的区别：这里是**本地找回**用的垃圾桶，
+/// 注意与 tombstone 的区别：这里是**本地找回**用的垃圾桶，
 /// 清它不影响同步的删除传播——tombstone 账本另存 `.lanmark/tombstones.json`。
 pub fn trash_clear_op(state: &Arc<AppState>) -> CmdResult<usize> {
     with_vault(state, |vault| fs_ops::trash_clear(vault).map_err(|e| e.to_string()))
@@ -749,7 +762,7 @@ mod e2e_tests {
         assert!(search_ms < 1_000, "搜索过慢: {search_ms}ms");
     }
 
-    // ---------- M4d 存储统计 ----------
+    // ---------- 存储统计 ----------
 
     #[test]
     fn vault_stats_counts_notes_folders_assets_and_trash() {
@@ -809,7 +822,7 @@ mod e2e_tests {
         assert!(trash_prune_op(&state, 30).is_err());
     }
 
-    // ---------- M4e 回收站清理 ----------
+    // ---------- 回收站清理 ----------
 
     #[test]
     fn trash_clear_removes_all_entries() {

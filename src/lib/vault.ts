@@ -5,7 +5,7 @@ import { documentDir } from "@tauri-apps/api/path";
 /**
  * 选 vault 目录：桌面走系统文件夹选择器；
  * 移动端 dialog 插件不支持文件夹选择（FolderPickerNotImplemented）→
- * M1 回退到 app 文档目录（M2 换 SAF 文件夹选择器）。
+ * 回退到 app 文档目录（换 SAF 文件夹选择器）。
  */
 async function pickFolder(): Promise<string | null> {
   try {
@@ -39,7 +39,7 @@ export interface VaultStatus {
   configured: boolean;
   open: boolean;
   path: string | null;
-  /** M3：桌面端自动同步开关（默认 true） */
+  /** 桌面端自动同步开关（默认 true） */
   syncAuto: boolean;
 }
 
@@ -48,7 +48,7 @@ export interface PathTitle {
   title: string;
 }
 
-/** M4d：vault 规模统计（一次遍历） */
+/** vault 规模统计（一次遍历） */
 export interface VaultStats {
   notes: number;
   folders: number;
@@ -58,7 +58,7 @@ export interface VaultStats {
   trashBytes: number;
 }
 
-/** M4d：关于页信息 */
+/** 关于页信息 */
 export interface AppInfo {
   version: string;
   platform: string;
@@ -83,7 +83,7 @@ export interface TrashEntry {
 
 export const vault = {
   status: () => invoke<VaultStatus>("vault_status"),
-  /** M3：自动同步开关（持久化到 app_config_dir/config.json） */
+  /** 自动同步开关（持久化到 app_config_dir/config.json） */
   setSyncAuto: (enabled: boolean) =>
     invoke<boolean>("vault_set_sync_auto", { enabled }),
   pickAndSet: async (mode: "open" | "create") => {
@@ -95,18 +95,13 @@ export const vault = {
   /** Android：路径直接走 vault_set_path（含 create/open 校验） */
   setPath: (path: string, mode: "open" | "create") =>
     invoke<string>("vault_set_path", { path, mode }),
-  /** Android：目录可能尚不存在（应用私有外部目录首用），先建再开 */
-  setPathWithCreate: async (path: string, mode: "open" | "create") => {
-    try {
-      return await invoke<string>("vault_set_path", { path, mode });
-    } catch (e) {
-      if (String(e).includes("目录不存在") && mode === "create") {
-        await invoke<string>("vault_ensure_dir", { path });
-        return invoke<string>("vault_set_path", { path, mode });
-      }
-      throw e;
-    }
-  },
+  /**
+   * Android：目录可能尚不存在（应用私有外部目录首用）。
+   * create 模式的建目录在 Rust 侧完成——此前靠 catch 中文错误串再补建，
+   * 文案一改就断。
+   */
+  setPathWithCreate: (path: string, mode: "open" | "create") =>
+    invoke<string>("vault_set_path", { path, mode }),
   reindex: () => invoke<number>("reindex_vault"),
   tree: () => invoke<VaultNode[]>("tree_list"),
   createNote: (dir: string, name: string) =>
@@ -129,7 +124,7 @@ export const vault = {
   saveAsset: (dataBase64: string, ext: string) =>
     invoke<string>("asset_save", { dataBase64, ext }),
 
-  /* ── M4d/M4e：存储管理 ── */
+  /* ── /存储管理 ── */
   /** 笔记/文件夹/附件计数 + 占用 + 回收站用量；无 vault 时报错 */
   stats: () => invoke<VaultStats>("vault_stats"),
   /** 清空回收站，返回删除条目数（**不影响同步的删除传播**，见设置页文案） */

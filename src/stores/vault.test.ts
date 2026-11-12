@@ -253,10 +253,10 @@ describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
       // t=700：旧「首击锚定」实现在此已落盘（句中半成品）
       await vi.advanceTimersByTimeAsync(600);
       expect(writeNote).not.toHaveBeenCalled();
-      // t=800：旧默认 700ms 的尾沿在此也该落盘 → M5-3 默认 3s，仍未落盘
+      // t=800：旧默认 700ms 的尾沿在此也该落盘 → 默认 3s，仍未落盘
       await vi.advanceTimersByTimeAsync(100);
       expect(writeNote).not.toHaveBeenCalled();
-      // t=3100 = 最后一次输入(100) + 3000（M5-3 默认档）
+      // t=3100 = 最后一次输入(100) + 3000（默认档）
       await vi.advanceTimersByTimeAsync(2300);
       expect(writeNote).toHaveBeenCalledTimes(1);
       expect(writeNote).toHaveBeenCalledWith("a.md", "ab\n");
@@ -305,7 +305,7 @@ describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
   });
 });
 
-describe("M3f 远端同步改动刷新（remoteChanged）", () => {
+describe("远端同步改动刷新（remoteChanged）", () => {
   it("vault 未打开 → 无操作", async () => {
     useVaultStore.setState({ status: "unconfigured" });
     await useVaultStore.getState().remoteChanged();
@@ -592,7 +592,7 @@ describe("移动端建库（v0.2.0 release 真机 P0 回归）", () => {
   });
 });
 
-/* ── M4d：切换笔记库的安全流程（最高风险） ── */
+/* ── 切换笔记库的安全流程（最高风险） ── */
 
 describe("switchVault：切换笔记库", () => {
   it("有未保存编辑 → 先落盘再切库", async () => {

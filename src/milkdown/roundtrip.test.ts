@@ -1,11 +1,11 @@
 /**
- * M1 决策门自动化证据：markdown ↔ Crepe(ProseMirror) ↔ markdown 往返保真。
+ * 决策门自动化证据：markdown ↔ Crepe(ProseMirror) ↔ markdown 往返保真。
  * 编辑器配置与产品（EditorPane.tsx）保持一致。
  *
  * 保真标准：
- *  - 结构无损：标题/列表/表格/代码块/图片/中文 语义完全保留
- *  - frontmatter 不损坏（走 splitFrontmatter/joinFrontmatter，与产品一致）
- *  - 允许的风格归一化：列表符号 - 与 *、表格分隔行 --- 与 --、hr 三种写法（语义等价）
+ * - 结构无损：标题/列表/表格/代码块/图片/中文语义完全保留
+ * - frontmatter 不损坏（走 splitFrontmatter/joinFrontmatter，与产品一致）
+ * - 允许的风格归一化：列表符号 - 与 *、表格分隔行 --- 与 --、hr 三种写法（语义等价）
  *
  * 跑法：pnpm test
  */
@@ -62,7 +62,7 @@ async function roundtrip(input: string): Promise<string> {
   const root = document.createElement("div");
   document.body.appendChild(root);
   // 必须走 createProductCrepe：`EditorPane` 用的就是它。测试自抄一份 feature 表
-  // 曾是漂移风险（两边不一致时护栏会失效），M8 收敛到 product.ts 唯一来源。
+  // 曾是漂移风险（两边不一致时护栏会失效），收敛到 product.ts 唯一来源。
   const crepe = createProductCrepe({ root, defaultValue: input });
   await crepe.create();
   const out = crepe.getMarkdown();
@@ -104,7 +104,7 @@ async function mountWithCaret(input: string, index = 0) {
   return { crepe, root, runMove, caretIndex, doc, moveUnit, outline };
 }
 
-describe("Milkdown 往返保真（M1 决策门）", () => {
+describe("Milkdown 往返保真", () => {
   it("基础 markdown：标题/强调/代码/链接/引用/列表/hr", async () => {
     const md = [
       "# 一级标题",
@@ -254,11 +254,11 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
 });
 
 /**
- * M8 G3：块上移/下移（不依赖拖拽的第二条路）。
+ * G3：块上移/下移（不依赖拖拽的第二条路）。
  * 这三条是「六个点拖不动」的兜底路径的核心逻辑，必须有护栏——它同时也是
  * 长按/右键菜单与 `Alt-↑/↓` 快捷键共用的实现。
  */
-describe("块移动命令（M8 G3）", () => {
+describe("块移动命令", () => {
   it("下移：与下一块交换，其余顺序不变", async () => {
     const { crepe, root, runMove, caretIndex } = await mountWithCaret("甲\n\n乙\n\n丙\n", 0);
     expect(runMove(1)).toBe(true);
@@ -292,7 +292,7 @@ describe("块移动命令（M8 G3）", () => {
   });
 
   it("异质块跟着所属标题一起走（代码块不被落下）", async () => {
-    // 块：0 #甲  1 代码块  2 #乙  3 乙的正文。甲这一节 = [0,2)，含代码块
+    // 块：0 #甲 1 代码块 2 #乙 3 乙的正文。甲这一节 = [0,2)，含代码块
     const md = ["# 甲", "", "```rust", "fn main() {}", "```", "", "# 乙", "", "乙的正文。", ""].join("\n") + "\n";
     const { crepe, root, runMove } = await mountWithCaret(md, 0);
     expect(runMove(1)).toBe(true);
@@ -356,14 +356,14 @@ describe("块移动命令（M8 G3）", () => {
 });
 
 /**
- * M8：「标题 = 一节」的单元语义。
+ * 「标题 = 一节」的单元语义。
  * 拖一个 h2 应当带走它下面的段落/列表/更深的 h3，直到下一个**同级或更高级**标题为止
  * （Notion / Obsidian 的通行行为，用户明确要求），且移动时**只与同级节交换**——插进别的
  * 节中间会让那段内容改归它管，等于偷偷改结构。
  */
-describe("块单元：标题连同整节（M8）", () => {
+describe("块单元：标题连同整节", () => {
   // 顶层块（空行只是分隔符，不占块）：
-  // 0 #一级甲  1 正文一  2 ##二级乙  3 列表  4 ###三级丙  5 更深的正文  6 ##二级丁  7 尾段
+  // 0 #一级甲 1 正文一 2 ##二级乙 3 列表 4 ###三级丙 5 更深的正文 6 ##二级丁 7 尾段
   const SECTION = [
     "# 一级甲",
     "",
@@ -429,7 +429,7 @@ describe("块单元：标题连同整节（M8）", () => {
   });
 
   it("父节里的第一节不能上移（否则会被提升出父节）", async () => {
-    // ## 二级乙 是 # 一级甲 下的第一节：上移会变成 h2 在 h1 之前 = 提升，禁止
+    // ## 二级乙是 # 一级甲下的第一节：上移会变成 h2 在 h1 之前 = 提升，禁止
     const { crepe, root, runMove } = await mountWithCaret(SECTION, 2);
     expect(runMove(-1)).toBe(false);
     await crepe.destroy();
@@ -475,7 +475,7 @@ describe("块单元：标题连同整节（M8）", () => {
   });
 
   it("升级拖出：标题 -1，**下属标题整体 -1**", async () => {
-    // 把 ### 三级丙（在 ## 二级乙 内）拖到文末并与 ## 二级丁 同级位置 → 提升到 L2
+    // 把 ### 三级丙（在 ## 二级乙内）拖到文末并与 ## 二级丁同级位置 → 提升到 L2
     const { crepe, root, moveUnit, outline } = await mountWithCaret(SECTION, 0);
     // 三级丙 = 块 4，单元 [4,6)；插到文末（slot 8），层级给 2
     expect(moveUnit(4, 8, 2)).not.toBeNull();
@@ -488,7 +488,7 @@ describe("块单元：标题连同整节（M8）", () => {
   });
 
   it("原地只改层级（Notion 式「往右缩进」）：位置不动、层级变化也算有效操作", async () => {
-    // ## 二级丁 放到「它自己这一节的末尾」（= 原地），但层级给 3 → 原地降一级
+    // ## 二级丁放到「它自己这一节的末尾」（= 原地），但层级给 3 → 原地降一级
     const { crepe, root, moveUnit, outline } = await mountWithCaret(SECTION, 0);
     const before = outline();
     expect(moveUnit(6, 8, 3)).not.toBeNull();
@@ -503,7 +503,7 @@ describe("块单元：标题连同整节（M8）", () => {
   it("层级夹紧在 1..6：h6 再降不越界，h1 再升不越界", async () => {
     const md = ["# 甲", "", "###### 六", "", "内容。", "", "# 乙", "",].join("\n");
     const { crepe, root, doc, moveUnit } = await mountWithCaret(md, 0);
-    // 把 h6 那节（块 1，单元 [1,3)）放进 #甲 的节末，层级给 6（已到底，不能再降）
+    // 把 h6 那节（块 1，单元 [1,3)）放进 #甲的节末，层级给 6（已到底，不能再降）
     moveUnit(1, 3, 6);
     expect(headingLevelOf(doc().child(1))).toBe(6);
     // 再把 h6 提到文末并给 level 1
@@ -551,7 +551,7 @@ describe("块单元：标题连同整节（M8）", () => {
   it("**每一行之间**都可插入：位置精确落到该间隙，不折回节末", async () => {
     // 回归护栏：曾把整节内容区折到节末 → 用户只能拖到「标题上方 / 文末」两处（2026-10-13 走查）
     const { crepe, root, doc, moveUnit, outline } = await mountWithCaret(SECTION, 0);
-    // 把 ## 二级丁 插到「### 三级丙」之前（块 4 = 行间隙 4，层级 3）
+    // 把 ## 二级丁插到「### 三级丙」之前（块 4 = 行间隙 4，层级 3）
     expect(moveUnit(6, 4, naturalLevelAtGap(doc(), 4))).not.toBeNull();
     const o = outline();
     const at = o.indexOf("h3:二级丁");
@@ -564,7 +564,7 @@ describe("块单元：标题连同整节（M8）", () => {
   it("拖到自己正文上 → 原地降一级（Notion 式缩进：位置不动，只改层级）", async () => {
     const { crepe, root, doc, moveUnit, outline } = await mountWithCaret(SECTION, 0);
     const before = outline();
-    // 「放进 ## 二级乙 这一节」的槽 = 节末 6 + 层级 3；对块 2 而言这就是原地
+    // 「放进 ## 二级乙这一节」的槽 = 节末 6 + 层级 3；对块 2 而言这就是原地
     const slot = intoHeadingSlot(doc(), 2);
     expect(slot).toEqual({ insertBefore: 6, level: 3 });
     expect(moveUnit(2, slot!.insertBefore, slot!.level)).not.toBeNull();
@@ -636,7 +636,7 @@ describe("块单元：标题连同整节（M8）", () => {
   });
 });
 
-describe("荧光笔 `==文字==`（M8 批次 3）", () => {
+describe("荧光笔 `==文字==`", () => {
   /** 往返一次，返回输出 */
   const rt = async (md: string) => roundtrip(md);
 

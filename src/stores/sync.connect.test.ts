@@ -1,8 +1,8 @@
 /**
- * M4h 连接方式改造的前端测试：LAN 扫描发现 + 一键授权。
+ * 连接方式改造的前端测试：LAN 扫描发现 + 一键授权。
  *
  * 重点覆盖四态（等待 / 批准 / 拒绝 / 超时）、错误回滚，以及
- * M5-2 的扫描行为钉子：开关已移除，扫描恒为全扫（allowSubnet=true）。
+ * 扫描行为钉子：开关已移除，扫描恒为全扫（allowSubnet=true）。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -85,7 +85,7 @@ beforeEach(() => {
   m.servers.mockResolvedValue([]);
 });
 
-describe("M4h-1 LAN 扫描", () => {
+describe("LAN 扫描", () => {
   it("扫描成功 → 填充候选设备", async () => {
     m.scanLan.mockResolvedValueOnce({
       devices: [
@@ -132,7 +132,7 @@ describe("M4h-1 LAN 扫描", () => {
     expect(s.scanning).toBe(false);
   });
 
-  /** M5-2：开关已移除，扫描恒为全扫（allowSubnet=true），无轻量路径 */
+  /** 开关已移除，扫描恒为全扫（allowSubnet=true），无轻量路径 */
   it("总是把 allowSubnet=true 传给后端", async () => {
     m.scanLan.mockResolvedValueOnce({ devices: [], truncated: false, scannedSubnet: true });
     await useSyncStore.getState().scanLan();
@@ -140,7 +140,7 @@ describe("M4h-1 LAN 扫描", () => {
   });
 });
 
-describe("M4h-2 一键授权（桌面四态）", () => {
+describe("一键授权（桌面四态）", () => {
   it("批准 → 刷新服务器列表并清空等待态", async () => {
     m.connectDevice.mockResolvedValueOnce({
       status: "approved",
@@ -215,7 +215,7 @@ describe("M4h-2 一键授权（桌面四态）", () => {
   });
 });
 
-describe("M4h-2 一键授权（手机端）", () => {
+describe("一键授权（手机端）", () => {
   it("允许 → 调 IPC 并刷新配对信息", async () => {
     m.pairApprove.mockResolvedValueOnce(undefined);
     await useSyncStore.getState().pairApprove("nonce-1");
@@ -259,10 +259,10 @@ describe("M4h-2 一键授权（手机端）", () => {
 
 describe("待授权请求的可发现性（真机反馈的 bug 回归）", () => {
   /**
-   * 真机现象：桌面点「连接」后手机毫无反应——请求已入队，但卡片只在同步面板里
-   * 渲染，而面板默认收起。这里钉住「UI 能拿到 pending 数据」这一层；
-   * 自动展开由 SyncSection 的 pendingCount 效应负责（组件层）。
-   */
+ * 真机现象：桌面点「连接」后手机毫无反应——请求已入队，但卡片只在同步面板里
+ * 渲染，而面板默认收起。这里钉住「UI 能拿到 pending 数据」这一层；
+ * 自动展开由 SyncSection 的 pendingCount 效应负责（组件层）。
+ */
   it("轮询后 store 里能看到待授权请求（含来源 IP 与等待时长）", async () => {
     m.pairingInfo.mockResolvedValueOnce({
       running: true,

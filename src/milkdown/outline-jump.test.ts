@@ -1,5 +1,5 @@
 /**
- * 大纲索引 ↔ 编辑器顶层 heading 的对应关系护栏（M10）。
+ * 大纲索引 ↔ 编辑器顶层 heading 的对应关系护栏。
  *
  * `extractOutline` 只认行首 0 空格的 h1–h3；`gotoHeading(index)` 数的是 ProseMirror
  * 顶层 heading 节点。两边一旦漂移，点击目录就会跳到别的标题，或「点了没反应」。

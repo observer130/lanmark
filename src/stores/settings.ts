@@ -13,12 +13,12 @@ import {
 } from "../lib/settings";
 
 /**
- * M4a 设置 store（与 vault / sync 同构）。
+ * 设置 store（与 vault / sync 同构）。
  *
  * 应用顺序：
- *   UI 改动 → 乐观 set state → applyAppearance（立即可见） → settings_patch
- *           → 以 Rust 返回值覆盖 state（归一化结果）
- *           └→ 失败：回滚上一版 state + 复原 CSS 变量/主题 + error 提示
+ * UI 改动 → 乐观 set state → applyAppearance（立即可见） → settings_patch
+ * → 以 Rust 返回值覆盖 state（归一化结果）
+ * └→ 失败：回滚上一版 state + 复原 CSS 变量/主题 + error 提示
  *
  * 乐观更新的意义：字号/字体/主题点一下就要变，不能等 IPC 往返；而失败必须回滚，
  * 否则界面显示的和盘上的不一致，重启后「设置自己变回去了」。
@@ -60,16 +60,16 @@ interface SettingsStore {
   /** 设置页当前分组（窄屏单列分节时用于滚动定位） */
   activeSection: SectionKey;
   /**
-   * D3：「管理设备与配对」的跳转请求。设置页不复制一套配对 UI，
-   * 而是关掉自己 + 请侧栏把同步面板展开。
-   * 计数器而非布尔：连点两次也要能再次触发（布尔会因「已经是 true」失效）。
-   */
+ * D3：「管理设备与配对」的跳转请求。设置页不复制一套配对 UI，
+ * 而是关掉自己 + 请侧栏把同步面板展开。
+ * 计数器而非布尔：连点两次也要能再次触发（布尔会因「已经是 true」失效）。
+ */
   syncPanelRequest: number;
   /**
-   * 窄屏专用：D3 跳转请求同时要**打开侧栏抽屉**——否则同步面板会在一个
-   * 已收起（`-translate-x-full`）的容器里展开，视觉上被挤出屏幕左侧
-   * （真机走查发现）。桌面无抽屉，此值恒不消费。
-   */
+ * 窄屏专用：D3 跳转请求同时要**打开侧栏抽屉**——否则同步面板会在一个
+ * 已收起（`-translate-x-full`）的容器里展开，视觉上被挤出屏幕左侧
+ * （真机走查发现）。桌面无抽屉，此值恒不消费。
+ */
   navDrawerRequest: number;
 
   load: () => Promise<void>;
@@ -100,7 +100,7 @@ const applyAppearance = (a: Appearance): void => {
 
 let loadSeq = 0;
 /** 写序：patch/reset 各自递增。慢启动的 settings_get 不能盖掉之后的写，
- *  迟到的写失败回滚也不能抹掉更新的成功写。 */
+ * 迟到的写失败回滚也不能抹掉更新的成功写。 */
 let writeSeq = 0;
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
@@ -125,7 +125,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (seq !== loadSeq) return;
       // 读失败也要落地 CSS 变量：否则界面停在「无变量」状态，index.css 的
       // var() 全部落空 → 字号/行距塌成浏览器默认。
-      // **配色/字体故意不动**（M6c）：读失败是暂时的（IPC/磁盘），此时把它们
+      // **配色/字体故意不动**：读失败是暂时的（IPC/磁盘），此时把它们
       // 重置成默认会顺手覆盖首帧启动缓存 —— 等于把用户选的配色降级掉，
       // 且下次启动又闪白。
       set({ loading: false, error: String(e) });
