@@ -6,7 +6,6 @@
 //! 串行化（handler 跑在 spawn_blocking 线程池里，并非"单线程 runtime 天然串行"）。
 //! 文件写入走 M1 的 tmp+rename。
 
-use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -35,6 +34,8 @@ pub const DEFAULT_PORT: u16 = 4180;
 /// 客户端按 ≤8 MiB 原始字节切批后，64 MiB 有约 6 倍余量，同时给异常大请求兜底。
 /// 只放宽 push：pair/pull/delete 的请求体都很小，保持默认 2 MiB 限制。
 pub const PUSH_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+/// 单批文件数上限（客户端按 8 个一批，512 留足余量）
+pub const PUSH_MAX_FILES: usize = 512;
 /// 生产单实例下 10 个足够；测试并行各起常驻服务器（无停机机制），
 /// 范围太窄会 AddrInUse（M3 测试矩阵扩到 80+ 后 4180..4200 已不够，再放宽）
 const MAX_PORT_TRIES: u16 = 60;
@@ -623,38 +624,57 @@ async fn pull(
     Ok(Json(PullResponse { files, missing }))
 }
 
-/// pull 阻塞主体（spawn_blocking 内执行）
+/// pull 阻塞主体（spawn_blocking 内执行）。
+///
+/// 按请求路径逐个 stat + 读文件，**不再拉全库清单**：客户端每 32 个文件发一次
+/// `/pull`，旧实现对每批都重算全库 sha256，1 万文件一轮 ≈ 313 次全库扫描，
+/// 手机端 IO 打满、客户端 30s 超时。白名单与旧实现等价（只服务 .md 与 assets/ 附件）。
 fn pull_blocking(
     ctx: &Arc<ServerCtx>,
     paths: &[String],
 ) -> Result<(Vec<PullFile>, Vec<(String, String)>), (StatusCode, String)> {
     let vault = ctx.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
-    let current = local_manifest(&ctx.app).map_err(|e| (StatusCode::CONFLICT, e))?;
-    let by_path: HashMap<String, FileMeta> =
-        current.into_iter().map(|m| (m.path.clone(), m)).collect();
 
     let mut files = Vec::new();
     let mut missing = Vec::new();
     for path in paths {
-        let Some(meta) = by_path.get(path) else {
-            missing.push((path.clone(), "不在服务器清单中".into()));
+        // 点目录（.lanmark 索引/凭据）绝不外发
+        if fs_ops::has_dot_segment(path) {
+            missing.push((path.clone(), "点目录路径禁止同步".into()));
+            continue;
+        }
+        let kind = if path.starts_with(&format!("{}/", fs_ops::ASSETS_DIR)) {
+            "asset"
+        } else if path.ends_with(".md") {
+            "note"
+        } else {
+            // 与旧实现一致：清单只收 .md 与 assets/*，其余路径一律不服务
+            missing.push((path.clone(), "不是可同步的路径".into()));
             continue;
         };
-        let abs = match fs_ops::safe_join(&vault, path) {
+        // resolve_in_vault = safe_join + 符号链接逃逸校验
+        let abs = match fs_ops::resolve_in_vault(&vault, path) {
             Ok(a) => a,
             Err(e) => {
                 missing.push((path.clone(), e.to_string()));
                 continue;
             }
         };
+        match std::fs::metadata(&abs) {
+            Ok(m) if m.is_file() => {}
+            _ => {
+                missing.push((path.clone(), "不在服务器清单中".into()));
+                continue;
+            }
+        }
         match std::fs::read(&abs) {
             Ok(bytes) => files.push(PullFile {
                 path: path.clone(),
-                kind: meta.kind.clone(),
+                kind: kind.to_string(),
                 content_base64: b64_encode(&bytes),
-                // 实际字节 hash：与所发内容严格一致，DB/清单可能因外部改动过时
+                // 实际字节 hash：与所发内容严格一致
                 hash: fs_ops::content_hash(&bytes),
-                mtime_ms: meta.mtime_ms,
+                mtime_ms: crate::sync::meta_mtime_ms(&abs),
             }),
             Err(e) => missing.push((path.clone(), format!("读取失败: {e}"))),
         }
@@ -682,6 +702,14 @@ async fn push(
     ctx.check_token(&headers)?;
     let body: PushBody = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("请求体解析失败: {e}")))?;
+    // 只限总字节不够：64 MiB 能塞几十万条超小条目，每条都要 upsert + 整读墓碑账本，
+    // 写放大远超 body 本身。客户端按 8 个一批推，512 留有充足余量。
+    if body.files.len() > PUSH_MAX_FILES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("单批文件数超限（{} > {PUSH_MAX_FILES}）", body.files.len()),
+        ));
+    }
     // 逐文件落盘（含 DB 写）移出单线程 runtime
     let ctx2 = ctx.clone();
     let results = tokio::task::spawn_blocking(move || push_blocking(&ctx2, &body.files))
@@ -761,6 +789,11 @@ fn arbitrate_existing(
     let cur_bytes = std::fs::read(&abs).map_err(|e| format!("读取当前版本失败: {e}"))?;
     let cur_hash = fs_ops::content_hash(&cur_bytes);
     if cur_hash == pf.base_hash {
+        return Ok(None);
+    }
+    // 幂等：base 过期但**内容与来件相同**（超时重放、两端写出同样内容）→ 不做仲裁。
+    // 否则会走下面「来件降级」分支，给一份一模一样的文件再造一个冲突副本。
+    if cur_hash == pf.hash {
         return Ok(None);
     }
     let incoming = (pf.mtime_ms, incoming_bytes.len() as i64, pf.hash.as_str());
@@ -2281,4 +2314,97 @@ Connection: close
         let r = crate::sync_client::fetch_info(&format!("http://127.0.0.1:{port}"));
         assert!(r.is_err(), "非 lanmark 服务必须被拒: {r:?}");
     }
+
+    /// 配对 + 返回 (client, authorization header)
+    fn paired_client(base: &str, code: &str) -> (reqwest::blocking::Client, String) {
+        let c = reqwest::blocking::Client::new();
+        wait_ready(&c, base);
+        let paired: serde_json::Value = c
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": code }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        let token = paired["token"].as_str().unwrap().to_string();
+        (c, format!("Bearer {token}"))
+    }
+
+    /// 回归（P2-A4）：base 过期但内容相同（超时重放）不得再造一份冲突副本。
+    #[test]
+    fn push_same_content_with_stale_base_is_idempotent() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let note = commands::note_create_op(&app, "", "幂等").unwrap();
+        commands::note_write_op(&app, &note.path, "同内容").unwrap();
+
+        let (base, code) = test_util::start_phone_server(dir.path(), Arc::clone(&app));
+        let (client, auth) = paired_client(&base, &code);
+
+        let hash = fs_ops::content_hash("同内容".as_bytes());
+        let pushed: Vec<PushResult> = client
+            .post(format!("{base}/api/v1/push"))
+            .header("authorization", &auth)
+            .json(&json!({
+                "files": [{
+                    "path": note.path,
+                    "kind": "note",
+                    "contentBase64": b64_encode("同内容".as_bytes()),
+                    "hash": hash,
+                    "mtimeMs": fs_ops::now_ms(),
+                    // base 故意过期：模拟上一回合超时、客户端重放
+                    "baseHash": "stale-hash",
+                }]
+            }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+
+        assert!(pushed[0].ok, "{:?}", pushed[0].error);
+        assert!(
+            pushed[0].conflict_saved_as.is_none(),
+            "内容相同不应产生冲突副本: {:?}",
+            pushed[0].conflict_saved_as
+        );
+        assert_eq!(pushed[0].server_hash.as_deref(), Some(hash.as_str()));
+        let md_count = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+            .count();
+        assert_eq!(md_count, 1, "只应有一个 .md（没有冲突副本）");
+    }
+
+    /// 回归（P2-A1）：pull 只服务 .md 与 assets/*，其余路径一律拒绝。
+    #[test]
+    fn pull_serves_only_syncable_paths() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let note = commands::note_create_op(&app, "", "笔记").unwrap();
+        commands::note_write_op(&app, &note.path, "正文").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "不是同步单元").unwrap();
+
+        let (base, code) = test_util::start_phone_server(dir.path(), Arc::clone(&app));
+        let (client, auth) = paired_client(&base, &code);
+
+        let pulled: PullResponse = client
+            .post(format!("{base}/api/v1/pull"))
+            .header("authorization", &auth)
+            .json(&json!({ "paths": [note.path, "notes.txt"] }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(pulled.files.len(), 1, "只应返回 .md 笔记");
+        assert_eq!(pulled.files[0].path, note.path);
+        assert_eq!(pulled.files[0].kind, "note");
+        assert_eq!(pulled.missing.len(), 1);
+        assert_eq!(pulled.missing[0].0, "notes.txt");
+    }
+
 }
