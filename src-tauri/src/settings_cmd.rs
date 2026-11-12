@@ -1,7 +1,7 @@
 //! 设置命令层：`settings_get` / `settings_patch` / `settings_reset`。
 //!
-//! 写盘纪律（沿用 `vault_set_sync_auto`）：`load_config` → 改目标字段 → `save_config`
-//! （tmp+rename 原子写）；**绝不整体覆盖 `vault_path`**，也绝不把设置写进 vault。
+//! 写盘纪律：一律走 `vault::update_config`（进程内读-改-写串行 + tmp+rename 原子写）；
+//! **绝不整体覆盖 `vault_path`**，也绝不把设置写进 vault。
 //! 纯逻辑与命令分离：`*_op` 收 `&mut AppConfig`，可脱离 tauri AppHandle 单测。
 
 use crate::commands::CmdResult;
@@ -56,19 +56,14 @@ pub fn settings_get(app: tauri::AppHandle) -> CmdResult<Settings> {
 /// （前端以返回值为准——非法配色/字体 key 会被这里回退成 `light` / `sans`）。
 #[tauri::command]
 pub fn settings_patch(app: tauri::AppHandle, patch: SettingsPatch) -> CmdResult<Settings> {
-    let mut cfg = vault::load_config(&app);
-    let next = settings_apply_op(&mut cfg, patch);
-    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
-    Ok(next)
+    vault::update_config(&app, |cfg| settings_apply_op(cfg, patch))
+        .map_err(|e| format!("保存配置失败: {e}"))
 }
 
 /// 恢复默认设置（保留 vault_path / sync_auto）。
 #[tauri::command]
 pub fn settings_reset(app: tauri::AppHandle) -> CmdResult<Settings> {
-    let mut cfg = vault::load_config(&app);
-    let next = settings_reset_op(&mut cfg);
-    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
-    Ok(next)
+    vault::update_config(&app, settings_reset_op).map_err(|e| format!("保存配置失败: {e}"))
 }
 
 /// 改设备代号（设置页 / 首启引导）。归一化后落 AppConfig 并刷缓存，

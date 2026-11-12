@@ -79,9 +79,8 @@ pub async fn vault_set_path(
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
         pick_and_set_op(&state, &p, &mode)?;
         // 读旧配置只改 vault_path：syncAuto 等既有字段不得被开库重置
-        let mut cfg = vault::load_config(&app);
-        cfg.vault_path = Some(path.clone());
-        vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+        vault::update_config(&app, |cfg| cfg.vault_path = Some(path.clone()))
+            .map_err(|e| format!("保存配置失败: {e}"))?;
         prune_trash_after_open(&app, &state);
         Ok(path)
     })
@@ -92,9 +91,8 @@ pub async fn vault_set_path(
 /// 自动同步开关（app_config_dir/config.json 持久化）
 #[tauri::command]
 pub fn vault_set_sync_auto(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
-    let mut cfg = vault::load_config(&app);
-    cfg.sync_auto = enabled;
-    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+    vault::update_config(&app, |cfg| cfg.sync_auto = enabled)
+        .map_err(|e| format!("保存配置失败: {e}"))?;
     Ok(enabled)
 }
 

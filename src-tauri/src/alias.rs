@@ -104,12 +104,14 @@ pub fn current_alias(app: Option<&tauri::AppHandle>) -> String {
         }
         return a;
     };
-    let mut cfg = crate::vault::load_config(app);
-    if cfg.device_alias.trim().is_empty() {
-        cfg.device_alias = default_alias_for_platform();
-        let _ = crate::vault::save_config(app, &cfg);
-    }
-    let alias = cfg.device_alias;
+    // 空代号才补：已有值原样返回（update_config 会整写一次，属低频路径）
+    let alias = crate::vault::update_config(app, |cfg| {
+        if cfg.device_alias.trim().is_empty() {
+            cfg.device_alias = default_alias_for_platform();
+        }
+        cfg.device_alias.clone()
+    })
+    .unwrap_or_else(|_| default_alias_for_platform());
     if let Ok(mut g) = ALIAS_CACHE.lock() {
         *g = Some(alias.clone());
     }
@@ -130,9 +132,8 @@ fn default_alias_for_platform() -> String {
 /// 归一化失败（空串）不动现有值。
 pub fn set_alias(app: &tauri::AppHandle, raw: &str) -> Result<String, String> {
     let alias = normalize_alias(raw).ok_or_else(|| "代号不能为空".to_string())?;
-    let mut cfg = crate::vault::load_config(app);
-    cfg.device_alias = alias.clone();
-    crate::vault::save_config(app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+    crate::vault::update_config(app, |cfg| cfg.device_alias = alias.clone())
+        .map_err(|e| format!("保存配置失败: {e}"))?;
     if let Ok(mut guard) = ALIAS_CACHE.lock() {
         *guard = Some(alias.clone());
     }

@@ -139,7 +139,7 @@ fn fetch_latest() -> Result<ReleaseInfo, String> {
 /// 下次启动立刻重试；手动检查成功同样回写（避免每次进关于页都打 GitHub）。
 fn update_check_sync(app: &tauri::AppHandle, force: bool) -> CmdResult<UpdateInfo> {
     let current = app.package_info().version.to_string();
-    let mut cfg = crate::vault::load_config(app);
+    let cfg = crate::vault::load_config(app);
     let now = crate::fs_ops::now_ms().max(0) as u64;
     if !check_due(cfg.last_update_check_ms, now, force) {
         return Ok(UpdateInfo {
@@ -154,8 +154,9 @@ fn update_check_sync(app: &tauri::AppHandle, force: bool) -> CmdResult<UpdateInf
     }
     let release = fetch_latest()?;
     let info = build_update_info(&current, &release, now);
-    cfg.last_update_check_ms = now;
-    crate::vault::save_config(app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+    // 走统一写入口：与切库/改设置并发时不会互相覆盖
+    crate::vault::update_config(app, |c| c.last_update_check_ms = now)
+        .map_err(|e| format!("保存配置失败: {e}"))?;
     Ok(info)
 }
 

@@ -98,6 +98,27 @@ pub fn load_config(app: &tauri::AppHandle) -> AppConfig {
         .unwrap_or_default()
 }
 
+/// 配置写入的**唯一入口**：读-改-写整体串行化。
+///
+/// 此前有 6 个写点各自 `load_config` → 改 → `save_config`。文件写是原子的
+/// （tmp+rename），但「读-改-写」不是：切库与改外观并发时，后写者会拿旧快照
+/// 覆盖前者。进程内一把锁即可闭合这个窗口（所有写点都在同一进程）。
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn update_config<T>(
+    app: &tauri::AppHandle,
+    f: impl FnOnce(&mut AppConfig) -> T,
+) -> std::io::Result<T> {
+    // 锁中毒说明之前有写点 panic 了；配置本身仍可用，继续写比永久拒绝好
+    let _guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cfg = load_config(app);
+    let out = f(&mut cfg);
+    save_config(app, &cfg)?;
+    Ok(out)
+}
+
 pub fn save_config(app: &tauri::AppHandle, cfg: &AppConfig) -> std::io::Result<()> {
     let path = config_path(app)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "无法定位配置目录"))?;
