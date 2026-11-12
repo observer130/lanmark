@@ -233,7 +233,7 @@ fn probe_all(
     let cursor = Arc::new(AtomicUsize::new(0));
     let mut truncated = false;
 
-    let workers = urls.len().min(MAX_CONCURRENCY).max(1);
+    let workers = urls.len().clamp(1, MAX_CONCURRENCY);
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let found = Arc::clone(&found);

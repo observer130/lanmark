@@ -24,7 +24,7 @@ scripts/android-check.sh         # Android 交叉编译门禁（不跑 gradle）
 scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64 debug 包 → 种子 → 滚动探针
 ```
 
-- **没有 lint / format 工具**：无 ESLint / Biome / prettier / rustfmt / clippy 配置，`lint` 脚本不存在。门禁只有 `tsc`（strict）与 `cargo check`。风格沿用既有文件：TS 双引号 + 分号 + 2 空格；Rust 走 rustfmt 默认。
+- **前端没有 lint / format 工具**：无 ESLint / Biome / prettier，`lint` 脚本不存在；前端门禁只有 `tsc`（strict）。**Rust 有 clippy**：CI 跑 `cargo clippy --all-targets -- -D warnings`（存量告警已清，别再放回来）。**不接 rustfmt**：全仓 331 处手工对齐（词表数组）会被一次格式化冲掉。风格沿用既有文件：TS 双引号 + 分号 + 2 空格；Rust 按 rustfmt 习惯写但不强制。
 - **测试临时目录**：`scripts/env.sh` 把 `TMPDIR` 指到 `.cache/tmp`；测试/构建的临时文件不要依赖 `/tmp`（沙箱/CI 下容量与清理策略都不可控）。
 - **Windows 本机**：工具链在 `.cache/`（cargo/rustup/vs-buildtools），pwsh 下先 `. scripts/env.ps1`。dev 一律用 `pnpm tauri:dev`：它把 `WEBVIEW2_USER_DATA_FOLDER` 指到 `.cache\webview-profile`（安全软件会拦未签名 dev exe 读写 `%LOCALAPPDATA%\com.lanmark.app`），日志也落 `.cache\logs`。裸跑 `pnpm tauri dev` 会复现拦截。
 - **Android**：`source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`，产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。它装成独立应用 `com.lanmark.app.debug`（「Lanmark Debug」），与 release 共存。模拟器（x86_64）改用 `--target x86_64`，或直接用 `scripts/android-emu.sh`。

@@ -36,6 +36,11 @@ pub const DEFAULT_PORT: u16 = 4180;
 pub const PUSH_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// 单批文件数上限（客户端按 8 个一批，512 留足余量）
 pub const PUSH_MAX_FILES: usize = 512;
+
+/// pull 返回：成功取到的文件 + (路径, 拒绝原因)
+type PullBatch = (Vec<PullFile>, Vec<(String, String)>);
+/// 端点错误的统一形态：(HTTP 状态, 说明)
+type ApiError = (StatusCode, String);
 /// 生产单实例下 10 个足够；测试并行各起常驻服务器（无停机机制），
 /// 范围太窄会 AddrInUse（测试矩阵扩到 80+ 后 4180..4200 已不够，再放宽）
 const MAX_PORT_TRIES: u16 = 60;
@@ -619,8 +624,7 @@ async fn pull(
     let ctx2 = ctx.clone();
     let (files, missing) = tokio::task::spawn_blocking(move || pull_blocking(&ctx2, &req.paths))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
-        .map_err(|(s, m)| (s, m))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))??;
     Ok(Json(PullResponse { files, missing }))
 }
 
@@ -632,7 +636,7 @@ async fn pull(
 fn pull_blocking(
     ctx: &Arc<ServerCtx>,
     paths: &[String],
-) -> Result<(Vec<PullFile>, Vec<(String, String)>), (StatusCode, String)> {
+) -> Result<PullBatch, ApiError> {
     let vault = ctx.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
 
     let mut files = Vec::new();
@@ -714,8 +718,7 @@ async fn push(
     let ctx2 = ctx.clone();
     let results = tokio::task::spawn_blocking(move || push_blocking(&ctx2, &body.files))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
-        .map_err(|(s, m)| (s, m))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))??;
     // 有成功落盘 = vault 已变更 → 通知手机端 UI 刷新（树/最近/当前笔记）
     if results.iter().any(|r| r.ok) {
         ctx.notify_ui();
@@ -770,6 +773,7 @@ struct Landed {
 /// 修掉该场景静默覆盖的洞）→ 版本元组 (mtime_ms, size, hash) 与当前 P 比较：
 /// - 来件更大 → 来件赢：当前 P 存为服务器侧冲突副本，来件落原路径（既有行为）
 /// - 来件更小/平手 → 来件降级：来件存冲突副本，当前 P 保留（serverHash = 当前 hash）
+///
 /// 返回 None = 无需仲裁（文件不存在或 base 与现状一致 → 干净落盘）。
 ///
 /// 序列化靠 `ServerCtx::write_lock`（push_blocking / delete_blocking 全程持有）：

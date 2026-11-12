@@ -91,9 +91,9 @@ pub fn load_servers(app: &tauri::AppHandle) -> Vec<ServerProfile> {
 /// 迁移步骤：
 /// 1. 探测每个旧 profile 的 `/info` 拿 `deviceId`
 /// 2. 新 id = `d<deviceId>`；**把基线文件改名**（`sync-<旧id>.json` →
-/// `sync-<新id>.json`）而不是重建——重建等于丢掉「上轮已知状态」，
-/// 下个回合会把全部差异判成「双方都改」，正是 P4 要修的现象
-/// （测试钉住「迁移前后 skipped 计数一致」）
+///    `sync-<新id>.json`）而不是重建——重建等于丢掉「上轮已知状态」，
+///    下个回合会把全部差异判成「双方都改」，正是 P4 要修的现象
+///    （测试钉住「迁移前后 skipped 计数一致」）
 /// 3. 探测不到的（离线）保持原样，下次同步时再迁
 ///
 /// 幂等：已有 `device_id` 的 profile 直接跳过。
@@ -1591,8 +1591,7 @@ pub async fn sync_now(
     let state = state.inner().clone();
     let report = tauri::async_runtime::spawn_blocking(move || sync_round(&state, &profile))
         .await
-        .map_err(|e| format!("同步任务失败: {e}"))?
-        .map_err(|e| e)?;
+        .map_err(|e| format!("同步任务失败: {e}"))??;
     // 回合成功 → 记最近成功时间（profile JSON 持久化，重启不丢）
     let mut servers = load_servers(&app);
     if let Some(s) = servers.iter_mut().find(|s| s.id == id) {
@@ -2886,7 +2885,7 @@ mod tests {
             .filter_map(|e| std::fs::read(e.path()).ok())
             .collect();
         for expect in ["一".as_bytes().to_vec(), "二".as_bytes().to_vec()] {
-            assert!(contents.iter().any(|c| *c == expect), "B 回收站缺内容: {expect:?}");
+            assert!(contents.contains(&expect), "B 回收站缺内容: {expect:?}");
         }
 
         // 终态：三端快照一致（文件夹内笔记全没了，根级附件都在）
@@ -3354,7 +3353,7 @@ mod tests {
             "manifest 必须反映磁盘"
         );
         // pull 服务的 hash 与内容一致（客户端校验必过）
-        let (files, missing) = pull_batch(&c, &base, &token, &[note.path.clone()]).unwrap();
+        let (files, missing) = pull_batch(&c, &base, &token, std::slice::from_ref(&note.path)).unwrap();
         assert!(missing.is_empty());
         assert_eq!(files[0].hash, crate::fs_ops::content_hash("外部改过的内容".as_bytes()));
     }

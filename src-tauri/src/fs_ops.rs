@@ -181,7 +181,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Node>) -> std::io::Result<()> {
             })
             .collect();
     entries.sort_by_key(|(e, ft)| {
-        (ft.map_or(false, |f| !f.is_dir()), e.file_name().to_string_lossy().to_lowercase())
+        (ft.is_some_and(|f| !f.is_dir()), e.file_name().to_string_lossy().to_lowercase())
     });
     for (entry, ft) in entries {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -195,13 +195,13 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Node>) -> std::io::Result<()> {
         }
         // 符号链接一律跳过：指向 vault 外的链接会把外部文件列进树/索引/同步清单
         // （内容经同步服务器明文外发），链接循环则使递归栈溢出
-        if ft.map_or(false, |f| f.is_symlink()) {
+        if ft.is_some_and(|f| f.is_symlink()) {
             log::warn!("vault 内符号链接已跳过: {name}");
             continue;
         }
         let path = entry.path();
         let rel = rel_to_string(path.strip_prefix(root).unwrap());
-        if ft.map_or(false, |f| f.is_dir()) {
+        if ft.is_some_and(|f| f.is_dir()) {
             out.push(Node { path: rel, kind: "folder".into(), name, title: None });
             walk(root, &path, out)?;
         } else if is_note_file(&path) {
@@ -356,7 +356,7 @@ pub fn rename_entry(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     // 新名字不带扩展名时，保留原扩展名（避免 .md 笔记变无扩展名文件）
-    let new_name = if new_raw_name.rfind('.').map_or(false, |i| i > 0) {
+    let new_name = if new_raw_name.rfind('.').is_some_and(|i| i > 0) {
         sanitize_filename_with_ext(new_raw_name)
     } else {
         let old_ext = old_abs.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -398,7 +398,7 @@ pub fn rename_entry(
     write_tombstones(vault, &pending);
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     clear_tombstones_for_entry(vault, &new_rel, conn);
     // 重命名文件后，索引里的 title 需要更新。
     // 与 write_note 同纪律：优先 frontmatter title，而不是无脑退回文件名 stem
@@ -461,7 +461,7 @@ pub fn move_entry(
     write_tombstones(vault, &pending);
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     clear_tombstones_for_entry(vault, &new_rel, conn);
     Ok(new_rel)
 }
@@ -477,7 +477,7 @@ pub fn entry_file_list(vault: &Path, rel: &str, conn: &Connection) -> std::io::R
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "条目不存在"));
     }
     let mut out: Vec<String> = db::list_prefix_paths(conn, rel)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     // 附件不进 DB，磁盘 walk；file_type 不跟随符号链接（防逃逸/循环）
     fn walk(dir: &Path, vault: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
         for e in fs::read_dir(dir)? {
@@ -571,7 +571,7 @@ pub fn delete_entry(vault: &Path, rel_path: &str, conn: &Connection) -> std::io:
     let trash_abs = trash_dir.join(&trash_name);
     fs::rename(&abs, &trash_abs)?;
     db::remove_prefix(conn, rel_path)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     // 记来源：恢复时回到删除前的原位置（best effort，写失败 = 恢复时落 vault 根）
     trash_index_record(vault, &trash_name, rel_path);
     Ok(format!("{TRASH_DIR}/{trash_name}"))
@@ -1090,7 +1090,7 @@ pub fn write_note(
     let title = extract_frontmatter_title(content)
         .unwrap_or_else(|| title_from_stem(&abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()));
     db::upsert_file(conn, rel_path, &title, content, mtime, &hash, true)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     // D4：路径被（重新）写入 = （重新）创建 → 清 tombstone（含同步拉取落地）
     if let Err(e) = crate::sync::clear_tombstone_if_present(vault, rel_path) {
         log::warn!("清 tombstone 失败 {rel_path}: {e}");
@@ -1114,7 +1114,7 @@ pub fn write_note_bytes(
     let title = extract_frontmatter_title(&String::from_utf8_lossy(bytes))
         .unwrap_or_else(|| title_from_stem(&name));
     db::upsert_file(conn, rel_path, &title, &String::from_utf8_lossy(bytes), mtime, &hash, true)
-        .map_err(|e| std::io::Error::other(e))?;
+        .map_err(std::io::Error::other)?;
     // D4：同 write_note
     if let Err(e) = crate::sync::clear_tombstone_if_present(vault, rel_path) {
         log::warn!("清 tombstone 失败 {rel_path}: {e}");
@@ -1175,18 +1175,18 @@ pub fn reindex(vault: &Path, conn: &Connection) -> std::io::Result<usize> {
     let stale: Vec<String> = {
         let mut stmt = conn
             .prepare("SELECT path FROM files")
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            .map_err(std::io::Error::other)?
             .collect::<rusqlite::Result<Vec<String>>>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         rows
     };
     for p in stale {
         if !on_disk.contains(&p) {
             db::remove_path(conn, &p)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
         }
     }
     Ok(count)
@@ -1217,7 +1217,7 @@ fn index_note_file(vault: &Path, rel: &str, conn: &Connection) -> std::io::Resul
     let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let title = extract_frontmatter_title(&content).unwrap_or_else(|| title_from_stem(&name));
     db::upsert_file(conn, rel, &title, &content, mtime, &hash, true)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .map_err(std::io::Error::other)
 }
 
 /// 列出 vault 下全部笔记（vault 相对路径，排序保证确定性）。
