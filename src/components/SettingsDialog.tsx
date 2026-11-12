@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
-  Check,
   Copy,
   Download,
   FolderOpen,
@@ -23,6 +22,7 @@ import { useSettingsStore, type SectionKey } from "../stores/settings";
 import { useUpdateStore } from "../stores/update";
 import { update as updateApi } from "../lib/update";
 import { useVaultStore } from "../stores/vault";
+import { CopyButton, Switch } from "./ui/Controls";
 import { vault, type AppInfo, type VaultStats } from "../lib/vault";
 import { isAndroid } from "../lib/sync";
 import { useSyncStore } from "../stores/sync";
@@ -100,34 +100,6 @@ function Segmented<T extends string | number>({
         </button>
       ))}
     </div>
-  );
-}
-
-function Switch({
-  on,
-  onToggle,
-  label,
-}: {
-  on: boolean;
-  onToggle: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      onClick={onToggle}
-      className={`relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors ${
-        on ? "bg-accent" : "bg-ink/20"
-      }`}
-    >
-      <span
-        className={`absolute top-[3px] h-4 w-4 rounded-full bg-white shadow-sm transition-all ${
-          on ? "left-[19px]" : "left-[3px]"
-        }`}
-      />
-    </button>
   );
 }
 
@@ -232,28 +204,12 @@ function EditorSection() {
 
 /** 只读行 + 复制（复用 SyncSection 的 CopyButton 视觉） */
 function CopyRow({ value, title }: { value: string; title?: string }) {
-  const [copied, setCopied] = useState(false);
   return (
     <div className="flex items-center gap-1.5">
       <span className="max-w-[22rem] truncate text-xs text-ink-2" title={title ?? value}>
         {value}
       </span>
-      <button
-        title="复制"
-        aria-label="复制"
-        onClick={() => {
-          void navigator.clipboard?.writeText(value).then(
-            () => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            },
-            () => {},
-          );
-        }}
-        className="shrink-0 rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
-      >
-        {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
-      </button>
+      <CopyButton text={value} />
     </div>
   );
 }

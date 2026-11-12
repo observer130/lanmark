@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronUp,
-  Copy,
   Laptop,
   Loader2,
   RefreshCw,
@@ -15,6 +14,7 @@ import {
 import { useSyncStore } from "../stores/sync";
 import { useSettingsStore } from "../stores/settings";
 import { useVaultStore } from "../stores/vault";
+import { CopyButton, Switch } from "./ui/Controls";
 import { isAndroid, deviceAlias } from "../lib/sync";
 import { AppMark } from "./AppMark";
 import { Pencil } from "lucide-react";
@@ -34,28 +34,6 @@ function fmtClock(ms: number): string {
 /** 用户可见的错误反馈：复用 App 顶层 Toast（vault.error），别再静默吞掉 */
 function notifyError(msg: string) {
   void useVaultStore.setState({ error: msg });
-}
-
-/** 复制到剪贴板的小按钮 */
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      title="复制"
-      className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        } catch (e) {
-          notifyError(`复制失败：${String(e)}`);
-        }
-      }}
-    >
-      {copied ? <Check size={13} /> : <Copy size={13} />}
-    </button>
-  );
 }
 
 /** 设备代号头（手机/桌面共用）。
@@ -700,23 +678,12 @@ export function SyncSection() {
         {!android && (
           <>
             {/* 迷你自动同步开关（关掉后仅保留手动同步） */}
-            <button
-              role="switch"
-              aria-checked={autoOn}
-              title={autoOn ? "关闭自动同步" : "开启自动同步"}
-              onClick={(e) => {
-                e.stopPropagation();
-                void setSyncAuto(!autoOn);
-              }}
-              className={`relative h-[17px] w-[30px] shrink-0 rounded-full transition-colors ${
-                autoOn ? "bg-accent" : "bg-ink-3/30"
-              }`}
-            >
-              <span
-                className="absolute left-0.5 top-0.5 h-[13px] w-[13px] rounded-full bg-white shadow transition-transform"
-                style={{ transform: autoOn ? "translateX(13px)" : "translateX(0)" }}
-              />
-            </button>
+            <Switch
+              small
+              on={autoOn}
+              label={autoOn ? "关闭自动同步" : "开启自动同步"}
+              onToggle={() => void setSyncAuto(!autoOn)}
+            />
             <button
               title={
                 servers.length === 0
