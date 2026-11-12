@@ -31,6 +31,11 @@ function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/** 用户可见的错误反馈：复用 App 顶层 Toast（vault.error），别再静默吞掉 */
+function notifyError(msg: string) {
+  void useVaultStore.setState({ error: msg });
+}
+
 /** 复制到剪贴板的小按钮 */
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -43,8 +48,8 @@ function CopyButton({ text }: { text: string }) {
           await navigator.clipboard.writeText(text);
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
-        } catch {
-          /* 剪贴板不可用（无权限）时静默 */
+        } catch (e) {
+          notifyError(`复制失败：${String(e)}`);
         }
       }}
     >
@@ -73,8 +78,8 @@ function AliasHeader({ alias }: { alias: string }) {
       const cur = useSyncStore.getState().pairing;
       if (cur) useSyncStore.setState({ pairing: { ...cur, deviceAlias: next } });
       setEditing(false);
-    } catch {
-      /* 改名失败静默：手机端 5s 轮询 / 桌面重开会带回旧值 */
+    } catch (e) {
+      notifyError(`设备名保存失败：${String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -380,9 +385,13 @@ function ClientPanel() {
                     title="打开保留的较旧版本副本"
                     className="underline decoration-dotted underline-offset-2 hover:text-amber-700"
                     onClick={() => {
-                      void useVaultStore.getState().openNote(m.loserCopy).catch(() => {
-                        /* 副本尚未同步到本端时打开失败，静默 */
-                      });
+                      void useVaultStore
+                        .getState()
+                        .openNote(m.loserCopy)
+                        .catch((e: unknown) => {
+                          // 副本可能还没同步到本端，但失败必须让用户知道
+                          notifyError(`打开副本失败：${String(e)}`);
+                        });
                     }}
                   >
                     副本 {m.loserCopy}
