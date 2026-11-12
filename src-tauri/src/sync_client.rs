@@ -196,11 +196,21 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
 
 // ---------- HTTP 封装 ----------
 
-fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+/// 进程内复用的 HTTP 客户端。
+///
+/// 两处修正：① 此前每个请求都 `Client::builder()` 新建一个，连接不复用、
+/// 每批 pull/push 都要重新握手；② 构建失败原本走 `.expect()`，而 release 是
+/// `panic = "abort"`（Cargo.toml），一次 TLS 初始化失败就是整进程退出。
+fn client() -> Result<reqwest::blocking::Client, String> {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c.clone()); // Client 内部是 Arc，clone 很便宜
+    }
+    let built = reqwest::blocking::Client::builder()
         .timeout(CLIENT_TIMEOUT)
         .build()
-        .expect("构建 HTTP 客户端失败")
+        .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
+    Ok(CLIENT.get_or_init(|| built).clone())
 }
 
 fn auth_bearer(token: &str) -> String {
@@ -216,7 +226,7 @@ pub fn pair(base_url: &str, code: &str) -> Result<(String, String), String> {
         token: String,
         name: String,
     }
-    let resp = client()
+    let resp = client()?
         .post(format!("{url}/api/v1/pair"))
         .json(&serde_json::json!({ "code": code.trim() }))
         .send()
@@ -328,6 +338,26 @@ fn delete_batch(
 
 // ---------- 落盘辅助 ----------
 
+/// 回合开始后本地文件是否被改过。
+///
+/// 回合开头的 `local_map` 是磁盘快照，而拉取是网络 IO（单文件最长 30s）。
+/// 期间用户保存的新内容若被服务器版本直接覆写，既不进 LWW 裁决、也不会留副本
+/// ——违反「任何裁决都不丢弃内容」。命中即跳过本次覆写，把路径留给下回合重新分类。
+fn local_changed_since(
+    vault: &Path,
+    local_map: &HashMap<String, FileMeta>,
+    path: &str,
+) -> bool {
+    let Some(lm) = local_map.get(path) else {
+        return false; // 回合开始时本地就没有：不构成「被改过」
+    };
+    match std::fs::read(vault.join(path)) {
+        Ok(bytes) => fs_ops::content_hash(&bytes) != lm.hash,
+        // 文件被删/读不了：快照已失效，同样不能按旧裁决覆写
+        Err(_) => true,
+    }
+}
+
 /// 把拉取内容落到本地（笔记走 write_note 进索引；附件校验内容寻址）。
 /// 返回错误信息（None = 成功）。
 fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::PullFile) -> Option<String> {
@@ -350,13 +380,15 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
             if !f.path.ends_with(".md") {
                 return Some(format!("{}: 笔记必须以 .md 结尾", f.path));
             }
-            // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）
-            if let Some(parent) = fs_ops::safe_join(vault, &f.path)
-                .map_err(|e| e.to_string())
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            {
-                if let Err(e) = std::fs::create_dir_all(&parent) {
+            // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）。
+            // 与服务器侧 push 同纪律：必须走 resolve_in_vault（safe_join 只查字符串，
+            // 挡不住 `assets -> /外部目录` 这类符号链接，会被用来在 vault 外建目录）。
+            let abs = match fs_ops::resolve_in_vault(vault, &f.path) {
+                Ok(a) => a,
+                Err(e) => return Some(format!("{}: 路径非法: {e}", f.path)),
+            };
+            if let Some(parent) = abs.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
                     return Some(format!("{}: 创建目录失败: {e}", f.path));
                 }
             }
@@ -367,11 +399,7 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
             };
             if ok {
                 // LWW 时间源保真：本地 mtime = 服务器版本保存时间
-                if let Ok(abs) = fs_ops::safe_join(vault, &f.path) {
-                    fs_ops::set_file_mtime(&abs, f.mtime_ms);
-                }
-            }
-            if ok {
+                fs_ops::set_file_mtime(&abs, f.mtime_ms);
                 None
             } else {
                 Some(format!("{}: 写入失败", f.path))
@@ -382,7 +410,8 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
             if !f.path.starts_with("assets/") || f.path.contains("..") {
                 return Some(format!("{}: 附件路径非法", f.path));
             }
-            let abs = match fs_ops::safe_join(vault, &f.path) {
+            // 同笔记分支：符号链接逃逸校验不能省（`assets -> /外部` 时 safe_join 会放行）
+            let abs = match fs_ops::resolve_in_vault(vault, &f.path) {
                 Ok(a) => a,
                 Err(e) => return Some(format!("{}: 路径非法: {e}", f.path)),
             };
@@ -508,7 +537,7 @@ impl RoundCore {
         }
 
         // 1. 双侧清单 + 客户端基线 + 服务器 tombstones
-        let c = client();
+        let c = client()?;
         let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
         let server_tombstones = fetch_tombstones(&c, &url, &profile.token)?;
 
@@ -771,10 +800,12 @@ impl RoundCore {
                 Ok(Some(f)) => f,
                 Ok(None) => {
                     self.report.errors.push(format!("冲突副本拉取为空: {path}"));
+                    self.baseline.remove(&path);
                     continue;
                 }
                 Err(e) => {
                     self.report.errors.push(e);
+                    self.baseline.remove(&path);
                     continue;
                 }
             };
@@ -784,19 +815,31 @@ impl RoundCore {
                     Ok(b) => b,
                     Err(e) => {
                         self.report.errors.push(format!("读取本地版本失败 {path}: {e}"));
+                        self.baseline.remove(&path);
                         continue;
                     }
                 };
+                // 拉取是网络 IO，期间本地可能已被用户改写：快照裁决不再成立。
+                // 此时不覆写（改过的内容既不进 LWW 也不会有副本），留给下回合重新裁决。
+                if fs_ops::content_hash(&local_bytes) != lm.hash {
+                    self.report.errors.push(format!(
+                        "{path}: 本地在同步期间被修改，跳过冲突裁决（下回合重试）"
+                    ));
+                    self.baseline.remove(&path);
+                    continue;
+                }
                 let copy = match write_conflict_copy(&self.vault, conn, &path, &lm.kind, &local_bytes, fs_ops::now_ms()) {
                     Ok(c) => c,
                     Err(e) => {
                         self.report.errors.push(format!("冲突副本落盘失败 {path}: {e}"));
+                        self.baseline.remove(&path);
                         continue;
                     }
                 };
                 // 拉服务器 P 覆写本地（hash 校验；失败时副本已在盘，下回合重试）
                 if let Some(e) = store_pulled(&self.vault, conn, &f) {
                     self.report.errors.push(e);
+                    self.baseline.remove(&path);
                     continue;
                 }
                 self.report.pulled.push(path.clone());
@@ -814,6 +857,9 @@ impl RoundCore {
                     Ok(b) => b,
                     Err(e) => {
                         self.report.errors.push(format!("冲突副本解码失败 {path}: {e}"));
+                        // 副本没落盘就不能推送：服务器当前版本是它唯一副本。
+                        // 基线一并退回，否则下回合会被判成「仅本地改」直接覆盖。
+                        self.baseline.remove(&path);
                         continue;
                     }
                 };
@@ -849,16 +895,32 @@ impl RoundCore {
                 pull_batch(&self.c, &self.url, &self.profile.token, chunk)?;
             for (p, why) in missing {
                 self.report.errors.push(format!("拉取失败 {p}: {why}"));
+                // 基线只是「两端已确认一致」的记账，没拉到就绝不能前进：
+                // 否则下回合按 base == 服务器 hash 判成「仅本地改」，把本地旧版推上去，
+                // 服务器按 cur_hash == base_hash 干净覆盖 —— 新版内容无副本，静默丢失。
+                self.baseline.remove(&p);
             }
             let conn_guard = self.state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
             let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
             for f in files {
+                if local_changed_since(&self.vault, &self.local_map, &f.path) {
+                    self.report.errors.push(format!(
+                        "{}: 本地在同步期间被修改，跳过本次覆盖（下回合重新裁决）",
+                        f.path
+                    ));
+                    self.baseline.remove(&f.path);
+                    continue;
+                }
                 match store_pulled(&self.vault, conn, &f) {
                     None => {
                         self.report.pulled.push(f.path.clone());
                         self.baseline.insert(f.path.clone(), f.hash.clone());
                     }
-                    Some(e) => self.report.errors.push(e),
+                    Some(e) => {
+                        self.report.errors.push(e);
+                        // 写失败 = 没拉到，基线同样不许前进（否则下回合静默覆盖服务器版本）
+                        self.baseline.remove(&f.path);
+                    }
                 }
             }
         }
@@ -2058,7 +2120,7 @@ mod tests {
         assert_eq!(r0.pulled.len(), 1);
 
         // 1) 客户端先取 manifest（此刻服务器还是「手机版本一」）
-        let c = client();
+        let c = client().unwrap();
         let manifest = fetch_manifest(&c, &base, &token).unwrap();
         let stale_hash = manifest.iter().find(|m| m.path == note.path).unwrap().hash.clone();
 
@@ -2386,7 +2448,7 @@ mod tests {
         note_write_op(&phone, &p.path, "基础").unwrap();
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _) = pair(&base, &code).unwrap();
-        let c = client();
+        let c = client().unwrap();
 
         let (dA, deskA) = client_vault();
         let (dB, deskB) = client_vault();
@@ -2933,7 +2995,7 @@ mod tests {
                 let _ = axum::serve(tl, axum::Router::new()).await;
             });
         });
-        let c = client();
+        let c = client().unwrap();
         let base = format!("http://127.0.0.1:{port}");
         // 等就绪
         for _ in 0..40 {
@@ -3214,7 +3276,7 @@ mod tests {
         assert_eq!(std::fs::read(phone_dir.path().join(foreign)).unwrap(), vec![0xC4, 0xE3, 0xBA, 0xC3]);
 
         // 服务器 manifest 与 pull 字节一致（修复1+2：磁盘真相）
-        let c = client();
+        let c = client().unwrap();
         let manifest = fetch_manifest(&c, &base, &token).unwrap();
         let asset_meta = manifest.iter().find(|m| m.path == asset_path).unwrap();
         let served = std::fs::read(phone_dir.path().join(asset_path)).unwrap();
@@ -3240,7 +3302,7 @@ mod tests {
         // 外部直接改文件（绕过 write_note，DB 保持旧值）
         std::fs::write(phone_dir.path().join(&note.path), "外部改过的内容").unwrap();
 
-        let c = client();
+        let c = client().unwrap();
         let manifest = fetch_manifest(&c, &base, &token).unwrap();
         let meta = manifest.iter().find(|m| m.path == note.path).unwrap();
         assert_eq!(
@@ -3581,5 +3643,81 @@ mod tests {
         assert_eq!(a.len(), 32);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    /// 回归（评审 P0）：拉取失败时基线不许前进。
+    ///
+    /// 旧行为：基线起点 = 服务器清单，`store_pulled`/`missing` 失败只记 error，
+    /// `finish` 仍把服务器 hash 写进基线 → 下回合按「base == 服务器 hash」判成
+    /// 「仅本地改」，把本地旧版推上去；服务器 `cur_hash == base_hash` 干净覆盖，
+    /// 服务器新版既没被拉下来、也没有副本 —— 静默丢内容。
+    #[test]
+    fn failed_pull_does_not_advance_baseline() {
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+
+        let content = "服务器新版内容";
+        let hash = fs_ops::content_hash(content.as_bytes());
+        let manifest = serde_json::json!([{
+            "path": "n.md",
+            "kind": "note",
+            "hash": hash,
+            "mtimeMs": 2_000i64,
+            "size": content.len() as i64
+        }]);
+        let app = Router::new()
+            .route(
+                "/api/v1/manifest",
+                get(move || {
+                    let m = manifest.clone();
+                    async move { Json(m) }
+                }),
+            )
+            .route("/api/v1/tombstones", get(|| async { Json(serde_json::json!([])) }))
+            .route(
+                "/api/v1/pull",
+                // 明确拒绝：走 missing 分支（真实场景 = 磁盘满/超时后服务器拒绝）
+                post(|| async {
+                    Json(serde_json::json!({ "files": [], "missing": [["n.md", "模拟拉取失败"]] }))
+                }),
+            )
+            .route("/api/v1/push", post(|| async { Json(serde_json::json!([])) }));
+
+        let (port, listener) = crate::sync_server::bind_listener().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let l = tokio::net::TcpListener::from_std(listener).unwrap();
+                let _ = axum::serve(l, app).await;
+            });
+        });
+        let base = format!("http://127.0.0.1:{port}");
+
+        let (dir, state) = client_vault();
+        let profile = ServerProfile {
+            id: "dev-test".into(),
+            name: "mock".into(),
+            url: base,
+            token: "t".into(),
+            last_success_at: None,
+            device_id: "mock-device".into(),
+            port: Some(port),
+        };
+        let report = sync_round(&state, &profile).expect("回合本身应完成（单文件失败不进 Err）");
+        assert!(
+            report.errors.iter().any(|e| e.contains("拉取失败")),
+            "应记录拉取失败: {:?}",
+            report.errors
+        );
+
+        let saved = load_sync_state(dir.path(), &profile.id);
+        assert!(
+            !saved.contains_key("n.md"),
+            "未拉的路径不得写进基线，否则下回合会静默覆盖服务器版本: {saved:?}"
+        );
     }
 }

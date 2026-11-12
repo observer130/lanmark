@@ -629,7 +629,6 @@ export function MilkdownHost({
       inner.remove(); // 专属 root 整体移除，旧实例 DOM 不残留
     };
     // 仅在笔记切换 / 模式切换时重建（key 由父组件控制）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return <div ref={hostRef} className="editor-host" />;
@@ -859,7 +858,7 @@ export function EditorPane({ narrow = false }: { narrow?: boolean }) {
     <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
       {/* 头部：窄屏时左侧让出悬浮抽屉按钮的宽度（按钮占 12→46px），避免遮挡标题。
           Linux 无边框窗口（decorations:false）：头部空白即拖拽区，双击最大化；
-          右端是自绘窗控（方案 A · 头部融合，design/direction-approved.md）。 */}
+          右端是自绘窗控（头部融合方案：窗控并入编辑器头部右端，空白处拖拽/双击最大化）。 */}
       <div
         onMouseDown={isLinuxDesktop ? dragWindow : undefined}
         className={`flex items-center gap-0 py-2.5 md:gap-2 ${

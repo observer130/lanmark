@@ -2,8 +2,9 @@
 //! 手机 = 局域网同步中心节点；桌面端（客户端）发现/配对后驱动双向同步回合。
 //! 端点幂等可重放；token 仅防误连（传输全程明文 HTTP——自签 TLS + 证书固定至今没做，仍是未清偿项）。
 //!
-//! 并发说明：单客户端串行同步（锁在客户端侧），文件写入走 M1 的 tmp+rename，
-//! handler 内联阻塞 IO 在当前量级（1e3-1e4 文件）是毫秒级，可接受。
+//! 并发说明：客户端侧串行同步；服务端 push/delete 另由 `ServerCtx::write_lock`
+//! 串行化（handler 跑在 spawn_blocking 线程池里，并非"单线程 runtime 天然串行"）。
+//! 文件写入走 M1 的 tmp+rename。
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
@@ -168,6 +169,12 @@ pub struct ServerCtx {
     ui_notify: Option<Arc<dyn Fn() + Send + Sync>>,
     /// M4h-2：待授权的配对请求（「手机点允许」取代抄 8 位码）
     pending: Mutex<Vec<PendingPair>>,
+    /// 写路径互斥。push 的「读当前 hash → 仲裁 → 落盘/留副本」不是原子的，
+    /// 而 handler 跑在 `spawn_blocking` 的线程池里（旧注释"runtime 单线程、
+    /// handler 天然串行"不成立）：两个并发 push 会同时看到 `cur_hash == base_hash`
+    /// 走干净落盘分支，后写覆盖先写且双方都不留副本。
+    /// /delete 也拿这把锁：删除与写入交错会留下「有墓碑没文件」或「有文件没墓碑」。
+    write_lock: Mutex<()>,
 }
 
 /// M4h-2 一次待授权的配对请求。
@@ -211,6 +218,7 @@ impl ServerCtx {
             pair_guard: Mutex::new(PairGuard::default()),
             ui_notify: None,
             pending: Mutex::new(Vec::new()),
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -667,9 +675,13 @@ pub struct PushBody {
 async fn push(
     State(ctx): State<Arc<ServerCtx>>,
     headers: HeaderMap,
-    Json(body): Json<PushBody>,
+    // 先收原始字节、**验签后再解析**：用 `Json` extractor 时反序列化发生在
+    // handler 之前，未配对设备也能塞 64 MiB 让服务器完整解析（内存放大打满）。
+    body: axum::body::Bytes,
 ) -> Result<Json<Vec<PushResult>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
+    let body: PushBody = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("请求体解析失败: {e}")))?;
     // 逐文件落盘（含 DB 写）移出单线程 runtime
     let ctx2 = ctx.clone();
     let results = tokio::task::spawn_blocking(move || push_blocking(&ctx2, &body.files))
@@ -688,6 +700,12 @@ fn push_blocking(
     ctx: &Arc<ServerCtx>,
     files: &[PushFile],
 ) -> Result<Vec<PushResult>, (StatusCode, String)> {
+    // 整批持有写锁：批内多文件也要作为一个原子单元，否则另一端的并发 push
+    // 会在本批两个文件之间插进来，让「检查基线」看到互相矛盾的中间态。
+    let _guard = ctx
+        .write_lock
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "写锁中毒".to_string()))?;
     let vault = ctx.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
     let mut results = Vec::new();
 
@@ -726,7 +744,8 @@ struct Landed {
 /// - 来件更小/平手 → 来件降级：来件存冲突副本，当前 P 保留（serverHash = 当前 hash）
 /// 返回 None = 无需仲裁（文件不存在或 base 与现状一致 → 干净落盘）。
 ///
-/// 序列化前提不变：runtime 单线程、handler 天然串行，仲裁的检查-落盘无竞态。
+/// 序列化靠 `ServerCtx::write_lock`（push_blocking / delete_blocking 全程持有）：
+/// handler 跑在 spawn_blocking 线程池里并不天然串行，别把"单线程 runtime"当并发保证。
 fn arbitrate_existing(
     vault: &std::path::Path,
     conn: &rusqlite::Connection,
@@ -914,12 +933,12 @@ async fn delete_files(
     Json(body): Json<DeleteBody>,
 ) -> Result<Json<Vec<PushResult>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
-    let app = ctx.app.clone();
-    // 软删是 fs + DB 阻塞操作，移出单线程 runtime
-    let results =
-        tokio::task::spawn_blocking(move || delete_blocking(&app, &body.paths))
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
+    // 软删是 fs + DB 阻塞操作，移出单线程 runtime；与 push 共用写锁（见 ServerCtx）
+    let ctx2 = ctx.clone();
+    let body_paths = body.paths;
+    let results = tokio::task::spawn_blocking(move || delete_blocking(&ctx2, &body_paths))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
     // M3f：有成功删除 = vault 已变更 → 通知手机端 UI 刷新（否则目录仍列已删笔记）
     if results.iter().any(|r| r.ok) {
         ctx.notify_ui();
@@ -928,7 +947,22 @@ async fn delete_files(
 }
 
 /// delete 阻塞主体（spawn_blocking 内执行）
-fn delete_blocking(app: &Arc<AppState>, paths: &[String]) -> Vec<PushResult> {
+fn delete_blocking(ctx: &Arc<ServerCtx>, paths: &[String]) -> Vec<PushResult> {
+    let _guard = match ctx.write_lock.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return paths
+                .iter()
+                .map(|p| PushResult {
+                    path: p.clone(),
+                    ok: false,
+                    error: Some("写锁中毒".into()),
+                    conflict_saved_as: None,
+                    server_hash: None,
+                })
+                .collect()
+        }
+    };
     let mut results = Vec::new();
     for path in paths {
         // 点目录禁止删除：.lanmark/lanmark.db（索引事实）与 sync.json（全体凭据）
@@ -943,7 +977,7 @@ fn delete_blocking(app: &Arc<AppState>, paths: &[String]) -> Vec<PushResult> {
             });
             continue;
         }
-        match commands::entry_delete_op(app, path) {
+        match commands::entry_delete_op(&ctx.app, path) {
             Ok(trash) => results.push(PushResult {
                 path: path.clone(),
                 ok: true,

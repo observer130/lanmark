@@ -260,21 +260,24 @@ pub fn entry_delete_op(state: &Arc<AppState>, path: &str) -> CmdResult<String> {
     reject_dot_path(path)?;
     with_vault(state, |vault| {
         with_db(state, |conn| {
-            // M3b：删除前记 tombstone（文件夹 = 展开其下全部同步单元；hash 以磁盘为准），
-            // 本地 UI 删除与服务器 /delete 都走这里 → 两侧墓碑统一
-            if let Ok(files) = fs_ops::entry_file_list(vault, path, conn) {
-                let now = fs_ops::now_ms();
-                let mut pending: Vec<(String, String)> = Vec::with_capacity(files.len());
-                for f in &files {
-                    if let Ok(bytes) = std::fs::read(vault.join(f)) {
-                        pending.push((f.clone(), fs_ops::content_hash(&bytes)));
+            // 删除必须先落墓碑，且墓碑写不成就不许删：
+            // 文件进了回收站而账本里没有记录，下一回合对端会把「仅服务器有」的路径
+            // 重新拉回来（删除被静默撤销）。宁可不删，也不留半本账。
+            let files = fs_ops::entry_file_list(vault, path, conn)
+                .map_err(|e| format!("删除前枚举待删条目失败（已中止，未删除）: {e}"))?;
+            let now = fs_ops::now_ms();
+            let mut pending: Vec<(String, String)> = Vec::with_capacity(files.len());
+            for f in &files {
+                match std::fs::read(vault.join(f)) {
+                    Ok(bytes) => pending.push((f.clone(), fs_ops::content_hash(&bytes))),
+                    // 读不到内容就算不出 hash，删了必被对端复活 —— 中止，让人先修权限
+                    Err(e) => {
+                        return Err(format!("删除前读取 {f} 失败（已中止，未删除）: {e}"))
                     }
                 }
-                // 批量 upsert：一次 load + 一次 atomic save（逐条版按文件数整读整写账本）
-                if let Err(e) = crate::sync::record_tombstones(vault, &pending, now) {
-                    log::warn!("批量记 tombstone 失败（{} 条）: {e}", pending.len());
-                }
             }
+            crate::sync::record_tombstones(vault, &pending, now)
+                .map_err(|e| format!("记录删除墓碑失败（已中止，未删除）: {e}"))?;
             let trash = fs_ops::delete_entry(vault, path, conn).map_err(|e| e.to_string())?;
             Ok(trash)
         })
@@ -1005,7 +1008,7 @@ mod e2e_tests {
     /// 回原位 → 读得到、搜得到、统计归零
     #[test]
     fn trash_list_and_restore_roundtrip() {
-        let (dir, state) = opened_vault();
+        let (_dir, state) = opened_vault();
         let s = &state;
         let note = note_create_op(s, "", "会丢的笔记").unwrap();
         note_write_op(s, &note.path, "找回 我自己").unwrap();

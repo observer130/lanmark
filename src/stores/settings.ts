@@ -99,6 +99,9 @@ const applyAppearance = (a: Appearance): void => {
 };
 
 let loadSeq = 0;
+/** 写序：patch/reset 各自递增。慢启动的 settings_get 不能盖掉之后的写，
+ *  迟到的写失败回滚也不能抹掉更新的成功写。 */
+let writeSeq = 0;
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   settings: DEFAULT_SETTINGS,
@@ -111,9 +114,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   load: async () => {
     const seq = ++loadSeq;
+    const writeAt = writeSeq;
     try {
       const s = await settingsApi.get();
-      if (seq !== loadSeq) return;
+      // 读期间发生过写：这份快照已过期，落下去会把刚改的值盖回
+      if (seq !== loadSeq || writeSeq !== writeAt) return;
       set({ settings: s, loading: false, error: null });
       applyAppearance(s.appearance);
     } catch (e) {
@@ -129,6 +134,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   patch: async (patch) => {
+    const seq = ++writeSeq;
     const prev = get().settings;
     // 乐观合并：只动 patch 里出现的小节（与 Rust 的「整节替换」语义一致）
     const optimistic: Settings = {
@@ -141,25 +147,32 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     applyAppearance(optimistic.appearance);
     try {
       const saved = await settingsApi.patch(patch);
+      // 更晚的写已经发出：它的结果才是最终值，别用这份旧回包覆盖
+      if (seq !== writeSeq) return;
       set({ settings: saved, error: null });
       // 以返回值为准再写一次：非法档位/主题会被 Rust 归一化回默认，
       // 乐观那一下显示的是用户输入，这里必须纠正
       applyAppearance(saved.appearance);
     } catch (e) {
+      // 失败回滚同理：只在「没有更新的写」时回滚，否则会把并发成功写抹掉
+      if (seq !== writeSeq) return;
       set({ settings: prev, error: String(e) });
       applyAppearance(prev.appearance);
     }
   },
 
   reset: async () => {
+    const seq = ++writeSeq;
     const prev = get().settings;
     set({ settings: DEFAULT_SETTINGS });
     applyAppearance(DEFAULT_APPEARANCE);
     try {
       const saved = await settingsApi.reset();
+      if (seq !== writeSeq) return;
       set({ settings: saved, error: null });
       applyAppearance(saved.appearance);
     } catch (e) {
+      if (seq !== writeSeq) return;
       set({ settings: prev, error: String(e) });
       applyAppearance(prev.appearance);
     }

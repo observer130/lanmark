@@ -20,7 +20,7 @@ import { AppMark } from "./AppMark";
 import { Pencil } from "lucide-react";
 
 /**
- * 同步区收纳（方案 B，用户选定 2026-09-21，design/direction-approved.md）：
+ * 同步区收纳（选定方案：不设全窗底栏，侧栏底边单行，管理/配对在展开面板里）：
  * 侧栏底边只剩一行常驻条（状态点 + 自动同步开关 + 立即同步 + 展开箭头），
  * 服务器管理 / 配对 / 同步报告收进点击行后向上弹出的面板。
  * 视觉沿用「晨窗」基线；只动布局收纳，不动 store 与 Rust 逻辑。
@@ -283,7 +283,6 @@ function ClientPanel() {
   useEffect(() => {
     void scanLan().finally(() => setScanRan(true));
     // 只在挂载时扫一次：后续由「自动查找」按钮驱动
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const canPair = url.trim().startsWith("http") && code.trim().length === 8;
@@ -669,10 +668,20 @@ export function SyncSection() {
       {/* 常驻单行：点击展开/收起面板；行内控件各自拦截冒泡 */}
       <div
         role="button"
+        tabIndex={0}
         aria-expanded={open}
         title={error && !open ? error : "同步设置与状态"}
         onClick={() => setOpen((o) => !o)}
-        className="flex h-[42px] cursor-pointer select-none items-center gap-2 border-t border-line px-2.5 text-xs text-ink-2 hover:bg-canvas/60"
+        // 键盘可达：此前只有 onClick，Tab 到不了、Enter/Space 也打不开面板
+        //（配对与服务器管理都在面板里）。行内 switch 的按键不冒泡到这里。
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+        className="flex h-[42px] cursor-pointer select-none items-center gap-2 border-t border-line px-2.5 text-xs text-ink-2 hover:bg-canvas/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
       >
         <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} />
         <span className="shrink-0 font-medium">{label}</span>

@@ -140,7 +140,7 @@ fn fetch_latest() -> Result<ReleaseInfo, String> {
 fn update_check_sync(app: &tauri::AppHandle, force: bool) -> CmdResult<UpdateInfo> {
     let current = app.package_info().version.to_string();
     let mut cfg = crate::vault::load_config(app);
-    let now = crate::bridge::now_unix_ms();
+    let now = crate::fs_ops::now_ms().max(0) as u64;
     if !check_due(cfg.last_update_check_ms, now, force) {
         return Ok(UpdateInfo {
             current_version: current,

@@ -77,7 +77,6 @@ export function useActiveHeading(
       if (raf) cancelAnimationFrame(raf);
     };
     // signature 已覆盖 items 的可见变化；items 本身不进依赖避免数组身份抖动
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, activePath, editorMode, signature]);
 
   return active;

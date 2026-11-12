@@ -68,15 +68,18 @@ pub fn content_type(ext: &str) -> &'static str {
     }
 }
 
-/// 极简 percent-decode（浏览器对 UTF-8 路径编码为 %XX）
+/// 极简 percent-decode（浏览器对 UTF-8 路径编码为 %XX）。
+///
+/// 必须按**字节**判断十六进制：早先写成 `&s[i + 1..i + 3]`，`%` 后面跟中文时
+/// 切片点落在多字节字符中间，直接 panic（release 的 `panic = "abort"` 会杀进程）。
 pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
                 i += 3;
                 continue;
             }
@@ -85,6 +88,15 @@ pub fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +174,10 @@ mod tests {
         assert_eq!(percent_decode("a%20b/c"), "a b/c");
         assert_eq!(percent_decode("no-encoding"), "no-encoding");
         assert_eq!(percent_decode("bad-%4"), "bad-%4"); // 非法序列原样保留
+        // 回归：`%` 后跟多字节字符时，早先的 `&s[i+1..i+3]` 会 panic（release=abort 直接闪退）
+        assert_eq!(percent_decode("%中"), "%中");
+        assert_eq!(percent_decode("100%图.png"), "100%图.png");
+        assert_eq!(percent_decode("%"), "%");
     }
 
     #[test]

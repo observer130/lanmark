@@ -15,6 +15,7 @@ import {
   RotateCcw,
   Settings2,
   Trash2,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -780,6 +781,22 @@ const SECTION_RENDER: Record<SectionKey, () => React.ReactElement> = {
   about: AboutSection,
 };
 
+/* 设置写盘失败提示条：乐观更新已回滚，但用户必须知道「没存进去」 */
+function SettingsError({ message, onClose }: { message: string; onClose: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2 border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+    >
+      <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+      <span className="min-w-0 flex-1 break-all">{message}</span>
+      <button aria-label="忽略设置错误" onClick={onClose} className="shrink-0 p-0.5 hover:text-ink">
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
 /* ── 面板外壳 ── */
 
 export function SettingsDialog({ narrow }: { narrow: boolean }) {
@@ -787,6 +804,10 @@ export function SettingsDialog({ narrow }: { narrow: boolean }) {
   const active = useSettingsStore((s) => s.activeSection);
   const setActive = useSettingsStore((s) => s.setActiveSection);
   const close = useSettingsStore((s) => s.closeDialog);
+  // 写设置失败此前只回滚控件、页面毫无提示（error 字段无人消费）。
+  // 设置写不进去 = 重启后偏好全丢，必须让用户看到。
+  const error = useSettingsStore((s) => s.error);
+  const clearError = useSettingsStore((s) => s.clearError);
 
   // Esc 关闭（窄屏也一致）
   useEffect(() => {
@@ -817,6 +838,7 @@ export function SettingsDialog({ narrow }: { narrow: boolean }) {
           </button>
           <span className="flex-1 text-sm font-semibold text-ink">设置 · {title}</span>
         </div>
+        {error && <SettingsError message={error} onClose={clearError} />}
         {/* 分组切换：横向滚动药丸（触控目标高度 ≥44px） */}
         <div className="flex gap-1.5 overflow-x-auto border-b border-line bg-side px-3 py-2">
           {SECTIONS.map((s) => (
@@ -871,6 +893,7 @@ export function SettingsDialog({ narrow }: { narrow: boolean }) {
           })}
         </nav>
         <div className="flex min-w-0 flex-1 flex-col">
+          {error && <SettingsError message={error} onClose={clearError} />}
           <div className="flex items-center gap-2 border-b border-line px-4 py-3">
             <span className="flex-1 text-sm font-semibold text-ink">{title}</span>
             <button

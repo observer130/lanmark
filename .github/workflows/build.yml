@@ -11,7 +11,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 测试门禁：此前 CI 只构建不跑测试，绿灯只代表「能编译」，单测失败的提交
+  # 依然可以合入甚至发版。这里把 tsc / vitest / cargo test 接进来，三端构建
+  # 都以它为前置（构建分钟数远高于测试，先失败更省）。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # cargo test 需要编译 tauri，缺 webkit2gtk 等系统库会直接挂
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: pnpm install --frozen-lockfile
+      - name: 类型门禁 + 前端构建
+        run: pnpm build
+      - name: 前端测试
+        run: pnpm test
+      - name: Rust 测试
+        run: cd src-tauri && cargo test
+
   desktop-linux:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +75,7 @@ jobs:
           if-no-files-found: error
 
   desktop-windows:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +101,7 @@ jobs:
           if-no-files-found: error
 
   android:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

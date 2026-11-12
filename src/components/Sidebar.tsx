@@ -450,7 +450,7 @@ export function Sidebar({ onNavigate, narrow = false }: { onNavigate?: () => voi
         </div>
       )}
 
-      {/* M2 同步（方案 B 收纳，design/direction-approved.md）：
+      {/* 同步（侧栏底边单行收纳）：
           常驻只剩一行（状态+开关+同步），管理/配对在点击行后的上拉面板里 */}
       <SyncSection />
 
