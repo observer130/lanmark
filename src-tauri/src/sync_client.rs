@@ -1580,7 +1580,9 @@ pub async fn sync_now(
 ) -> CmdResult<SyncReport> {
     use std::sync::atomic::Ordering;
     if SYNC_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Err("同步回合进行中，请稍候".into());
+        // 返回 Ok + busy 而不是 Err：这是「另一回合在跑，本次跳过」，
+        // 不是错误；前端也不必再靠中文文案判断要不要弹红条。
+        return Ok(SyncReport { busy: true, ..Default::default() });
     }
     let _guard = SyncGuard;
     let servers = load_servers(&app);

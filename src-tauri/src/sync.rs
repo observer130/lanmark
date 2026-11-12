@@ -104,6 +104,11 @@ pub struct SyncReport {
     pub deleted: Vec<String>,
     pub skipped: usize,
     pub errors: Vec<String>,
+    /// 另一回合正在跑（客户端串行锁），本次调用没有做任何事。
+    /// 单独给字段而不是 Err：前端此前靠 `msg.includes("进行中")` 判，
+    /// 文案一改就把「正常跳过的噪声」变成红色错误提示。
+    #[serde(default)]
+    pub busy: bool,
 }
 
 // ---------- tombstone（删除传播） ----------

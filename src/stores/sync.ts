@@ -365,6 +365,11 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         }
       }
       const report = await sync.syncNow(id);
+      if (report.busy) {
+        // 另一回合在跑：本次跳过，不刷新、不提示
+        set({ syncing: false });
+        return true;
+      }
       set({ lastReport: report });
       // 同步后刷新树/元数据（拉取的新文件无需手动「重新扫描」），
       // 并重载当前笔记（磁盘可能已被拉取更新）
@@ -391,9 +396,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       void get().refreshServers();
       return true;
     } catch (e) {
-      const msg = String(e);
-      const busy = msg.includes("进行中");
-      if (!opts?.silent || !busy) set({ error: msg });
+      if (!opts?.silent) set({ error: String(e) });
       return false;
     } finally {
       set({ syncing: false });

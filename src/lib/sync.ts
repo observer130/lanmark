@@ -107,6 +107,8 @@ export interface SyncReport {
   deleted: string[];
   skipped: number;
   errors: string[];
+  /** 另一回合在跑，本次跳过（不是错误） */
+  busy: boolean;
 }
 
 /** 手机端：同步服务器配对信息（服务器随 vault 打开自动启动） */

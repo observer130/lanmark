@@ -71,7 +71,13 @@ pub async fn vault_set_path(
 ) -> CmdResult<String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
-        return Err(format!("目录不存在: {path}"));
+        // create 模式：目录不存在就地创建。此前是前端 catch 到「目录不存在」
+        // 中文错误串后再补一次 vault_ensure_dir + 重试——文案一改链路就断。
+        if mode == "create" {
+            std::fs::create_dir_all(&p).map_err(|e| format!("创建目录失败: {e}"))?;
+        } else {
+            return Err(format!("目录不存在: {path}"));
+        }
     }
     // 开库含全量 reindex（大库可达数秒）：同步命令跑在 Tauri 主线程会冻 UI，
     // Android 上有 ANR 风险 → 阻塞主体挪出主线程
