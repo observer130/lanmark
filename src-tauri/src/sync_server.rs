@@ -1236,8 +1236,12 @@ fn advertise_mdns(port: u16, name: String) {
         .ok();
 }
 
-/// 本机局域网 IPv4（UDP connect 技巧，不真正发包）
+/// 本机局域网 IPv4：先按网卡表选（跳过 VPN/蜂窝，见 `lan_scan::pick_host_ipv4`），
+/// 拿不到网卡表再退回 UDP connect 默认路由技巧（不真正发包）。
 fn local_lan_ip() -> Option<String> {
+    if let Some(ip) = crate::lan_scan::pick_host_ipv4(&crate::lan_scan::local_ipv4_addrs()) {
+        return Some(ip.to_string());
+    }
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:80").ok()?;
     s.local_addr().ok().map(|a| a.ip().to_string())

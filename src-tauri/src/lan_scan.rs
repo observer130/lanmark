@@ -109,15 +109,55 @@ pub fn is_private_v4(ip: Ipv4Addr) -> bool {
     }
 }
 
-/// 虚拟网卡前缀：docker/veth/br-/utun/tun/tap/wg 等。
-/// 它们的网段扫了必无结果，却会成倍拉长 L2。
+/// 虚拟/非 LAN 网卡前缀：docker/veth/br-/utun/tun/tap/wg、蜂窝（rmnet/ccmni）、
+/// 464xlat（clat）与 Android 的 dummy/p2p 等。
+///
+/// 它们的网段扫了必无结果，却会成倍拉长 L2；选「本机局域网地址」时也必须跳过，
+/// 否则开着 VPN 会把 tun 地址当成 LAN 地址广播给桌面端（根本连不上）。
 pub fn is_virtual_iface(name: &str) -> bool {
-    const PREFIXES: [&str; 14] = [
+    const PREFIXES: [&str; 19] = [
         "docker", "veth", "br-", "virbr", "vmnet", "vboxnet", "utun", "tun", "tap", "wg", "zt",
-        "lo", "ppp", "tailscale",
+        "lo", "ppp", "tailscale", "rmnet", "ccmni", "clat", "dummy", "p2p",
     ];
     let n = name.to_ascii_lowercase();
     PREFIXES.iter().any(|p| n.starts_with(p))
+}
+
+/// 从网卡列表里选一个「局域网可达」的 IPv4，供配对面板/mDNS 展示。
+///
+/// 规则：
+/// 1. 跳过虚拟/蜂窝网卡（[`is_virtual_iface`]）——VPN 的 tun、移动数据的 rmnet 都不算；
+/// 2. 只接受 RFC1918，且排除 169.254 链路本地（它只能在同链路内用）；
+/// 3. 优先 `wlan*`/`wl*`，其次 `eth*`/`en*`，再按网卡名、IP 排序，保证结果确定。
+///
+/// 纯函数：`local_ipv4_addrs()` 在真机上填数据，测试直接喂表。
+pub fn pick_host_ipv4(ifaces: &[(String, Ipv4Addr, u8)]) -> Option<Ipv4Addr> {
+    let mut candidates: Vec<(&str, Ipv4Addr)> = ifaces
+        .iter()
+        .filter(|(name, ip, _)| {
+            !is_virtual_iface(name) && is_private_v4(*ip) && !ip.is_link_local()
+        })
+        .map(|(name, ip, _)| (name.as_str(), *ip))
+        .collect();
+    candidates.sort_by(|a, b| {
+        iface_rank(a.0)
+            .cmp(&iface_rank(b.0))
+            .then_with(|| a.0.cmp(b.0))
+            .then_with(|| a.1.octets().cmp(&b.1.octets()))
+    });
+    candidates.first().map(|(_, ip)| *ip)
+}
+
+/// 局域网优先级：无线 > 有线 > 其它（热点 `ap*`、虚拟网桥剩项等）。
+fn iface_rank(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if n.starts_with("wlan") || n.starts_with("wl") {
+        0
+    } else if n.starts_with("eth") || n.starts_with("en") {
+        1
+    } else {
+        2
+    }
 }
 
 /// 按 `(网卡名, ip, prefix)` 生成 L2 候选网段：跳虚拟网卡、只留私有段、同段去重。
@@ -374,10 +414,10 @@ pub fn run_scan(plan: &ScanPlan, probe: &dyn InfoProbe) -> ScanOutcome {
 
 // ---------- 系统信息采集（生产路径） ----------
 
-/// 本机 IPv4 网卡列表。Linux 走 `ip -4 -o addr`；其它平台尽力而为（拿不到就空，
-/// 退化为 L0+L1 两层，不会因此扫公网）。
+/// 本机 IPv4 网卡列表。Linux/Android 走 `ip -4 -o addr`；其它平台尽力而为
+/// （拿不到就空，退化为 L0+L1 两层，不会因此扫公网）。
 pub fn local_ipv4_addrs() -> Vec<(String, Ipv4Addr, u8)> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         if let Ok(out) = std::process::Command::new("ip").args(["-4", "-o", "addr"]).output() {
             if out.status.success() {
@@ -459,12 +499,65 @@ mod tests {
 
     #[test]
     fn virtual_ifaces_are_skipped() {
-        for n in ["docker0", "veth1234", "br-abc", "utun3", "tun0", "wg0", "lo"] {
+        for n in [
+            "docker0", "veth1234", "br-abc", "utun3", "tun0", "wg0", "lo", "rmnet_data0",
+            "ccmni0", "clat4", "dummy0", "p2p0",
+        ] {
             assert!(is_virtual_iface(n), "{n} 应判为虚拟");
         }
         for n in ["wlan0", "eth0", "enp3s0", "wlp2s0"] {
             assert!(!is_virtual_iface(n), "{n} 是真实网卡");
         }
+    }
+
+    fn ifaces(v: &[(&str, &str, u8)]) -> Vec<(String, Ipv4Addr, u8)> {
+        v.iter()
+            .map(|(name, ip, prefix)| (name.to_string(), ip.parse().unwrap(), *prefix))
+            .collect()
+    }
+
+    #[test]
+    fn pick_host_ipv4_skips_vpn_and_cellular() {
+        // VPN 排在前面也不能选 tun
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[
+                ("tun0", "10.8.0.2", 24),
+                ("wlan0", "192.168.1.7", 24),
+            ])),
+            Some("192.168.1.7".parse().unwrap())
+        );
+        // 只有 VPN / 蜂窝 → 宁可没有，也不广播一个连不上的地址
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[("tun0", "10.8.0.2", 24), ("rmnet_data0", "10.12.3.4", 30)])),
+            None
+        );
+        // 链路本地（169.254）不能当 LAN 地址，退回有线
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[
+                ("wlan0", "169.254.3.9", 16),
+                ("eth0", "192.168.0.9", 24),
+            ])),
+            Some("192.168.0.9".parse().unwrap())
+        );
+        // 公网地址同样拒绝
+        assert_eq!(pick_host_ipv4(&ifaces(&[("eth0", "203.0.113.9", 24)])), None);
+    }
+
+    #[test]
+    fn pick_host_ipv4_prefers_wireless_and_is_deterministic() {
+        // 无线优先于有线，即使有线名字排在前
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[
+                ("eth0", "192.168.1.5", 24),
+                ("wlan0", "192.168.1.6", 24),
+            ])),
+            Some("192.168.1.6".parse().unwrap())
+        );
+        // 同权重按网卡名，结果稳定
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[("wlan1", "192.168.1.8", 24), ("wlan0", "192.168.1.9", 24)])),
+            Some("192.168.1.9".parse().unwrap())
+        );
     }
 
     #[test]
