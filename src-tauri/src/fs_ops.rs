@@ -1248,11 +1248,10 @@ fn collect_notes(
         if name == META_DIR || name.starts_with('.') {
             continue;
         }
-        // 符号链接跳过（与 walk 同纪律）：不进索引 → 不进同步清单
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
+        // 符号链接跳过（与 walk 同纪律）：不进索引 → 不进同步清单。
+        // file_type 失败必须向上抛：若是目录，静默跳过会让整棵子树从清单消失，
+        // 被同步误判成“这些文件被删了”。让 /manifest 回 503，下回合重扫。
+        let ft = entry.file_type()?;
         if ft.is_symlink() {
             continue;
         }
