@@ -1323,36 +1323,92 @@ pub fn sync_pair_reject(nonce: String) -> CmdResult<()> {
     reject_pending(&ctx, &nonce)
 }
 
-/// vault 内冲突副本计数：
-/// 笔记走 DB 索引（路径含「冲突」，无逐文件 hash），附件浅层扫描。
-#[tauri::command]
-pub fn sync_conflict_count(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<u32> {
+/// 冲突副本条目（`sync_conflicts` 返回，前端列表用）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictCopy {
+    /// 副本相对路径（笔记可直接打开）
+    pub path: String,
+    /// `note` | `asset`
+    pub kind: String,
+    /// 原始路径（副本名里的原名 + 目录）
+    pub original_path: String,
+    /// 冲突时间戳 `MMDD-HHMM`（UTC）
+    pub stamp: String,
+    /// 同分钟第 N 个副本（0 = 首个）
+    pub attempt: u32,
+    pub mtime_ms: i64,
+}
+
+/// 扫描冲突副本：笔记走 DB（写入时已 upsert），附件走 assets 目录。
+/// 只认严格命名的副本，避免把普通文件名里的「冲突」也算进去。
+fn collect_conflict_copies(state: &Arc<AppState>) -> CmdResult<Vec<ConflictCopy>> {
     let vault = state
         .vault
         .lock()
         .map_err(|_| "锁中毒")?
         .clone()
         .ok_or("尚未打开 vault")?;
-    let mut count = 0u32;
+    let mut out: Vec<ConflictCopy> = Vec::new();
     if let Ok(guard) = state.db.lock() {
-        if let Some(c) = guard.as_ref() {
-            if let Ok(n) = c.query_row(
-                "SELECT COUNT(*) FROM files WHERE is_note=1 AND path LIKE '%冲突%'",
-                [],
-                |r| r.get::<_, i64>(0),
-            ) {
-                count += n as u32;
+        if let Some(conn) = guard.as_ref() {
+            if let Ok(mut stmt) = conn
+                .prepare("SELECT path, mtime_ms FROM files WHERE is_note=1 AND path LIKE '%-冲突%'")
+            {
+                if let Ok(rows) =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                {
+                    for (path, mtime_ms) in rows.flatten() {
+                        if let Some(p) = crate::sync::parse_conflict_path(&path) {
+                            out.push(ConflictCopy {
+                                path,
+                                kind: "note".into(),
+                                original_path: p.original_path,
+                                stamp: p.stamp,
+                                attempt: p.attempt,
+                                mtime_ms,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
-    if let Ok(d) = std::fs::read_dir(vault.join(fs_ops::ASSETS_DIR)) {
-        for e in d.flatten() {
-            if e.file_name().to_string_lossy().contains("冲突") {
-                count += 1;
+    if let Ok(dir) = std::fs::read_dir(vault.join(fs_ops::ASSETS_DIR)) {
+        for entry in dir.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_file() {
+                continue;
             }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rel = format!("{}/{}", fs_ops::ASSETS_DIR, name);
+            let Some(p) = crate::sync::parse_conflict_path(&rel) else {
+                continue;
+            };
+            out.push(ConflictCopy {
+                path: rel,
+                kind: "asset".into(),
+                original_path: p.original_path,
+                stamp: p.stamp,
+                attempt: p.attempt,
+                mtime_ms: crate::sync::meta_mtime_ms(&entry.path()),
+            });
         }
     }
-    Ok(count)
+    out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms).then_with(|| a.path.cmp(&b.path)));
+    Ok(out)
+}
+
+/// 冲突副本数量（前端轮询用，只取长度，避免整表序列化）
+#[tauri::command]
+pub fn sync_conflict_count(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<u32> {
+    Ok(collect_conflict_copies(state.inner())?.len() as u32)
+}
+
+/// 冲突副本列表（新→旧），供同步面板展开查看/打开
+#[tauri::command]
+pub fn sync_conflicts(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<Vec<ConflictCopy>> {
+    collect_conflict_copies(state.inner())
 }
 
 /// 启动同步服务器（幂等；Android 端在 vault 打开后自动调用，桌面端可手动开）
@@ -1403,6 +1459,53 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 冲突列表只认严格命名的副本：普通文件名里的「冲突」不算，
+    /// 笔记与 assets 附件都要能还原出原路径/时间戳。
+    #[test]
+    fn conflict_list_strictly_matches_generated_names() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("工作")).unwrap();
+        std::fs::create_dir_all(root.join(fs_ops::ASSETS_DIR)).unwrap();
+        std::fs::write(root.join("工作/读书笔记-冲突0917-0830.md"), b"loser").unwrap();
+        std::fs::write(root.join("工作/读书笔记-冲突0917-0830-2.md"), b"loser2").unwrap();
+        std::fs::write(root.join("工作/普通-冲突.md"), b"not a copy").unwrap();
+        std::fs::write(
+            root.join(fs_ops::ASSETS_DIR).join("示意图-冲突0917-0831.png"),
+            b"png",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(fs_ops::ASSETS_DIR).join("说明含冲突.png"),
+            b"png",
+        )
+        .unwrap();
+
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, root).unwrap();
+        let list = collect_conflict_copies(&app).unwrap();
+        assert_eq!(list.len(), 3, "只应认出 3 个严格副本: {list:?}");
+
+        let note = list
+            .iter()
+            .find(|c| c.path == "工作/读书笔记-冲突0917-0830-2.md")
+            .expect("需要 attempt=2 的笔记副本");
+        assert_eq!(note.kind, "note");
+        assert_eq!(note.original_path, "工作/读书笔记.md");
+        assert_eq!(note.stamp, "0917-0830");
+        assert_eq!(note.attempt, 2);
+        assert!(note.mtime_ms > 0);
+
+        let asset = list
+            .iter()
+            .find(|c| c.path == format!("{}/示意图-冲突0917-0831.png", fs_ops::ASSETS_DIR))
+            .expect("需要 attachment 副本");
+        assert_eq!(asset.kind, "asset");
+        assert_eq!(asset.original_path, format!("{}/示意图.png", fs_ops::ASSETS_DIR));
+        assert!(asset.mtime_ms > 0);
+    }
 
     #[test]
     fn pairing_code_is_8_digits_and_varies() {

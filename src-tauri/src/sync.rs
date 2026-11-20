@@ -354,6 +354,81 @@ pub fn conflict_name(rel: &str, now_ms: i64, attempt: u32) -> String {
     }
 }
 
+/// 冲突副本路径的解析结果（UI 列表/精确计数用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictCopyPath {
+    /// 原始路径（相对 vault，含目录）
+    pub original_path: String,
+    /// `MMDD-HHMM`（UTC，与 `conflict_name` 同口径）
+    pub stamp: String,
+    /// 0 = 同分钟首个；N = 第 N 个（`-N` 后缀）
+    pub attempt: u32,
+}
+
+/// 严格解析 `<stem>-冲突<MMDD>-<HHMM>[-N]<ext>`。
+///
+/// 与 `LIKE '%冲突%'` 相比，时间字段必须合法（月 01-12、日 01-31、时 00-23、
+/// 分 00-59），普通文件名里的「冲突」不会误判。局限：用户手写一个恰好形如
+/// `-冲突0917-0830` 的名字仍会被当成副本（无法与真实副本区分）。
+/// 从右往左找标记，原文件名本身可以含「-冲突」。
+pub fn parse_conflict_path(rel: &str) -> Option<ConflictCopyPath> {
+    let (dir, name) = match rel.rfind('/') {
+        Some(i) => (&rel[..i], &rel[i + 1..]),
+        None => ("", rel),
+    };
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let mut search_end = stem.len();
+    while let Some(pos) = stem[..search_end].rfind("-冲突") {
+        let rest = &stem[pos + "-冲突".len()..];
+        if let Some((stamp, attempt)) = parse_conflict_stamp(rest) {
+            let original_stem = &stem[..pos];
+            if !original_stem.is_empty() {
+                let original_name = format!("{original_stem}{ext}");
+                let original_path = if dir.is_empty() {
+                    original_name
+                } else {
+                    format!("{dir}/{original_name}")
+                };
+                return Some(ConflictCopyPath { original_path, stamp, attempt });
+            }
+        }
+        search_end = pos;
+    }
+    None
+}
+
+/// 解析 `MMDD-HHMM[-N]`（紧跟 `-冲突` 之后的部分）。
+fn parse_conflict_stamp(rest: &str) -> Option<(String, u32)> {
+    // 固定 9 字节 `MMDD-HHMM`，再跟可选的 `-N`
+    if rest.len() < 9 || !rest.is_char_boundary(9) {
+        return None;
+    }
+    let (stamp, tail) = rest.split_at(9);
+    let (mmdd, hhmm) = stamp.split_once('-')?;
+    if mmdd.len() != 4 || hhmm.len() != 4 {
+        return None;
+    }
+    if !mmdd.bytes().chain(hhmm.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mm: u32 = mmdd[0..2].parse().ok()?;
+    let dd: u32 = mmdd[2..4].parse().ok()?;
+    let hh: u32 = hhmm[0..2].parse().ok()?;
+    let mi: u32 = hhmm[2..4].parse().ok()?;
+    if !(1..=12).contains(&mm) || !(1..=31).contains(&dd) || hh > 23 || mi > 59 {
+        return None;
+    }
+    let attempt = match tail.strip_prefix('-') {
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => n.parse().ok()?,
+        None if tail.is_empty() => 0,
+        _ => return None,
+    };
+    Some((stamp.to_string(), attempt))
+}
+
 /// 天数（自 1970-01-01）→ (月, 日)，闰年规则完整
 fn month_day(days: i64) -> (i64, i64) {
     // 400 年 = 146097 天，循环起点 1970-01-01
@@ -574,6 +649,49 @@ mod tests {
         // 2100-02-28（2100 非闰年）：4107456000s
         let ms2 = 4_107_456_000_000i64; // 2100-02-28 00:00 UTC
         assert_eq!(conflict_name("c.md", ms2, 0), "c-冲突0228-0000.md");
+    }
+
+    #[test]
+    fn parse_conflict_path_roundtrip() {
+        // 2026-09-17 08:30:00 UTC = 1789633800s
+        let ms = 1_789_633_800_000i64;
+        for attempt in [0u32, 2, 17] {
+            let rel = conflict_name("工作/读书笔记.md", ms, attempt);
+            let p = parse_conflict_path(&rel).expect("生成的副本名必须能解析回来");
+            assert_eq!(p.original_path, "工作/读书笔记.md");
+            assert_eq!(p.stamp, "0917-0830");
+            assert_eq!(p.attempt, attempt);
+        }
+        // 无扩展名 + 根目录
+        let rel = conflict_name("图片", ms, 0);
+        let p = parse_conflict_path(&rel).unwrap();
+        assert_eq!((p.original_path.as_str(), p.attempt), ("图片", 0));
+        // 原名本身含「-冲突」：从右往左找标记
+        let p = parse_conflict_path("a-冲突b-冲突0917-0830.md").unwrap();
+        assert_eq!(p.original_path, "a-冲突b.md");
+        // 多级目录
+        let p = parse_conflict_path("笔记本/子目录/x-冲突0917-0830-2.md").unwrap();
+        assert_eq!(p.original_path, "笔记本/子目录/x.md");
+        assert_eq!(p.attempt, 2);
+    }
+
+    #[test]
+    fn parse_conflict_path_rejects_non_copies() {
+        for rel in [
+            "冲突.md",                     // 普通文件名
+            "笔记-冲突1317-0830.md",       // 月 13
+            "笔记-冲突0932-0830.md",       // 日 32
+            "笔记-冲突0917-2430.md",       // 时 24
+            "笔记-冲突0917-0860.md",       // 分 60
+            "笔记-冲突09170830.md",        // 缺分隔
+            "笔记-冲突0917-0830-2-3.md",   // 多余后缀
+            "笔记-冲突0917-0830foo.md",    // 时间后有多余字符
+            "笔记-冲突0917-0830-.md",      // 空 attempt
+            "-冲突0917-0830.md",           // 空 stem
+            "目录-冲突0917/a.md",          // 标记在目录里
+        ] {
+            assert!(parse_conflict_path(rel).is_none(), "{rel} 不应判为副本");
+        }
     }
 
     #[test]
