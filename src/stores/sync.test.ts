@@ -71,10 +71,30 @@ beforeEach(() => {
   setVaultState({});
   m.syncNow.mockResolvedValue(REPORT);
   m.readNote.mockImplementation((p: string) => Promise.resolve({ content: `内容${p}`, title: p }));
-  useSyncStore.setState({ syncing: false, lastReport: null, error: null });
+  useSyncStore.setState({ syncing: false, lastReport: null, blocked: {}, error: null });
 });
 
 describe("syncNow 与 vault store 衔接", () => {
+  it("熔断报告 → 记录 blocked（不弹错误、也不刷新 lastReport 为成功）", async () => {
+    const blocked = {
+      localMissing: 4,
+      serverMissing: 0,
+      localTotal: 1,
+      serverTotal: 5,
+      priorTotal: 5,
+      localPaths: ["a.md", "b.md", "c.md", "d.md"],
+      serverPaths: [],
+      threshold: 3,
+    };
+    m.syncNow.mockResolvedValue({ ...REPORT, blocked });
+
+    await useSyncStore.getState().syncNow("s1");
+
+    expect(useSyncStore.getState().blocked.s1).toEqual(blocked);
+    expect(useSyncStore.getState().error).toBeNull();
+    expect(useSyncStore.getState().lastReport?.blocked).toEqual(blocked);
+  });
+
   it("同步后刷新树/元数据，并拉取更新当前笔记", async () => {
     setVaultState({ activePath: "a.md", content: "旧" });
     m.readNote.mockResolvedValue({ content: "拉取的新版", title: "a.md" });

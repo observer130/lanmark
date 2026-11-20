@@ -111,6 +111,7 @@ function reset() {
     probeStates: {},
     syncing: false,
     lastReport: null,
+    blocked: {},
     error: null,
   });
 }
@@ -139,6 +140,27 @@ describe("自动同步循环状态机", () => {
     useSyncStore.getState().startAutoLoop();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(m.probe).not.toHaveBeenCalled();
+    expect(m.syncNow).not.toHaveBeenCalled();
+  });
+
+  it("熔断待确认 → 自动回合暂停（探测照常，避免反复触发）", async () => {
+    useSyncStore.setState({
+      blocked: {
+        s1: {
+          localMissing: 4,
+          serverMissing: 0,
+          localTotal: 0,
+          serverTotal: 0,
+          priorTotal: 4,
+          localPaths: [],
+          serverPaths: [],
+          threshold: 3,
+        },
+      },
+    });
+    useSyncStore.getState().startAutoLoop();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(m.probe).toHaveBeenCalled();
     expect(m.syncNow).not.toHaveBeenCalled();
   });
 
