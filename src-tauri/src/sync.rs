@@ -361,7 +361,9 @@ pub fn asset_walk(vault: &Path) -> Result<Vec<FileMeta>, ManifestError> {
     let assets = vault.join(fs_ops::ASSETS_DIR);
     // 不能用 `!assets.is_dir()` 提前返回：is_dir() 对 EACCES 也返回 false，
     // 会把「附件目录不可读」静默当成「没有附件」。只把 NotFound 当空目录。
-    match std::fs::metadata(&assets) {
+    // 用 symlink_metadata 只判断条目本身是否存在：悬空链接/普通文件应让
+    // 后面的 read_dir 报错（503），而不是被当成「没有附件」。
+    match std::fs::symlink_metadata(&assets) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
         Err(e) => return Err(ManifestError::new(&assets, &e)),
