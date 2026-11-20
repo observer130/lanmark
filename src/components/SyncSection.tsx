@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Search,
   Server,
+  ShieldAlert,
   Smartphone,
   Trash2,
   X,
@@ -317,10 +318,14 @@ function ClientPanel() {
     servers,
     syncing,
     lastReport,
+    blocked,
     probeStates,
     pair,
     removeServer,
     syncNow,
+    acceptLocalDeletions,
+    acceptServerDeletions,
+    restoreServerVersions,
     scanned,
     scanning,
     scanTruncated,
@@ -363,6 +368,7 @@ function ClientPanel() {
       {/* 已配对服务器（在线状态 + 最近同步时间；name 即手机代号） */}
       {servers.map((s) => {
         const online = probeStates[s.id]?.online ?? null;
+        const b = blocked[s.id];
         return (
         <div
           key={s.id}
@@ -407,12 +413,93 @@ function ClientPanel() {
             {syncing ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             {syncing ? "同步中…" : "立即同步"}
           </button>
+
+          {b && (
+            <div className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50/70 px-2.5 py-2 text-[11px] text-amber-900">
+              <div className="flex items-start gap-1.5">
+                <ShieldAlert size={13} className="mt-0.5 shrink-0 text-amber-600" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">同步已暂停：清单骤减</div>
+                  <div className="mt-0.5 text-amber-800/80">
+                    {b.localMissing > 0 && <>本机有 {b.localMissing} 个文件消失</>}
+                    {b.localMissing > 0 && b.serverMissing > 0 && "；"}
+                    {b.serverMissing > 0 && <>手机上有 {b.serverMissing} 个文件消失</>}
+                    （上次同步共 {b.priorTotal} 个）。确认前不会删除或覆盖任何内容。
+                  </div>
+                </div>
+              </div>
+
+              {b.localMissing > 0 && (
+                <div className="mt-1.5 rounded bg-white/50 px-1.5 py-1">
+                  <div className="text-amber-800/70">本机缺失</div>
+                  {b.localPaths.slice(0, 4).map((p) => (
+                    <div key={p} className="truncate font-mono text-[10px] text-amber-900/70">
+                      {p}
+                    </div>
+                  ))}
+                  {b.localMissing > 4 && (
+                    <div className="text-[10px] text-amber-800/60">
+                      等 {b.localMissing} 个…
+                    </div>
+                  )}
+                </div>
+              )}
+              {b.serverMissing > 0 && (
+                <div className="mt-1.5 rounded bg-white/50 px-1.5 py-1">
+                  <div className="text-amber-800/70">手机缺失</div>
+                  {b.serverPaths.slice(0, 4).map((p) => (
+                    <div key={p} className="truncate font-mono text-[10px] text-amber-900/70">
+                      {p}
+                    </div>
+                  ))}
+                  {b.serverMissing > 4 && (
+                    <div className="text-[10px] text-amber-800/60">
+                      等 {b.serverMissing} 个…
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {b.localMissing > 0 && (
+                  <button
+                    disabled={syncing}
+                    title="确认这些文件是我在本机删的；复核后记墓碑并同步删除到手机"
+                    onClick={() => void acceptLocalDeletions(s.id, b.localPaths)}
+                    className="rounded-md border border-amber-400/70 bg-white px-2 py-1 font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    确认本机删除
+                  </button>
+                )}
+                {b.serverMissing > 0 && (
+                  <>
+                    <button
+                      disabled={syncing}
+                      title="手机端确实删了这些文件：本机软删进回收站，不反向删除手机"
+                      onClick={() => void acceptServerDeletions(s.id, b.serverPaths)}
+                      className="rounded-md border border-amber-400/70 bg-white px-2 py-1 font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                    >
+                      接受手机删除
+                    </button>
+                    <button
+                      disabled={syncing}
+                      title="把本机仍在的版本一次性传回手机；不会自动重试"
+                      onClick={() => void restoreServerVersions(s.id, b.serverPaths)}
+                      className="rounded-md border border-line bg-white px-2 py-1 font-medium text-ink-2 hover:bg-canvas disabled:opacity-50"
+                    >
+                      把本机版本传回
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </div>
         );
       })}
 
-      {/* 最近一次同步结果 */}
-      {lastReport && (
+      {/* 最近一次同步结果（熔断回合由上面的卡片表达，不显示全零报告） */}
+      {lastReport && !lastReport.blocked && (
         <div className="rounded-[10px] border border-line bg-canvas px-3 py-2 text-xs text-ink-2">
           <div className="flex flex-wrap gap-x-3 gap-y-0.5">
             <span className="text-emerald-600">拉取 {lastReport.pulled.length}</span>
