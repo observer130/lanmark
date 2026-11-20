@@ -498,8 +498,8 @@ function ClientPanel() {
         );
       })}
 
-      {/* 最近一次同步结果 */}
-      {lastReport && (
+      {/* 最近一次同步结果（熔断回合由上面的卡片表达，不显示全零报告） */}
+      {lastReport && !lastReport.blocked && (
         <div className="rounded-[10px] border border-line bg-canvas px-3 py-2 text-xs text-ink-2">
           <div className="flex flex-wrap gap-x-3 gap-y-0.5">
             <span className="text-emerald-600">拉取 {lastReport.pulled.length}</span>
