@@ -72,6 +72,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
 
 2. **vault 文件是唯一事实源**；`src-tauri/src/db.rs` 的 SQLite 只是可重建索引。任何「数据」改动先问文件侧怎么表达。
    同步方向固定：手机 = axum 服务器（`0.0.0.0:4180` 起、最多顺延 60 个端口），桌面 = 客户端；客户端先探已知端口，未命中再回退扫 `4180..4189`（`lan_scan.rs` 的 `SCAN_PORT_SPAN=10`，**不是**服务端那 60 个端口——手机若落到 4190+ 且 mDNS 被网络屏蔽，只能手填 URL 配对）；文件级 sha256 版本对比，冲突按 **mtime LWW**（较新者留原路径、较旧者存可见冲突副本），删除走 tombstone。**任何裁决都不丢弃内容**：删除先进回收站，冲突输家必留副本。
+   清单读取失败必须 fail-closed：单篇读失败整轮报错（`ManifestError`），不能静默跳过；`/manifest` 对权限/遍历错误回 503 `storage_unavailable`。**骤缩熔断**：无墓碑解释的缺失超过 3 个，或上一回合清单全灭（含 1–3 个文件的小库）→ 本回合不删不推不存基线，只返回 `SyncReport.blocked`；自动回合暂停，等用户在侧栏确认（本机删除 / 接受手机删除 / 传回本机版本）后才继续。阈值与语义以 `sync_client.rs` 的 `SHRINK_FUSE_ABS`、`shrink_blocked` 为准。
 
 3. **设置存放分层**：设备偏好（配色/字体/字号/行距/回收站策略）进 `AppConfig`（`app_config_dir/config.json`），换库不变；跟库走的视图状态（折叠目录等）进 localStorage；笔记内容进文件。**不要**把设置放 `.lanmark/settings.json`（会随库漂移、卷进同步清单）。唯一例外是外观 key 额外写一份 localStorage 作首帧缓存（`index.html` 内联脚本先落 `data-scheme`/`data-font`，防深色闪白）；真源仍是 AppConfig，key 名必须与 `src/lib/settings.ts` 常量一致。
 
