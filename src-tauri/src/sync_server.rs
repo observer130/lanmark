@@ -614,7 +614,21 @@ async fn manifest(
     let list = tokio::task::spawn_blocking(move || local_manifest(&app))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
-        .map_err(|e| (StatusCode::CONFLICT, e))?;
+        .map_err(|e| {
+            // 存储不可读 → 503：客户端会重试，绝不会把空清单当成“全库已删”。
+            // 单个文件在 walk 后消失 → 409：本回合失败，下回合重扫即可。
+            let status = if e.storage_unavailable() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::CONFLICT
+            };
+            let prefix = if e.storage_unavailable() {
+                "storage_unavailable"
+            } else {
+                "manifest_unavailable"
+            };
+            (status, format!("{prefix}: {e}"))
+        })?;
     Ok(Json(list))
 }
 

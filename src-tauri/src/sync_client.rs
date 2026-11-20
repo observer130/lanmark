@@ -2,7 +2,7 @@
 //! 手机是服务器（App 内嵌 axum），桌面是客户端；回合幂等可重放：
 //! manifest 四分类（仅服务器→拉 / 仅本地→推 / hash 同→跳 / hash 异→冲突双份）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs_ops;
 use crate::sync::{
-    b64_decode, local_manifest, write_conflict_copy, FileMeta, PushFile, SyncReport,
+    b64_decode, local_manifest, write_conflict_copy, BlockedShrink, FileMeta, PushFile, SyncReport,
 };
 use crate::vault::AppState;
 
@@ -492,6 +492,50 @@ fn save_sync_state(vault: &Path, id: &str, state: &HashMap<String, String>) -> R
 
 // ---------- 同步回合 ----------
 
+/// 清单骤缩的绝对阈值：无墓碑解释的缺失超过它 → 熔断。
+/// 不照抄 Syncthing 的 20%：1000 文件的库允许静默少 200 个，方向不对。
+pub(crate) const SHRINK_FUSE_ABS: usize = 3;
+
+/// 回合启动结果：Ready 才允许跑阶段；Blocked 表示本回合什么都没做。
+pub(crate) enum RoundStart {
+    Ready(Box<RoundCore>),
+    Blocked(BlockedShrink),
+}
+
+/// 缺失是否越过熔断线：绝对数 > 3，或上一份清单全灭（含 1–3 个文件的小库）。
+pub(crate) fn shrink_blocked(missing: usize, prior_total: usize) -> bool {
+    missing > SHRINK_FUSE_ABS || (prior_total > 0 && missing == prior_total)
+}
+
+/// 上回合基线里有、本回合清单里没有、且没有被任何墓碑解释的路径。
+fn unexplained_missing(
+    base_prev: &HashMap<String, String>,
+    current: &HashMap<String, FileMeta>,
+    tombstones: &HashSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = base_prev
+        .keys()
+        .filter(|p| !current.contains_key(*p) && !tombstones.contains(*p))
+        .cloned()
+        .collect();
+    out.sort();
+    out
+}
+
+/// 对缺失候选做一次磁盘复核（不跟随符号链接）：只有确实 NotFound 才算删除。
+/// 路径变成目录/链接，或元数据读取 EACCES，都不当作删除（后者直接失败关闭）。
+fn confirmed_local_missing(vault: &Path, candidates: Vec<String>) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for path in candidates {
+        match std::fs::symlink_metadata(vault.join(&path)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => out.push(path),
+            Err(e) => return Err(format!("复核本地文件失败 {path}: {e}")),
+        }
+    }
+    Ok(out)
+}
+
 /// 同步回合核心（分阶段；`sync_round` = 各阶段的默认编排）。
 /// 分阶段两个目的：1) 测试可在阶段之间注入服务器侧改动，确定性构造
 /// 「manifest 已过期」的竞态（单体回合只能在 HTTP 层测竞态）；
@@ -524,8 +568,8 @@ pub(crate) struct RoundCore {
 }
 
 impl RoundCore {
-    /// 步骤 0–2：本地 reindex → 双侧清单 + 基线 → 四分类
-    fn new(state: &Arc<AppState>, profile: &ServerProfile) -> Result<Self, String> {
+    /// 步骤 0–2：本地 reindex → 双侧清单 + 基线 → 骤缩熔断 → 四分类
+    fn begin(state: &Arc<AppState>, profile: &ServerProfile) -> Result<RoundStart, String> {
         let url = normalize_url(&profile.url)?;
         let vault = state
             .vault
@@ -581,7 +625,7 @@ impl RoundCore {
             keep
         };
 
-        let local = local_manifest(state)?;
+        let local = local_manifest(state).map_err(|e| e.to_string())?;
         let server_map: HashMap<String, FileMeta> =
             server_manifest.iter().cloned().map(|m| (m.path.clone(), m)).collect();
         let local_map: HashMap<String, FileMeta> =
@@ -591,39 +635,66 @@ impl RoundCore {
         // 外部删除也算删除（评审决策）：上回合本地还有、现在磁盘上确已不存在 → 补记墓碑。
         // 只认「路径真的不存在」——读失败（被别的进程占用、权限）不能被误判成删除，
         // 否则一次临时 IO 错误就会把整篇笔记从所有设备上删掉。
-        let now_ms = fs_ops::now_ms();
-        let mut external_deleted: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut pending_tombstones: Vec<(String, String)> = Vec::new();
-        for (path, hash) in &base_prev {
-            if local_map.contains_key(path) || vault.join(path).exists() {
-                continue;
-            }
-            // 已经记过墓碑（App 内删除 / 上回合传播）→ 不重复记，也不刷新删除时刻
-            if local_tombstones.iter().any(|t| &t.path == path) {
-                continue;
-            }
-            pending_tombstones.push((path.clone(), hash.clone()));
-            external_deleted.insert(path.clone());
+        //
+        // 先拿“上回合基线 - 本回合清单 - 墓碑”当缺失候选，再做一次 symlink_metadata
+        // 复核：路径变成目录/链接（仍存在）不算删除，EACCES 直接失败关闭。
+        let tombstoned: HashSet<String> = local_tombstones
+            .iter()
+            .chain(server_tombstones.iter())
+            .map(|t| t.path.clone())
+            .collect();
+        let local_missing = confirmed_local_missing(
+            &vault,
+            unexplained_missing(&base_prev, &local_map, &tombstoned),
+        )?;
+        let server_missing = unexplained_missing(&base_prev, &server_map, &tombstoned);
+
+        // 清单骤缩熔断：在任何墓碑/拉取/推送/删除之前判定。
+        // 本地缺失和服务器缺失分开数：一边的缺失不能被另一边的正常变化掩盖。
+        if shrink_blocked(local_missing.len(), base_prev.len())
+            || shrink_blocked(server_missing.len(), base_prev.len())
+        {
+            let blocked = BlockedShrink {
+                local_missing: local_missing.len(),
+                server_missing: server_missing.len(),
+                local_total: local_map.len(),
+                server_total: server_map.len(),
+                prior_total: base_prev.len(),
+                local_paths: local_missing.clone(),
+                server_paths: server_missing.clone(),
+                threshold: SHRINK_FUSE_ABS,
+            };
+            log::warn!(
+                "清单骤缩熔断（本回合未做任何同步）：本地缺失 {}/{}，服务器缺失 {}/{}，阈值 {}",
+                blocked.local_missing,
+                blocked.prior_total,
+                blocked.server_missing,
+                blocked.prior_total,
+                blocked.threshold
+            );
+            return Ok(RoundStart::Blocked(blocked));
         }
-        if !pending_tombstones.is_empty() {
-            match crate::sync::record_tombstones(&vault, &pending_tombstones, now_ms) {
-                Ok(()) => {
-                    for (path, hash) in &pending_tombstones {
-                        local_tombstones.push(crate::sync::Tombstone {
-                            path: path.clone(),
-                            hash: hash.clone(),
-                            mtime_ms: now_ms,
-                            deleted_at: now_ms,
-                        });
-                    }
-                }
-                // 记账失败就本轮不当作删除（宁可下回合再来，也不能删了却传不出去）
-                Err(e) => {
-                    log::warn!("补记外部删除墓碑失败（{} 条，本回合按未删除处理）: {e}", pending_tombstones.len());
-                    external_deleted.clear();
-                }
+
+        let now_ms = fs_ops::now_ms();
+        let mut external_deleted: HashSet<String> = HashSet::new();
+        if !local_missing.is_empty() {
+            let pending_tombstones: Vec<(String, String)> = local_missing
+                .iter()
+                .map(|path| (path.clone(), base_prev.get(path).cloned().unwrap_or_default()))
+                .collect();
+            // 记账失败必须整轮失败：若继续分类，server-only 路径会被快进拉取覆盖，
+            // 而这次“删除”又没传出去，等于用旧版本盖掉用户刚删掉的文件。
+            crate::sync::record_tombstones(&vault, &pending_tombstones, now_ms)
+                .map_err(|e| format!("补记外部删除墓碑失败（{} 条）: {e}", pending_tombstones.len()))?;
+            for (path, hash) in &pending_tombstones {
+                local_tombstones.push(crate::sync::Tombstone {
+                    path: path.clone(),
+                    hash: hash.clone(),
+                    mtime_ms: now_ms,
+                    deleted_at: now_ms,
+                });
             }
+            external_deleted.extend(local_missing.iter().cloned());
         }
 
         let mut report = SyncReport::default();
@@ -668,7 +739,7 @@ impl RoundCore {
             .map(|(k, v)| (k.clone(), v.hash.clone()))
             .collect();
 
-        Ok(RoundCore {
+        Ok(RoundStart::Ready(Box::new(RoundCore {
             state: state.clone(),
             profile: profile.clone(),
             vault,
@@ -684,7 +755,7 @@ impl RoundCore {
             conflicts,
             baseline,
             report,
-        })
+        })))
     }
 
     /// 步骤 3：服务器 tombstone 处理
@@ -1141,8 +1212,19 @@ fn split_push_batches(
 
 /// 一个完整同步回合（+ serverHash 基线修复
 /// + 仲裁降级纠正拉取 + tombstone 删除传播）。阻塞；调用方负责放到 blocking 线程。
+///
+/// 骤缩熔断时返回 `SyncReport { blocked: Some(..), .. }`，其余字段为空——
+/// 不返回 Err，避免前端的自动重试把安全状态当故障反复重放。
 pub fn sync_round(state: &Arc<AppState>, profile: &ServerProfile) -> Result<SyncReport, String> {
-    let mut core = RoundCore::new(state, profile)?;
+    let mut core = match RoundCore::begin(state, profile)? {
+        RoundStart::Ready(core) => *core,
+        RoundStart::Blocked(blocked) => {
+            return Ok(SyncReport {
+                blocked: Some(blocked),
+                ..SyncReport::default()
+            });
+        }
+    };
     core.server_tombstones_phase()?;
     core.local_tombstones_phase()?;
     core.resolve_conflicts()?;
@@ -1600,13 +1682,250 @@ pub async fn sync_now(
     let report = tauri::async_runtime::spawn_blocking(move || sync_round(&state, &profile))
         .await
         .map_err(|e| format!("同步任务失败: {e}"))??;
-    // 回合成功 → 记最近成功时间（profile JSON 持久化，重启不丢）
-    let mut servers = load_servers(&app);
-    if let Some(s) = servers.iter_mut().find(|s| s.id == id) {
-        s.last_success_at = Some(fs_ops::now_ms());
-        let _ = save_servers(&app, &servers);
+    // 回合成功 → 记最近成功时间（profile JSON 持久化，重启不丢）。
+    // 骤缩熔断不算成功：它不是一次同步，不能刷新“上次同步”让 UI 误以为已同步。
+    if report.blocked.is_none() {
+        let mut servers = load_servers(&app);
+        if let Some(s) = servers.iter_mut().find(|s| s.id == id) {
+            s.last_success_at = Some(fs_ops::now_ms());
+            let _ = save_servers(&app, &servers);
+        }
     }
     Ok(report)
+}
+
+// ---------- 骤缩熔断后的确认动作 ----------
+
+fn vault_owned(state: &Arc<AppState>) -> Result<PathBuf, String> {
+    state
+        .vault
+        .lock()
+        .map_err(|_| "vault 锁中毒".to_string())?
+        .clone()
+        .ok_or_else(|| "尚未打开 vault".to_string())
+}
+
+fn dedupe_paths(paths: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|p| !p.is_empty() && seen.insert(p.clone()))
+        .collect()
+}
+
+/// 确认「本机这些文件确实是我删的」：只接受上回合基线里存在的路径，
+/// 复核确实 NotFound 后补记墓碑。不删除任何东西，也不写基线。
+fn accept_local_deletions_inner(
+    state: &Arc<AppState>,
+    id: &str,
+    paths: Vec<String>,
+) -> Result<usize, String> {
+    let vault = vault_owned(state)?;
+    let base_prev = load_sync_state(&vault, id);
+    let now_ms = fs_ops::now_ms();
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for path in dedupe_paths(paths) {
+        // 宁可少接受，也不接受 UI 传来的任意路径：只认基线里出现过的
+        let Some(hash) = base_prev.get(&path) else {
+            continue;
+        };
+        match std::fs::symlink_metadata(vault.join(&path)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                entries.push((path, hash.clone()));
+            }
+            Err(e) => return Err(format!("复核本地文件失败 {path}: {e}")),
+        }
+    }
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    crate::sync::record_tombstones(&vault, &entries, now_ms)
+        .map_err(|e| format!("记录删除墓碑失败: {e}"))?;
+    Ok(entries.len())
+}
+
+/// 确认「接受手机上的删除」：只接受上回合基线里存在、服务器当前清单确已没有的路径，
+/// 本地有则软删（进回收站），再补记墓碑。**不调用 /delete**——手机已经删了。
+fn accept_server_deletions_inner(
+    state: &Arc<AppState>,
+    profile: &ServerProfile,
+    paths: Vec<String>,
+) -> Result<usize, String> {
+    let vault = vault_owned(state)?;
+    let base_prev = load_sync_state(&vault, &profile.id);
+    let url = normalize_url(&profile.url)?;
+    let c = client()?;
+    let manifest = fetch_manifest(&c, &url, &profile.token)?;
+    let server_map: HashMap<String, FileMeta> =
+        manifest.into_iter().map(|m| (m.path.clone(), m)).collect();
+
+    let now_ms = fs_ops::now_ms();
+    let mut accepted: Vec<(String, String)> = Vec::new();
+    for path in dedupe_paths(paths) {
+        let Some(hash) = base_prev.get(&path) else {
+            continue;
+        };
+        if server_map.contains_key(&path) {
+            continue;
+        }
+        match std::fs::symlink_metadata(vault.join(&path)) {
+            Ok(_) => {
+                let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+                let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+                fs_ops::delete_entry(&vault, &path, conn)
+                    .map_err(|e| format!("{path}: 本地软删失败: {e}"))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("复核本地文件失败 {path}: {e}")),
+        }
+        accepted.push((path, hash.clone()));
+    }
+    if accepted.is_empty() {
+        return Ok(0);
+    }
+    crate::sync::record_tombstones(&vault, &accepted, now_ms)
+        .map_err(|e| format!("记录删除墓碑失败: {e}"))?;
+    Ok(accepted.len())
+}
+
+/// 从本地读一个待恢复文件（失败必须报错，不能像 read_push_file 那样静默 None）。
+fn local_push_file(vault: &Path, path: &str) -> Result<PushFile, String> {
+    let abs = vault.join(path);
+    let bytes = std::fs::read(&abs).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+    let meta = std::fs::metadata(&abs).map_err(|e| format!("读取 {path} 元数据失败: {e}"))?;
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(PushFile {
+        path: path.to_string(),
+        kind: if path.starts_with("assets/") { "asset" } else { "note" }.to_string(),
+        content_base64: crate::sync::b64_encode(&bytes),
+        hash: fs_ops::content_hash(&bytes),
+        mtime_ms,
+        base_hash: String::new(),
+    })
+}
+
+/// 确认「把本机版本传回手机」：只处理上回合基线有、服务器当前清单没有、本地仍在的路径。
+/// 显式覆盖（base_hash 留空）并同步更新基线，避免下回合把这次恢复误判成双方都改。
+fn restore_server_versions_inner(
+    state: &Arc<AppState>,
+    profile: &ServerProfile,
+    paths: Vec<String>,
+) -> Result<usize, String> {
+    let vault = vault_owned(state)?;
+    let base_prev = load_sync_state(&vault, &profile.id);
+    let url = normalize_url(&profile.url)?;
+    let c = client()?;
+    let manifest = fetch_manifest(&c, &url, &profile.token)?;
+    let server_map: HashMap<String, FileMeta> =
+        manifest.into_iter().map(|m| (m.path.clone(), m)).collect();
+
+    let mut files = Vec::new();
+    for path in dedupe_paths(paths) {
+        if !base_prev.contains_key(&path) || server_map.contains_key(&path) {
+            continue;
+        }
+        match std::fs::symlink_metadata(vault.join(&path)) {
+            Ok(_) => files.push(local_push_file(&vault, &path)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("复核本地文件失败 {path}: {e}")),
+        }
+    }
+    if files.is_empty() {
+        return Ok(0);
+    }
+
+    let mut pushed = 0usize;
+    let mut baseline = base_prev;
+    let mut first_err: Option<String> = None;
+    for batch in files.chunks(8) {
+        let results = match push_batch(&c, &url, &profile.token, batch) {
+            Ok(r) => r,
+            Err(e) => {
+                first_err.get_or_insert(e);
+                break;
+            }
+        };
+        for f in batch {
+            let Some(r) = results.iter().find(|r| r.path == f.path) else {
+                first_err.get_or_insert(format!("{}: 服务器未返回结果", f.path));
+                continue;
+            };
+            if !r.ok {
+                first_err.get_or_insert(format!(
+                    "{}: {}",
+                    f.path,
+                    r.error.clone().unwrap_or_else(|| "推送失败".into())
+                ));
+                continue;
+            }
+            // 服务器操作后的最终 hash（旧服务器无该字段 → 只能信所推 hash）
+            baseline.insert(f.path.clone(), r.server_hash.clone().unwrap_or_else(|| f.hash.clone()));
+            pushed += 1;
+        }
+    }
+    if pushed > 0 {
+        save_sync_state(&vault, &profile.id, &baseline)?;
+    }
+    match first_err {
+        Some(e) => Err(format!("已恢复 {pushed} 个，其余失败: {e}")),
+        None => Ok(pushed),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_accept_local_deletions(
+    state: tauri::State<'_, Arc<AppState>>,
+    id: String,
+    paths: Vec<String>,
+) -> CmdResult<usize> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || accept_local_deletions_inner(&state, &id, paths))
+        .await
+        .map_err(|e| format!("确认任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn sync_accept_server_deletions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    id: String,
+    paths: Vec<String>,
+) -> CmdResult<usize> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile = load_servers(&app)
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| format!("未找到服务器: {id}"))?;
+        accept_server_deletions_inner(&state, &profile, paths)
+    })
+    .await
+    .map_err(|e| format!("确认任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn sync_restore_server_versions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    id: String,
+    paths: Vec<String>,
+) -> CmdResult<usize> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile = load_servers(&app)
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| format!("未找到服务器: {id}"))?;
+        restore_server_versions_inner(&state, &profile, paths)
+    })
+    .await
+    .map_err(|e| format!("恢复任务失败: {e}"))?
 }
 
 /// `/api/v1/info` 的响应体（多带 `deviceId`）
@@ -2359,7 +2678,10 @@ mod tests {
         // A 离线改「旧版」（mtime -1h），回合开始：此刻服务器还是「基础版」
         note_write_op(&deskA, &p.path, "A 旧版").unwrap();
         set_mtime(&deskA, &p.path, fs_ops::now_ms() - 3_600_000);
-        let mut core = RoundCore::new(&deskA, &profile_a).unwrap();
+        let mut core = match RoundCore::begin(&deskA, &profile_a).unwrap() {
+            RoundStart::Ready(core) => *core,
+            RoundStart::Blocked(_) => panic!("正常回合不应触发骤缩熔断"),
+        };
         // A 的回合分类：只有本地改 → 推送（base = 基础版 hash，即将过期）
 
         // 注入竞态：B 在 A 的 manifest 之后、推送之前完成整回合（新版 mtime +1h）
@@ -3773,13 +4095,19 @@ mod tests {
 
     /// 回归（P2-A5）：在文件管理器里删掉的文件，同步时必须当作「删除」传播，
     /// 而不是被对端按「仅服务器有」拉回来。
+    /// 注意阈值：这里只删 1 个（库里有 4 个），低于骤缩熔断线。
     #[test]
     fn external_delete_propagates_as_delete() {
         let phone_dir = tempfile::TempDir::new().unwrap();
         let phone = Arc::new(AppState::default());
         open_vault_at(&phone, phone_dir.path()).unwrap();
-        let note = note_create_op(&phone, "", "会被外部删掉").unwrap();
-        note_write_op(&phone, &note.path, "正文").unwrap();
+        let mut notes = Vec::new();
+        for i in 0..4 {
+            let note = note_create_op(&phone, "", &format!("会被外部删掉 {i}")).unwrap();
+            note_write_op(&phone, &note.path, "正文").unwrap();
+            notes.push(note);
+        }
+        let note = notes[0].clone();
 
         let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
         let (token, _name) = pair(&base, &code).unwrap();
@@ -3806,6 +4134,7 @@ mod tests {
         // 回合 2：识别为删除 → 记墓碑 + 传播 /delete
         let r2 = sync_round(&state, &profile).unwrap();
         assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+        assert!(r2.blocked.is_none(), "4 个里删 1 个不该触发熔断: {:?}", r2.blocked);
         assert!(
             !phone_dir.path().join(&note.path).exists(),
             "服务器侧也应删掉（进回收站），而不是把文件留着重推回来"
@@ -3819,6 +4148,229 @@ mod tests {
             !load_sync_state(dir.path(), &profile.id).contains_key(&note.path),
             "删除生效后基线应移除该路径"
         );
+        // 其余 3 个不受影响
+        for other in &notes[1..] {
+            assert!(phone_dir.path().join(&other.path).exists(), "其余笔记不得被误删");
+        }
+    }
+
+    #[test]
+    fn shrink_fuse_thresholds() {
+        assert!(!shrink_blocked(0, 100));
+        assert!(!shrink_blocked(3, 100));
+        assert!(shrink_blocked(4, 100), "超过绝对阈值必须熔断");
+        assert!(shrink_blocked(1, 1), "上一份清单全灭必须熔断（小库也一样）");
+        assert!(shrink_blocked(3, 3));
+        assert!(!shrink_blocked(3, 0), "没有基线时不该凭空熔断");
+    }
+
+    #[test]
+    fn unexplained_missing_excludes_present_and_tombstoned() {
+        use crate::sync::FileMeta;
+        let mut base = HashMap::new();
+        for p in ["a.md", "b.md", "c.md"] {
+            base.insert(p.to_string(), "h".to_string());
+        }
+        let mut current = HashMap::new();
+        current.insert(
+            "a.md".to_string(),
+            FileMeta {
+                path: "a.md".into(),
+                kind: "note".into(),
+                hash: "h".into(),
+                mtime_ms: 1,
+                size: 1,
+            },
+        );
+        let tombstones = HashSet::from(["c.md".to_string()]);
+        assert_eq!(
+            unexplained_missing(&base, &current, &tombstones),
+            vec!["b.md".to_string()],
+            "仍存在或被墓碑解释的路径不算缺失"
+        );
+    }
+
+    /// 5 篇笔记全部被外部删除：必须熔断，不写墓碑、不删手机、不存基线。
+    #[test]
+    fn manifest_shrink_blocks_before_any_delete() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let mut notes = Vec::new();
+        for i in 0..5 {
+            let n = note_create_op(&phone, "", &format!("骤缩 {i}")).unwrap();
+            note_write_op(&phone, &n.path, "正文").unwrap();
+            notes.push(n);
+        }
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let (dir, state) = client_vault();
+        let profile = ServerProfile {
+            id: "dev-shrink-block".into(),
+            name: "desk".into(),
+            url: base,
+            token,
+            last_success_at: None,
+            device_id: "shrink-block".into(),
+            port: None,
+        };
+
+        let r1 = sync_round(&state, &profile).unwrap();
+        assert!(r1.errors.is_empty(), "{:?}", r1.errors);
+        for n in &notes {
+            std::fs::remove_file(dir.path().join(&n.path)).unwrap();
+        }
+
+        let r2 = sync_round(&state, &profile).unwrap();
+        let blocked = r2.blocked.expect("应触发骤缩熔断");
+        assert_eq!(blocked.local_missing, 5);
+        assert_eq!(blocked.server_missing, 0);
+        assert_eq!(blocked.prior_total, 5);
+        assert_eq!(blocked.local_paths.len(), 5);
+        assert!(r2.deleted.is_empty(), "熔断回合不得删除任何东西");
+        assert!(r2.pushed.is_empty() && r2.pulled.is_empty());
+
+        for n in &notes {
+            assert!(phone_dir.path().join(&n.path).is_file(), "手机上的文件不得被删");
+        }
+        assert!(
+            !load_tombstones(dir.path()).iter().any(|t| t.path == notes[0].path),
+            "熔断时不得先写墓碑"
+        );
+        let baseline = load_sync_state(dir.path(), &profile.id);
+        assert_eq!(baseline.len(), 5, "熔断时不得保存新基线: {baseline:?}");
+    }
+
+    /// 确认本机删除后，墓碑正常传播到手机。
+    #[test]
+    fn accept_local_deletions_unblocks_and_propagates() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let mut notes = Vec::new();
+        for i in 0..5 {
+            let n = note_create_op(&phone, "", &format!("确认删除 {i}")).unwrap();
+            note_write_op(&phone, &n.path, "正文").unwrap();
+            notes.push(n);
+        }
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let (dir, state) = client_vault();
+        let profile = ServerProfile {
+            id: "dev-accept-local".into(),
+            name: "desk".into(),
+            url: base,
+            token,
+            last_success_at: None,
+            device_id: "accept-local".into(),
+            port: None,
+        };
+        sync_round(&state, &profile).unwrap();
+        for n in &notes {
+            std::fs::remove_file(dir.path().join(&n.path)).unwrap();
+        }
+        let blocked = sync_round(&state, &profile).unwrap().blocked.unwrap();
+
+        let n = accept_local_deletions_inner(&state, &profile.id, blocked.local_paths).unwrap();
+        assert_eq!(n, 5);
+        let r = sync_round(&state, &profile).unwrap();
+        assert!(r.blocked.is_none(), "{:?}", r.blocked);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(r.deleted.len(), 5, "5 条删除应传播到手机");
+        for note in &notes {
+            assert!(!phone_dir.path().join(&note.path).exists(), "手机应软删并进回收站");
+        }
+        assert!(load_tombstones(dir.path()).len() >= 5);
+    }
+
+    /// 手机清单整段消失（无墓碑）：熔断；确认后本地软删且不调 /delete。
+    #[test]
+    fn server_shrink_blocks_then_accept_removes_local() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let mut notes = Vec::new();
+        for i in 0..5 {
+            let n = note_create_op(&phone, "", &format!("服务器骤缩 {i}")).unwrap();
+            note_write_op(&phone, &n.path, "正文").unwrap();
+            notes.push(n);
+        }
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let (dir, state) = client_vault();
+        let profile = ServerProfile {
+            id: "dev-server-shrink".into(),
+            name: "desk".into(),
+            url: base,
+            token,
+            last_success_at: None,
+            device_id: "server-shrink".into(),
+            port: None,
+        };
+        sync_round(&state, &profile).unwrap();
+        // 绕过手机 App 直接删文件：没有服务器墓碑，模拟 FUSE/权限导致的“清单骤缩”
+        for n in &notes {
+            std::fs::remove_file(phone_dir.path().join(&n.path)).unwrap();
+        }
+
+        let r = sync_round(&state, &profile).unwrap();
+        let blocked = r.blocked.expect("服务器清单全灭应熔断");
+        assert_eq!(blocked.server_missing, 5);
+        for n in &notes {
+            assert!(dir.path().join(&n.path).is_file(), "熔断不得删除本地文件");
+        }
+
+        let n = accept_server_deletions_inner(&state, &profile, blocked.server_paths).unwrap();
+        assert_eq!(n, 5);
+        for note in &notes {
+            assert!(!dir.path().join(&note.path).exists(), "确认后本地应软删");
+            assert!(dir.path().join(".lanmark/trash").is_dir(), "软删必须进回收站");
+        }
+        let r2 = sync_round(&state, &profile).unwrap();
+        assert!(r2.blocked.is_none(), "{:?}", r2.blocked);
+        assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+    }
+
+    /// 确认「把本机版本传回」后，手机文件恢复且下回合不再熔断/冲突。
+    #[test]
+    fn restore_server_versions_pushes_back() {
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let mut notes = Vec::new();
+        for i in 0..5 {
+            let n = note_create_op(&phone, "", &format!("恢复 {i}")).unwrap();
+            note_write_op(&phone, &n.path, "本机版本").unwrap();
+            notes.push(n);
+        }
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+        let (_dir, state) = client_vault();
+        let profile = ServerProfile {
+            id: "dev-restore".into(),
+            name: "desk".into(),
+            url: base,
+            token,
+            last_success_at: None,
+            device_id: "restore".into(),
+            port: None,
+        };
+        sync_round(&state, &profile).unwrap();
+        for n in &notes {
+            std::fs::remove_file(phone_dir.path().join(&n.path)).unwrap();
+        }
+        let blocked = sync_round(&state, &profile).unwrap().blocked.unwrap();
+        assert_eq!(blocked.server_missing, 5);
+
+        let n = restore_server_versions_inner(&state, &profile, blocked.server_paths).unwrap();
+        assert_eq!(n, 5);
+        for note in &notes {
+            assert!(phone_dir.path().join(&note.path).is_file(), "手机文件应恢复");
+        }
+        let r = sync_round(&state, &profile).unwrap();
+        assert!(r.blocked.is_none(), "{:?}", r.blocked);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.merges.is_empty(), "恢复后不应再产生冲突副本: {:?}", r.merges);
     }
 
 }

@@ -91,7 +91,7 @@ pub struct MergeEvent {
     pub loser_mtime_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncReport {
     pub pulled: Vec<String>,
@@ -109,6 +109,32 @@ pub struct SyncReport {
     /// 文案一改就把「正常跳过的噪声」变成红色错误提示。
     #[serde(default)]
     pub busy: bool,
+    /// 清单骤缩熔断：本回合未做任何拉取/推送/删除/写基线。
+    /// 这是需要用户确认的正常安全状态，不是 Err（Err 会被自动循环静默重试）。
+    #[serde(default)]
+    pub blocked: Option<BlockedShrink>,
+}
+
+/// 清单骤缩熔断的现场快照（UI 展示 + 确认动作的输入）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedShrink {
+    /// 本地清单里「上回合还有、本回合没有、且无墓碑」的数量
+    pub local_missing: usize,
+    /// 服务器清单里同上
+    pub server_missing: usize,
+    /// 本回合本地清单总数
+    pub local_total: usize,
+    /// 本回合服务器清单总数
+    pub server_total: usize,
+    /// 上回合基线里的路径总数（判定全灭用）
+    pub prior_total: usize,
+    /// 本地缺失路径（全量；UI 只展示前几条）
+    pub local_paths: Vec<String>,
+    /// 服务器缺失路径（全量；UI 只展示前几条）
+    pub server_paths: Vec<String>,
+    /// 触发熔断的绝对阈值（当前为 3）
+    pub threshold: usize,
 }
 
 // ---------- tombstone（删除传播） ----------
@@ -210,33 +236,109 @@ pub fn purge_expired_tombstones(vault: &Path, now_ms: i64) -> std::io::Result<us
 
 // ---------- 清单 ----------
 
+/// 清单构建失败的分类。服务器据此区分「扫描过程中文件刚好消失」（可重试）
+/// 与「存储整体不可读」（503，别让客户端把空清单当成全库删除）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestErrorKind {
+    NotFound,
+    PermissionDenied,
+    Other,
+    /// 目录遍历/元数据读取失败（无法定位到单个文件）
+    Walk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestError {
+    pub path: String,
+    pub kind: ManifestErrorKind,
+    pub detail: String,
+}
+
+impl ManifestError {
+    fn new(path: &Path, err: &std::io::Error) -> Self {
+        let kind = match err.kind() {
+            std::io::ErrorKind::NotFound => ManifestErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied => ManifestErrorKind::PermissionDenied,
+            _ => ManifestErrorKind::Other,
+        };
+        Self { path: path.display().to_string(), kind, detail: err.to_string() }
+    }
+
+    fn walk(err: std::io::Error) -> Self {
+        Self { path: String::new(), kind: ManifestErrorKind::Walk, detail: err.to_string() }
+    }
+
+    /// 存储整体不可用（权限/遍历失败），而不是单个文件在扫描中消失。
+    pub fn storage_unavailable(&self) -> bool {
+        matches!(
+            self.kind,
+            ManifestErrorKind::PermissionDenied | ManifestErrorKind::Walk
+        )
+    }
+}
+
+impl std::fmt::Display for ManifestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.path.is_empty() {
+            write!(f, "清单构建失败: {}", self.detail)
+        } else {
+            write!(f, "清单读取失败 {}: {}", self.path, self.detail)
+        }
+    }
+}
+
+impl std::error::Error for ManifestError {}
+
+/// 读一个同步单元（笔记/附件）的字节 + mtime + size。
+///
+/// 瞬时 IO 错误（文件被别的进程占用、刚被 rename）重试一次；仍失败则让整份
+/// 清单失败。绝不能 `continue`：清单静默变短会被客户端当成「这些文件被删了」，
+/// 进而补墓碑并让其他设备软删。失败关闭最多让本轮同步报错，下一轮还能重来。
+fn read_file_meta(abs: &Path) -> Result<(Vec<u8>, i64, i64), ManifestError> {
+    let mut last: Option<ManifestError> = None;
+    for attempt in 0..2 {
+        match std::fs::read(abs) {
+            Ok(bytes) => match std::fs::metadata(abs) {
+                Ok(m) => {
+                    let mtime_ms = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    return Ok((bytes, mtime_ms, m.len() as i64));
+                }
+                Err(e) => last = Some(ManifestError::new(abs, &e)),
+            },
+            Err(e) => last = Some(ManifestError::new(abs, &e)),
+        }
+        if attempt == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    Err(last.expect("read_file_meta 至少尝试一次"))
+}
+
 /// 本地清单：笔记 walk 磁盘（vault 文件是唯一事实源），附件 walk assets/。
 ///
 /// 不再查 DB：手机端（服务器）常驻期间只在开库 reindex，外部新建/删除/改名
 /// 若以 DB 为准就同步不出去，外部删除还会被桌面「推回来」复活。
-/// 逐文件读磁盘字节算 hash/mtime/size（读失败跳过，与旧实现一致）。
-pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
+/// 逐文件读磁盘字节算 hash/mtime/size；读失败整份清单失败（fail-closed）。
+pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, ManifestError> {
     // 只在取路径时持锁：全库 walk + 逐文件 sha256 在 1e4 文件量级是秒级的，
     // 持着 vault 锁会让 check_token / /pair / /info 一起排队（此前就踩过）。
     // 路径是 clone 出去的快照，切库瞬间最多读到旧库的清单，下回合自然纠正。
-    let vault: PathBuf = with_vault(state, |v| Ok(v.clone()))?;
+    let vault: PathBuf = with_vault(state, |v| Ok(v.clone())).map_err(|e| ManifestError {
+        path: String::new(),
+        kind: ManifestErrorKind::Other,
+        detail: e,
+    })?;
     let mut out = Vec::new();
     {
         let vault = &vault;
-        for path in fs_ops::collect_note_paths(vault).map_err(|e| e.to_string())? {
+        for path in fs_ops::collect_note_paths(vault).map_err(ManifestError::walk)? {
             let abs = vault.join(&path);
-            let Ok(bytes) = std::fs::read(&abs) else { continue };
-            let (mtime_ms, size) = match std::fs::metadata(&abs) {
-                Ok(m) => (
-                    m.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0),
-                    m.len() as i64,
-                ),
-                Err(_) => (0, 0),
-            };
+            let (bytes, mtime_ms, size) = read_file_meta(&abs)?;
             out.push(FileMeta {
                 path,
                 kind: "note".into(),
@@ -246,7 +348,7 @@ pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
             });
         }
         // 附件：内容寻址（assets/<sha16>.<ext>），不进 DB，直接 walk
-        for meta in asset_walk(vault).map_err(|e| e.to_string())? {
+        for meta in asset_walk(vault)? {
             out.push(meta);
         }
     }
@@ -254,19 +356,22 @@ pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
 }
 
 /// walk assets/，逐文件计算 sha256（内容寻址目录，文件数有限）
-pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
+pub fn asset_walk(vault: &Path) -> Result<Vec<FileMeta>, ManifestError> {
     let mut out = Vec::new();
     let assets = vault.join(fs_ops::ASSETS_DIR);
-    if !assets.is_dir() {
-        return Ok(out);
+    // 不能用 `!assets.is_dir()` 提前返回：is_dir() 对 EACCES 也返回 false，
+    // 会把「附件目录不可读」静默当成「没有附件」。只把 NotFound 当空目录。
+    match std::fs::metadata(&assets) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(ManifestError::new(&assets, &e)),
     }
-    for entry in std::fs::read_dir(&assets)? {
-        let entry = entry?;
+    for entry in std::fs::read_dir(&assets).map_err(ManifestError::walk)? {
+        let entry = entry.map_err(ManifestError::walk)?;
         // file_type 不跟随符号链接：assets/ 内的链接不进同步清单
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
+        let ft = entry
+            .file_type()
+            .map_err(|e| ManifestError::new(&entry.path(), &e))?;
         if ft.is_symlink() || !ft.is_file() {
             continue;
         }
@@ -280,20 +385,14 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
             continue;
         }
         let path = entry.path();
-        let bytes = std::fs::read(&path)?;
+        let (bytes, mtime_ms, size) = read_file_meta(&path)?;
         let rel = format!("{}/{}", fs_ops::ASSETS_DIR, name);
         out.push(FileMeta {
             path: rel,
             kind: "asset".into(),
             hash: fs_ops::content_hash(&bytes),
-            mtime_ms: entry
-                .metadata()?
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
-            size: bytes.len() as i64,
+            mtime_ms,
+            size,
         });
     }
     Ok(out)
@@ -556,6 +655,18 @@ mod tests {
         assert_eq!(list[0].path, "assets/ok.png");
     }
 
+    /// assets 路径存在但不是目录：必须报错（503），不能当成“没有附件”。
+    /// 这正是 `is_dir()` 对 EACCES/ENOTDIR 一律 false 会引入的静默丢文件。
+    #[test]
+    fn asset_walk_rejects_assets_path_that_is_not_a_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(fs_ops::ASSETS_DIR), b"not a dir").unwrap();
+
+        let err = asset_walk(dir.path()).unwrap_err();
+        assert_eq!(err.kind, ManifestErrorKind::Walk);
+        assert!(err.storage_unavailable(), "应让 /manifest 回 503: {err:?}");
+    }
+
     /// A1 回归：批量记墓碑 = 一次 load + 一次 atomic save。
     /// 此前 entry_delete 对文件夹里每个文件各调一次 `record_tombstone`，
     /// N 个文件就要整读整写 N 次 tombstones.json（大文件夹删除时主线程卡顿）。
@@ -692,6 +803,14 @@ mod tests {
         ] {
             assert!(parse_conflict_path(rel).is_none(), "{rel} 不应判为副本");
         }
+    }
+
+    #[test]
+    fn read_file_meta_missing_file_is_manifest_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = read_file_meta(&dir.path().join("不存在.md")).unwrap_err();
+        assert_eq!(err.kind, ManifestErrorKind::NotFound);
+        assert!(!err.storage_unavailable(), "单个文件消失是 409，不是 503");
     }
 
     #[test]
