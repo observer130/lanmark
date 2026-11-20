@@ -111,12 +111,28 @@ export interface SyncReport {
   busy: boolean;
 }
 
+/** 冲突副本（手机面板可展开列表；笔记可直接打开，附件仅展示） */
+export interface ConflictCopy {
+  /** 副本相对路径 */
+  path: string;
+  kind: "note" | "asset";
+  /** 原名 + 目录（副本名里还原出的原路径） */
+  originalPath: string;
+  /** 冲突时间戳 MMDD-HHMM（UTC） */
+  stamp: string;
+  /** 同分钟第 N 个副本（0 = 首个） */
+  attempt: number;
+  mtimeMs: number;
+}
+
 /** 手机端：同步服务器配对信息（服务器随 vault 打开自动启动） */
 export const sync = {
   pairingInfo: () => invoke<SyncPairingInfo>("sync_pairing_info"),
   serverStart: () => invoke<number>("sync_server_start"),
   /** vault 内冲突副本数（手机端可发现性） */
   conflictCount: () => invoke<number>("sync_conflict_count"),
+  /** 冲突副本列表（新→旧；严格命名解析，普通「冲突」文件名不算） */
+  conflicts: () => invoke<ConflictCopy[]>("sync_conflicts"),
 
   /** 桌面端 */
   discover: () => invoke<Discovered[]>("sync_discover"),

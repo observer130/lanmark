@@ -30,6 +30,14 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
 - **Android**：`source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`，产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。它装成独立应用 `com.lanmark.app.debug`（「Lanmark Debug」），与 release 共存。模拟器（x86_64）改用 `--target x86_64`，或直接用 `scripts/android-emu.sh`。
 - 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`；桌面 release 用 `scripts/lanmark-desktop.sh`。
 
+## 分支与集成
+
+- **master 只做发布快照**：不在 master 上直接开发或提交。
+- 开发/修复一律从 `dev` 拉分支：`feat/<主题>`、`fix/<主题>`、`chore/<主题>`；需要并行时放 `.cache/wt/<topic>` 的 worktree，别来回切脏工作区。
+- 分支上跑完门禁（见「命令」与「完成标准」）再请用户验收；**验收通过后**才合入：
+  `git switch dev && git merge --no-ff <branch>`。
+- `dev` 稳定后再合 `master`。已推送的 `dev`/`master` 不 rebase（会改写别人已拉取的基点）。
+
 ## 改动边界
 
 **总是**
@@ -49,6 +57,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
 
 **从不**
 
+- 在 `master` 上直接提交（master 只做发布快照，见「分支与集成」）
 - 删掉 `src-tauri/gen/android` 重新 init（会冲掉 SyncService / SAF 代码）
 - 把构建路径上的东西移进 `.cache/`（`patches/` 曾因此让 CI 三端全挂）
 - 把密钥 / keystore / `.env` 写进仓库

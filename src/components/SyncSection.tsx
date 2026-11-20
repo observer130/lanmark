@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Check,
+  ChevronDown,
   ChevronUp,
   Laptop,
   Loader2,
@@ -15,7 +16,7 @@ import { useSyncStore } from "../stores/sync";
 import { useSettingsStore } from "../stores/settings";
 import { useVaultStore } from "../stores/vault";
 import { CopyButton, Switch } from "./ui/Controls";
-import { isAndroid, deviceAlias } from "../lib/sync";
+import { isAndroid, deviceAlias, sync, type ConflictCopy } from "../lib/sync";
 import { AppMark } from "./AppMark";
 import { Pencil } from "lucide-react";
 
@@ -126,6 +127,27 @@ function ServerPanel() {
   const conflictCount = useSyncStore((s) => s.conflictCount);
   const pairApprove = useSyncStore((s) => s.pairApprove);
   const pairReject = useSyncStore((s) => s.pairReject);
+  const [conflicts, setConflicts] = useState<ConflictCopy[] | null>(null);
+  const [loadingConflicts, setLoadingConflicts] = useState(false);
+
+  async function loadConflicts(): Promise<void> {
+    setLoadingConflicts(true);
+    try {
+      setConflicts(await sync.conflicts());
+    } catch (e) {
+      notifyError(`读取冲突副本失败：${String(e)}`);
+    } finally {
+      setLoadingConflicts(false);
+    }
+  }
+
+  async function toggleConflicts(): Promise<void> {
+    if (conflicts) {
+      setConflicts(null);
+      return;
+    }
+    await loadConflicts();
+  }
 
   if (!pairing) {
     return <div className="px-3 py-2 text-xs text-ink-3">读取配对信息…</div>;
@@ -222,15 +244,67 @@ function ServerPanel() {
         </details>
       )}
 
-      {/* 可发现性：最近回合时间 + 库中冲突副本 */}
+      {/* 冲突副本：服务器停着也能看/打开（计数来自严格命名解析，不再误计普通「冲突」文件名） */}
+      {conflictCount != null && conflictCount > 0 && (
+        <div className="rounded-[10px] border border-line bg-card px-3 py-2 shadow-card">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void toggleConflicts()}
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[11px] text-amber-600"
+            >
+              <ChevronDown
+                size={12}
+                className={`shrink-0 transition-transform ${conflicts ? "rotate-180" : ""}`}
+              />
+              <span className="truncate">库中 {conflictCount} 个冲突副本</span>
+            </button>
+            {conflicts && (
+              <button
+                type="button"
+                title="刷新"
+                onClick={() => void loadConflicts()}
+                className="shrink-0 rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
+              >
+                <RefreshCw size={12} className={loadingConflicts ? "animate-spin" : ""} />
+              </button>
+            )}
+          </div>
+          {conflicts && (
+            <ul className="mt-1.5 max-h-56 space-y-0.5 overflow-y-auto">
+              {conflicts.length === 0 && (
+                <li className="px-1.5 py-1 text-[11px] text-ink-3">没有可读取的冲突副本</li>
+              )}
+              {conflicts.map((c) => (
+                <li key={c.path}>
+                  <button
+                    type="button"
+                    disabled={c.kind !== "note"}
+                    title={c.kind === "note" ? "打开冲突副本" : "附件副本（暂不支持直接打开）"}
+                    onClick={() => {
+                      if (c.kind === "note") void useVaultStore.getState().openNote(c.path);
+                    }}
+                    className="w-full rounded-md px-1.5 py-1 text-left hover:bg-canvas disabled:cursor-default disabled:hover:bg-transparent"
+                  >
+                    <div className="truncate text-[12px] text-ink">{c.path}</div>
+                    <div className="mt-0.5 truncate text-[10px] text-ink-3">
+                      {c.kind === "note" ? "笔记" : "附件"} · {fmtClock(c.mtimeMs)} · 原名{" "}
+                      {c.originalPath}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {/* 可发现性：最近回合时间 */}
       {pairing.running && (
         <div className="flex items-center gap-3 px-1 text-[11px] text-ink-3">
           <span>
             最近回合 {pairing.lastRoundAt ? fmtClock(pairing.lastRoundAt) : "本次启动后暂无"}
           </span>
-          {conflictCount != null && conflictCount > 0 && (
-            <span className="text-amber-600">库中 {conflictCount} 个冲突副本</span>
-          )}
         </div>
       )}
     </div>
