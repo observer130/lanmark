@@ -37,6 +37,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
 - 分支上跑完门禁（见「命令」与「完成标准」）再请用户验收；**验收通过后**才合入：
   `git switch dev && git merge --no-ff <branch>`。
 - `dev` 稳定后再合 `master`。已推送的 `dev`/`master` 不 rebase（会改写别人已拉取的基点）。
+- 完整分支模型（含 `release/v<版本>`、worktree 与 `+` 标记）、发版步骤与 Release Notes 规范见 `RELEASING.md`。
 
 ## 改动边界
 
@@ -139,7 +140,7 @@ vault/
 
 - **只发三件产物**（另有 2 个元数据资产 `lanmark-linux-x64.tar.gz.sig` 与 `latest.json`，共 5 个 release 资产）：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis`。
 - **release 标题只写版本号**（如 `vX.Y.Z`），不加描述后缀；功能说明写进 notes 正文。
-- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`，`Cargo.lock` 随之更新）→ 提交推送 → **先** `gh release create vX.Y.Z --title vX.Y.Z --notes-file …` → `git tag vX.Y.Z && git push origin vX.Y.Z` → CI 先跑 `preflight`（tag 必须等于三处版本号）与 `test` 门禁，再三端构建并附产物。
+- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`，`Cargo.lock` 随之更新）→ 提交推送 → **先** `gh release create vX.Y.Z --title vX.Y.Z --notes-file …` → `git tag vX.Y.Z && git push origin vX.Y.Z` → CI 先跑 `preflight`（tag 必须等于三处版本号）与 `test` 门禁，再三端构建并附产物。分步命令、分支走向与「为什么正文必须先于 tag」见 `RELEASING.md`。
 - `release.yml` 的 `permissions: contents: write` 不能删（默认 GITHUB_TOKEN 只读，缺了上传 403）。
 - **Android release 走固定签名**：`release.yml` 解码 `RELEASE_KEYSTORE` secret → 真实 release 构建 → `apksigner` 拒绝 debug 证书**且比对 `RELEASE_CERT_SHA256` secret 的证书指纹**后上传；keystore 与预期指纹都不入库，任一缺失时 job 直接 fail（取值：`apksigner verify --print-certs <已发布APK> | grep SHA-256`）。本地无环境变量时回退 debug 签名，所以本地 `--apk` 产物仍可 CDP；真 release 包 CDP 不可用，走查回归本地 debug APK。
 
