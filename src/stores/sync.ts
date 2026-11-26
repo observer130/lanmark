@@ -109,7 +109,7 @@ async function autoTick(): Promise<void> {
           wasOffline || Date.now() - next.lastRoundAt >= ROUND_MIN_INTERVAL_MS;
         const live = useSyncStore.getState();
         if (due && !live.syncing && !live.blocked[s.id]) {
-          const ok = await live.runRound(s.id, { silent: true });
+          const ok = await live.runRound(s.id);
           if (ok) setProbeState(s.id, { ...next, lastRoundAt: Date.now() });
         }
       } else if (next.failCount === MDNS_RETRY_FAILS && !next.mdnsRetried) {
@@ -150,7 +150,7 @@ async function autoTick(): Promise<void> {
         for (const s of st.servers) {
           if (st.probeStates[s.id]?.online === false) continue; // 离线 → 等探测恢复
           if (st.blocked[s.id]) continue; // 待确认熔断 → 自动回合暂停，避免反复触发
-          const ok = await st.runRound(s.id, { silent: true });
+          const ok = await st.runRound(s.id);
           if (ok) {
             const cur = useSyncStore.getState().probeStates[s.id] ?? defaultProbeState();
             setProbeState(s.id, { ...cur, lastRoundAt: Date.now() });
@@ -227,7 +227,7 @@ interface SyncStore {
   startAutoLoop: () => void;
   stopAutoLoop: () => void;
   /** 单回合执行（手动/自动共用入口）：flush 脏编辑 → 回合 → 刷新。返回是否成功 */
-  runRound: (id: string, opts?: { silent?: boolean }) => Promise<boolean>;
+  runRound: (id: string) => Promise<boolean>;
 
   /** Android 专项 */
   hasAllFilesAccess: boolean;
@@ -364,8 +364,8 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   },
 
   /** 单回合执行（手动/自动共用入口：所有触发走同一入口）。
- * silent = 自动触发：Rust 串行锁的「进行中」拒绝与 flush 失败不弹错误 */
-  runRound: async (id, opts) => {
+   * 失败一律写 `error`（侧栏红点）：自动回合静默失败曾让「已连接」假象挂了 8 分钟。 */
+  runRound: async (id) => {
     if (get().syncing) return false;
     set({ syncing: true, error: null });
     try {
@@ -374,9 +374,9 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       // 会用「旧内容+改动」覆盖刚拉下来的版本（跨设备 last-write-wins 丢数据）
       if (vs.dirty && vs.activePath) {
         if (!(await vs.saveNow())) {
-          if (!opts?.silent) {
-            set({ error: "保存未完成的修改失败，已中止同步以免覆盖它" });
-          }
+          // 自动回合也必须可见：保存失败意味着本轮同步被中止，
+          // 不提示会让用户以为「已连接」就代表一切正常。
+          set({ error: "保存未完成的修改失败，已中止同步以免覆盖它" });
           return false;
         }
       }
@@ -424,7 +424,10 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       void get().refreshServers();
       return true;
     } catch (e) {
-      if (!opts?.silent) set({ error: String(e) });
+      // 自动回合的错误同样落到 error：侧栏「同步」行用它显示红点。
+      // 真机验收踩过：手机端 503 连挂 8 分钟，面板仍显示「已连接」——
+      // silent 把失败吞了，用户与走查者都看不见。
+      set({ error: String(e) });
       return false;
     } finally {
       set({ syncing: false });
