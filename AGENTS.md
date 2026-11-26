@@ -83,7 +83,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
    - `tauri.conf.json` 的 `dragDropEnabled` **必须保持 `false`**：开启后 WebView2 不再向页面派发 HTML5 拖放事件，Crepe 手柄拖不动，且会退化成「拖了变复制」。外部文件拖入另走 `dragover` + `dataTransfer.files`。
 
 5. **平台三坑**（真机 / 桌面 WebView 才复现，Chrome 探针永远绿）：
-   - **Android 返回键要拦两条路**：`OnBackPressedCallback` 与 `dispatchKeyEvent`（部分 ROM 把返回转成广播，不走 dispatcher）。原生→前端事件**不要用 `addPluginListener`**，用 `evaluateJavascript` 派发 DOM CustomEvent。Kotlin 单测跑 `./gradlew :app:testUniversalDebugUnitTest`（universal 变体）。
+   - **Android 返回键要拦三条路**：`OnBackPressedCallback`、`dispatchKeyEvent`（部分 ROM 把返回转成广播，不走 dispatcher），以及 manifest 的 `android:enableOnBackInvokedCallback="true"`。**最后这条最容易漏**：Android 13+ 的边缘手势返回走 `OnBackInvokedDispatcher`，应用不显式 opt-in 时系统把手势直接当成「结束 Activity」，按键返回能关抽屉、手势返回却直接退 App（真机 2510DRK44C / Android 17 实测）。原生→前端事件**不要用 `addPluginListener`**，用 `evaluateJavascript` 派发 DOM CustomEvent。Kotlin 单测跑 `./gradlew :app:testUniversalDebugUnitTest`（universal 变体）。
    - **外部文件拖入**：`dragover` 一律 `preventDefault`，**绝不用 `types.includes("Files")` 判断**——WebKit 系在该阶段不暴露 Files，不 preventDefault 则 `drop` 根本不派发；过滤放到 `drop`。
    - **Windows 缩放窗口后输入法候选框跑到屏幕左上角**：`src/lib/ime-anchor.ts` 用 `blur()` → **等 60ms** → `focus()` 重锚；别简化这个间隔（`setTimeout(0)` 对 CodeMirror 不够），且只在 Windows/WebView2 上装。
 
