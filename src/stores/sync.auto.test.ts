@@ -183,6 +183,18 @@ describe("自动同步循环状态机", () => {
     expect(m.syncNow).toHaveBeenCalledTimes(2);
   });
 
+  it("自动回合失败 → error 落库（侧栏红点），不再静默吞掉", async () => {
+    // 真机验收：手机端 503 连挂 8 分钟，面板仍显示「已连接」——
+    // silent 分支把错误吞了，用户完全看不见同步失败。
+    m.syncNow.mockRejectedValueOnce(new Error("storage_unavailable: 清单读取失败"));
+    useSyncStore.getState().startAutoLoop();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const st = useSyncStore.getState();
+    expect(m.syncNow).toHaveBeenCalledTimes(1);
+    expect(st.error).toContain("storage_unavailable");
+    expect(st.syncing).toBe(false);
+  });
+
   it("触发 B：离线退避 1s→2s→4s，第 3 次失败按设备身份找回，恢复跳变立即回合", async () => {
     let calls = 0;
     m.probe.mockImplementation(async () => {

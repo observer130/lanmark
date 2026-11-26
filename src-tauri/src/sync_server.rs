@@ -8,6 +8,7 @@
 
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use serde_json::json;
 use crate::commands::{self, CmdResult};
 use crate::fs_ops;
 use crate::sync::{
-    b64_decode, b64_encode, local_manifest, write_conflict_copy, FileMeta, PullFile, PullRequest,
+    b64_decode, b64_encode, write_conflict_copy, FileMeta, PullFile, PullRequest,
     PullResponse, PushFile, PushResult, Tombstone,
 };
 use crate::vault::AppState;
@@ -185,6 +186,15 @@ pub struct ServerCtx {
     /// 走干净落盘分支，后写覆盖先写且双方都不留副本。
     /// /delete 也拿这把锁：删除与写入交错会留下「有墓碑没文件」或「有文件没墓碑」。
     write_lock: Mutex<()>,
+    /// vault 路径快照。handler 不再每请求抢 `app.vault` 全局锁：那把锁同时被
+    /// UI 的重扫/切库持有，服务器不该因为 UI 忙而整体停摆（真机验收踩过：
+    /// 4180 仍 LISTEN、进程健在，但 /info 与 /manifest 全超时）。
+    vault_path: Mutex<PathBuf>,
+    /// /info 的计数缓存（notes, assets）：manifest 回合顺带刷新。
+    /// /info 是无鉴权探活端点，DB 锁抢不到时必须还能立即应答。
+    stats: (AtomicU64, AtomicU64),
+    /// 设备身份缓存（切库时刷新），避免在 handler 里读盘
+    device: Mutex<String>,
 }
 
 /// 一次待授权的配对请求。
@@ -223,24 +233,58 @@ const PAIR_LOCK_SECS: u64 = 60;
 impl ServerCtx {
     pub fn new(app: Arc<AppState>, cfg: SyncConfig) -> Self {
         Self {
+            device: Mutex::new(cfg.device_id.clone()),
             app,
             cfg: Mutex::new(cfg),
             pair_guard: Mutex::new(PairGuard::default()),
             ui_notify: None,
             pending: Mutex::new(Vec::new()),
             write_lock: Mutex::new(()),
+            vault_path: Mutex::new(PathBuf::new()),
+            stats: (AtomicU64::new(0), AtomicU64::new(0)),
         }
+    }
+
+    /// 记录当前 vault（spawn / 切库时更新）。读取路径本体的 handler 只认这份快照。
+    pub fn set_vault(&self, path: PathBuf, device_id: String) {
+        if let Ok(mut g) = self.vault_path.lock() {
+            *g = path;
+        }
+        if let Ok(mut g) = self.device.lock() {
+            *g = device_id;
+        }
+    }
+
+    fn cached_stats(&self) -> (u64, u64) {
+        (
+            self.stats.0.load(Ordering::Relaxed),
+            self.stats.1.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_stats(&self, notes: u64, assets: u64) {
+        self.stats.0.store(notes, Ordering::Relaxed);
+        self.stats.1.store(assets, Ordering::Relaxed);
+    }
+
+    /// 设备身份：优先缓存，缓存为空（旧调用路径）再读配置
+    fn device_id(&self) -> String {
+        if let Ok(g) = self.device.lock() {
+            if !g.is_empty() {
+                return g.clone();
+            }
+        }
+        let id = self.current_config().map(|(_, c)| c.device_id).unwrap_or_default();
+        if let Ok(mut g) = self.device.lock() {
+            *g = id.clone();
+        }
+        id
     }
 
     /// 注入 UI 刷新通知（生产：spawn 从 AppState.sync_notify 取，桌面/测试无 Tauri 环境时为 None）
     pub fn with_ui_notify(mut self, f: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
         self.ui_notify = f;
         self
-    }
-
-    /// 当前设备身份（实时读，切库后跟随新库，同 pairing_code 语义）
-    fn device_id(&self) -> String {
-        self.current_config().map(|(_, c)| c.device_id).unwrap_or_default()
     }
 
     /// 服务器侧同步改动了 vault（push 落盘 / delete 生效）→ 通知前端刷新
@@ -250,7 +294,14 @@ impl ServerCtx {
         }
     }
 
+    /// 当前 vault 路径（内存快照，不抢 `app.vault` 全局锁）。
+    /// 快照为空（旧调用路径/测试未 set_vault）时才回退到 AppState。
     fn vault(&self) -> Result<PathBuf, String> {
+        if let Ok(g) = self.vault_path.lock() {
+            if !g.as_os_str().is_empty() {
+                return Ok(g.clone());
+            }
+        }
         self.app
             .vault
             .lock()
@@ -267,7 +318,12 @@ impl ServerCtx {
         Ok((vault, cfg))
     }
 
-    fn check_token(&self, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    /// 校验 Bearer token。
+    ///
+    /// 磁盘才是凭据真相（切库后 token 跟随新库），所以每次读 sync.json；
+    /// 但读盘放 `spawn_blocking`，绝不在服务器 runtime 线程上做文件 IO——
+    /// 机型上万一 SF 卷卡住，整个服务器（含 accept 循环）会一起停摆。
+    async fn check_token(&self, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
         let auth = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -276,14 +332,11 @@ impl ServerCtx {
         if token.is_empty() {
             return Err((StatusCode::UNAUTHORIZED, "缺少 token（先 /api/v1/pair）".into()));
         }
-        // cfg 锁兼作 /pair 写配置的串行化锁；配置本体从当前 vault 实时读
-        let cfg = {
-            let _serial = self
-                .cfg
-                .lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
-            self.current_config()?.1
-        };
+        let vault = self.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
+        // 落盘是 tmp+rename 原子写，无需与 /pair 的 cfg 锁互斥
+        let cfg = tokio::task::spawn_blocking(move || load_sync_config(&vault))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("读取配置异常: {e}")))?;
         let ok = cfg.tokens.iter().any(|t| const_eq(t, token));
         if ok {
             Ok(())
@@ -293,37 +346,33 @@ impl ServerCtx {
     }
 }
 
-/// 轻量统计（/info 用）：设备名读当前 vault 的 sync.json，笔记数走 DB 计数、
-/// 附件数浅层计数——不逐文件 sha256（那是 local_manifest 的重活；/info 无鉴权，
-/// 单线程 runtime 上被刷请求会停摆整个服务器）
-fn light_stats(app: &Arc<AppState>) -> (String, u64, u64) {
-    let vault = match app.vault.lock().ok().and_then(|g| g.clone()) {
-        Some(v) => v,
-        None => return (String::new(), 0, 0),
-    };
-    let cfg = load_sync_config(&vault);
-    let mut notes = 0i64;
-    if let Ok(guard) = app.db.lock() {
+/// 轻量统计（/info 用）：笔记数走 DB 计数、附件数浅层计数——不逐文件 sha256
+/// （那是 local_manifest 的重活）。/info 是无鉴权探活端点，**DB 锁用 try_lock**：
+/// UI 正在重扫/切库时不能把探活也拖住，抢不到就返回缓存值。
+fn light_stats(app: &Arc<AppState>, vault: Option<PathBuf>, cached: (u64, u64)) -> (u64, u64) {
+    let (mut notes, mut assets) = cached;
+    if let Ok(guard) = app.db.try_lock() {
         if let Some(c) = guard.as_ref() {
-            notes = c
-                .query_row("SELECT COUNT(*) FROM files WHERE is_note=1", [], |r| {
-                    r.get::<_, i64>(0)
-                })
-                .unwrap_or(0);
+            if let Ok(n) = c.query_row("SELECT COUNT(*) FROM files WHERE is_note=1", [], |r| {
+                r.get::<_, i64>(0)
+            }) {
+                notes = n.max(0) as u64;
+            }
         }
     }
-    let assets = std::fs::read_dir(vault.join(fs_ops::ASSETS_DIR))
-        .map(|d| {
-            d.filter_map(|e| e.ok())
+    if let Some(vault) = vault {
+        if let Ok(d) = std::fs::read_dir(vault.join(fs_ops::ASSETS_DIR)) {
+            assets = d
+                .filter_map(|e| e.ok())
                 .filter(|e| {
                     e.file_type()
                         .map(|ft| ft.is_file() && !ft.is_symlink())
                         .unwrap_or(false)
                 })
-                .count() as u64
-        })
-        .unwrap_or(0);
-    (cfg.device_name, notes as u64, assets)
+                .count() as u64;
+        }
+    }
+    (notes, assets)
 }
 
 /// 常量时间字符串比较（token 校验，避免时序侧信道）
@@ -337,14 +386,27 @@ fn const_eq(a: &str, b: &str) -> bool {
 
 // ---------- 端点 ----------
 
+/// 阻塞任务上限。服务器 runtime 绝不该无限等一个卡住的阻塞任务：
+/// 超时即回 503，让客户端重试，而不是把连接悬到客户端自己超时。
+const TASK_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn task_timeout() -> (StatusCode, String) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "同步任务超时（服务器繁忙），请稍后重试".into(),
+    )
+}
+
 /// GET /api/v1/info —— 无需鉴权：代号 + vault 统计（不含任何笔记数据）。
 /// `name` 改读设备代号（AppConfig.deviceAlias，设备级不随库漂移），
 /// 进程内缓存由 setup 的 ensure_default_alias 预热（handler 拿不到 AppHandle）。
 async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
-    let app = ctx.app.clone();
-    let (_sync_json_name, notes, assets) = tokio::task::spawn_blocking(move || light_stats(&app))
-        .await
-        .unwrap_or((String::new(), 0, 0));
+    // 探活端点**不碰阻塞线程池、不抢会阻塞的锁**：同步算完直接返回。
+    // DB 用 try_lock（抢不到就用缓存），assets 只做一次浅层 read_dir。
+    // 这样即使 manifest/pull 的阻塞任务卡死、线程池被占满，桌面仍能
+    // 立刻拿到「在线/离线」，而不是跟着一起挂住（验收 P1 的观感来源）。
+    let (notes, assets) = light_stats(&ctx.app, ctx.vault().ok(), ctx.cached_stats());
+    ctx.set_stats(notes, assets);
     let name = crate::alias::current_alias(None);
     // deviceId 让桌面端按「设备」而不是「URL」记住服务器（IP 变了自动找回）。
     // 旧服务器无该字段 → 客户端看到空串，回退按名称匹配。
@@ -489,9 +551,18 @@ async fn pair_request(
         at: std::time::Instant::now(),
         decision: None,
     });
-    // 立刻通知手机 UI 刷新（它在 5s 轮询，这里只是让它更快看到）
+    // 立刻通知手机 UI 刷新（它在 5s 轮询，这里只是让它更快看到）。
+    // emit 放阻塞池：Tauri emit 在某些平台会等待前端回调，不能占 runtime worker
+    // ——单线程时代它一旦卡住就是整台服务器停摆（验收 P1 的一个可疑触发点）。
     drop(list);
-    ctx.notify_ui();
+    let notify = ctx.ui_notify.clone();
+    if notify.is_some() {
+        tokio::task::spawn_blocking(move || {
+            if let Some(f) = notify {
+                f();
+            }
+        });
+    }
     Ok(Json(json!({ "status": "pending" })))
 }
 
@@ -606,29 +677,37 @@ async fn manifest(
     State(ctx): State<Arc<ServerCtx>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<FileMeta>>, (StatusCode, String)> {
-    ctx.check_token(&headers)?;
+    ctx.check_token(&headers).await?;
     // 每回合客户端必先拉 manifest → 记「最近回合」（手机端面板展示）
     ctx.app.last_sync_round_at.store(crate::fs_ops::now_ms(), std::sync::atomic::Ordering::Relaxed);
-    // 重活（读全库 + 逐文件 sha256）移出单线程 runtime，防服务器停摆
-    let app = ctx.app.clone();
-    let list = tokio::task::spawn_blocking(move || local_manifest(&app))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
-        .map_err(|e| {
-            // 存储不可读 → 503：客户端会重试，绝不会把空清单当成“全库已删”。
-            // 单个文件在 walk 后消失 → 409：本回合失败，下回合重扫即可。
-            let status = if e.storage_unavailable() {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::CONFLICT
-            };
-            let prefix = if e.storage_unavailable() {
-                "storage_unavailable"
-            } else {
-                "manifest_unavailable"
-            };
-            (status, format!("{prefix}: {e}"))
-        })?;
+    // 重活（读全库 + 逐文件 sha256）移出服务器 runtime；超时回 503，不吊着客户端
+    let vault = ctx.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
+    let list = tokio::time::timeout(
+        TASK_TIMEOUT,
+        tokio::task::spawn_blocking(move || crate::sync::local_manifest_at(&vault)),
+    )
+    .await
+    .map_err(|_| task_timeout())?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
+    .map_err(|e| {
+        // 存储不可读 → 503：客户端会重试，绝不会把空清单当成“全库已删”。
+        // 单个文件在 walk 后消失 → 409：本回合失败，下回合重扫即可。
+        let status = if e.storage_unavailable() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::CONFLICT
+        };
+        let prefix = if e.storage_unavailable() {
+            "storage_unavailable"
+        } else {
+            "manifest_unavailable"
+        };
+        (status, format!("{prefix}: {e}"))
+    })?;
+    // 顺带刷新 /info 的计数缓存（manifest 每回合都会走，成本为零）
+    let notes = list.iter().filter(|m| m.kind == "note").count() as u64;
+    let assets = list.iter().filter(|m| m.kind == "asset").count() as u64;
+    ctx.set_stats(notes, assets);
     Ok(Json(list))
 }
 
@@ -638,12 +717,16 @@ async fn pull(
     headers: HeaderMap,
     Json(req): Json<PullRequest>,
 ) -> Result<Json<PullResponse>, (StatusCode, String)> {
-    ctx.check_token(&headers)?;
+    ctx.check_token(&headers).await?;
     // 重活（manifest + 读文件 + 编码）移出单线程 runtime，防服务器停摆
     let ctx2 = ctx.clone();
-    let (files, missing) = tokio::task::spawn_blocking(move || pull_blocking(&ctx2, &req.paths))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))??;
+    let (files, missing) = tokio::time::timeout(
+        TASK_TIMEOUT,
+        tokio::task::spawn_blocking(move || pull_blocking(&ctx2, &req.paths)),
+    )
+    .await
+    .map_err(|_| task_timeout())?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))??;
     Ok(Json(PullResponse { files, missing }))
 }
 
@@ -722,7 +805,7 @@ async fn push(
     // handler 之前，未配对设备也能塞 64 MiB 让服务器完整解析（内存放大打满）。
     body: axum::body::Bytes,
 ) -> Result<Json<Vec<PushResult>>, (StatusCode, String)> {
-    ctx.check_token(&headers)?;
+    ctx.check_token(&headers).await?;
     let body: PushBody = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("请求体解析失败: {e}")))?;
     // 只限总字节不够：64 MiB 能塞几十万条超小条目，每条都要 upsert + 整读墓碑账本，
@@ -735,9 +818,13 @@ async fn push(
     }
     // 逐文件落盘（含 DB 写）移出单线程 runtime
     let ctx2 = ctx.clone();
-    let results = tokio::task::spawn_blocking(move || push_blocking(&ctx2, &body.files))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))??;
+    let results = tokio::time::timeout(
+        TASK_TIMEOUT,
+        tokio::task::spawn_blocking(move || push_blocking(&ctx2, &body.files)),
+    )
+    .await
+    .map_err(|_| task_timeout())?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))??;
     // 有成功落盘 = vault 已变更 → 通知手机端 UI 刷新（树/最近/当前笔记）
     if results.iter().any(|r| r.ok) {
         ctx.notify_ui();
@@ -969,9 +1056,9 @@ async fn tombstones(
     State(ctx): State<Arc<ServerCtx>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Tombstone>>, (StatusCode, String)> {
-    ctx.check_token(&headers)?;
+    ctx.check_token(&headers).await?;
     let ctx2 = ctx.clone();
-    let list = tokio::task::spawn_blocking(move || -> Result<Vec<Tombstone>, (StatusCode, String)> {
+    let list = tokio::time::timeout(TASK_TIMEOUT, tokio::task::spawn_blocking(move || -> Result<Vec<Tombstone>, (StatusCode, String)> {
         // 账本是整读整写的 read-modify-write：不拿写锁时，purge 的旧快照会把
         // 并发 /delete 刚记下的墓碑覆盖掉（表现为「删了没传出去」）。
         let _guard = ctx2
@@ -985,8 +1072,9 @@ async fn tombstones(
         crate::sync::purge_expired_tombstones(&vault, now)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tombstone 清理失败: {e}")))?;
         Ok(crate::sync::load_tombstones(&vault))
-    })
+    }))
     .await
+    .map_err(|_| task_timeout())?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
     Ok(Json(list?))
 }
@@ -1002,13 +1090,17 @@ async fn delete_files(
     headers: HeaderMap,
     Json(body): Json<DeleteBody>,
 ) -> Result<Json<Vec<PushResult>>, (StatusCode, String)> {
-    ctx.check_token(&headers)?;
+    ctx.check_token(&headers).await?;
     // 软删是 fs + DB 阻塞操作，移出单线程 runtime；与 push 共用写锁（见 ServerCtx）
     let ctx2 = ctx.clone();
     let body_paths = body.paths;
-    let results = tokio::task::spawn_blocking(move || delete_blocking(&ctx2, &body_paths))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
+    let results = tokio::time::timeout(
+        TASK_TIMEOUT,
+        tokio::task::spawn_blocking(move || delete_blocking(&ctx2, &body_paths)),
+    )
+    .await
+    .map_err(|_| task_timeout())?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
     // 有成功删除 = vault 已变更 → 通知手机端 UI 刷新（否则目录仍列已删笔记）
     if results.iter().any(|r| r.ok) {
         ctx.notify_ui();
@@ -1105,7 +1197,11 @@ pub fn service_instance_name(fullname: &str) -> String {
     fullname.trim_end_matches('.').replace("\\.", ".")
 }
 
-/// 生产启动：独立线程 + 单线程 tokio runtime（不依赖 tauri runtime 的 feature 组合）。
+/// 生产启动：独立 OS 线程 + **多线程** tokio runtime（不依赖 tauri runtime 的 feature 组合）。
+///
+/// 不用 current_thread：验收现场出现过 4180 仍 LISTEN、进程健在，但 /info 与
+/// /manifest 全超时、连接堆在 CLOSE_WAIT——单线程 runtime 上任何一次慢 I/O
+/// （将来还可能有一次慢的 Tauri emit）都会把 accept 循环一起拖停。
 /// 返回实际端口。幂等：已启动则直接返回端口。服务器随进程存活（无停止需求）。
 pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     // 幂等：Android 端 vault 每次打开都会调；进程重建后状态归零会重新走到这里
@@ -1130,7 +1226,10 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     let app_for_cleanup = Arc::clone(&app);
     // UI 刷新通知（Tauri setup 注册的 emit 闭包；测试直接建 ctx 时为 None = 无操作）
     let ui_notify = app.sync_notify.lock().map_err(|_| "sync_notify 锁中毒".to_string())?.clone();
+    let device_id = cfg.device_id.clone();
     let ctx = Arc::new(ServerCtx::new(app, cfg).with_ui_notify(ui_notify));
+    // 记下路径快照：handler 不再每请求抢 app.vault 全局锁（UI 重扫会长期持有它）
+    ctx.set_vault(vault, device_id);
     // 把 ctx 登记给命令层（UI 的「允许/拒绝」要操作它的 pending 队列）
     register_active_ctx(&ctx);
 
@@ -1143,7 +1242,8 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
     std::thread::Builder::new()
         .name("lanmark-sync-server".into())
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
                 .enable_all()
                 .build()
             {
@@ -1583,6 +1683,50 @@ mod tests {
             .send()
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "新库 token 应可用");
+    }
+
+    /// 回归 P1：UI 长期持有 `app.vault` / `app.db` 全局锁（重扫、切库、重建索引）时，
+    /// 服务器必须照样应答。验收现场就是这么停摆的：4180 仍 LISTEN、进程健在，
+    /// 但 /info 与 /manifest 全超时、连接堆在 CLOSE_WAIT——旧实现让每个 handler
+    /// 都去抢那把 UI 锁，UI 一忙就把整台服务器（含 accept 循环）拖停。
+    #[test]
+    fn server_answers_while_ui_holds_vault_and_db_locks() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# a\n").unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, code, ctx) =
+            test_util::start_phone_server_with_ctx(dir.path(), Arc::clone(&app));
+        // 生产 spawn 会做这两件事：路径快照 + 设备身份缓存
+        let device_id = load_sync_config(dir.path()).device_id;
+        ctx.set_vault(dir.path().to_path_buf(), device_id);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        wait_ready(&client, &base);
+        let paired: serde_json::Value = client
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": code }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        let token = paired["token"].as_str().unwrap().to_string();
+
+        // 模拟 UI：两把全局锁都被长期持有
+        let _vault_guard = app.vault.lock().unwrap();
+        let _db_guard = app.db.lock().unwrap();
+
+        let r = client.get(format!("{base}/api/v1/info")).send().unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "/info 不能依赖 app.vault 锁");
+        let r = client
+            .get(format!("{base}/api/v1/manifest"))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "/manifest 不能依赖 app.vault 锁");
     }
 
     /// 回归：服务器侧 push 落盘 / delete 生效后必须通知前端刷新

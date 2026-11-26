@@ -333,6 +333,14 @@ pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, ManifestEr
         kind: ManifestErrorKind::Other,
         detail: e,
     })?;
+    local_manifest_at(&vault)
+}
+
+/// 同 `local_manifest`，但路径由调用方给定（服务器用 ctx 的 vault 快照）。
+///
+/// 服务器不该为了一次 walk 去抢 `app.vault` 全局锁：UI 重扫/切库会长期持有它，
+/// 目标是 /manifest 在 UI 忙时也能照常应答（验收现场的整体停摆就是这么来的）。
+pub fn local_manifest_at(vault: &Path) -> Result<Vec<FileMeta>, ManifestError> {
     let mut out = Vec::new();
     {
         let vault = &vault;

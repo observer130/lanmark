@@ -83,7 +83,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
    - `tauri.conf.json` 的 `dragDropEnabled` **必须保持 `false`**：开启后 WebView2 不再向页面派发 HTML5 拖放事件，Crepe 手柄拖不动，且会退化成「拖了变复制」。外部文件拖入另走 `dragover` + `dataTransfer.files`。
 
 5. **平台三坑**（真机 / 桌面 WebView 才复现，Chrome 探针永远绿）：
-   - **Android 返回键要拦两条路**：`OnBackPressedCallback` 与 `dispatchKeyEvent`（部分 ROM 把返回转成广播，不走 dispatcher）。原生→前端事件**不要用 `addPluginListener`**，用 `evaluateJavascript` 派发 DOM CustomEvent。Kotlin 单测跑 `./gradlew :app:testUniversalDebugUnitTest`（universal 变体）。
+   - **Android 返回键要拦三条路**：`OnBackPressedCallback`、`dispatchKeyEvent`（部分 ROM 把返回转成广播，不走 dispatcher），以及 manifest 的 `android:enableOnBackInvokedCallback="true"`。**最后这条最容易漏**：Android 13+ 的边缘手势返回走 `OnBackInvokedDispatcher`，应用不显式 opt-in 时系统把手势直接当成「结束 Activity」，按键返回能关抽屉、手势返回却直接退 App（真机 2510DRK44C / Android 17 实测）。原生→前端事件**不要用 `addPluginListener`**，用 `evaluateJavascript` 派发 DOM CustomEvent。Kotlin 单测跑 `./gradlew :app:testUniversalDebugUnitTest`（universal 变体）。
    - **外部文件拖入**：`dragover` 一律 `preventDefault`，**绝不用 `types.includes("Files")` 判断**——WebKit 系在该阶段不暴露 Files，不 preventDefault 则 `drop` 根本不派发；过滤放到 `drop`。
    - **Windows 缩放窗口后输入法候选框跑到屏幕左上角**：`src/lib/ime-anchor.ts` 用 `blur()` → **等 60ms** → `focus()` 重锚；别简化这个间隔（`setTimeout(0)` 对 CodeMirror 不够），且只在 Windows/WebView2 上装。
 
@@ -125,7 +125,7 @@ vault/
 - mDNS 收包需 MulticastLock（随 SyncService 生命周期）；WifiLock 无效。
 - 加 TLS 时 rustls 必须切 ring 后端（aws-lc-rs 在 Android 交叉编译会挂）。
 - **原生库必须 16KB 页对齐**：Android 15+ 的 16KB 页设备上，`.so` 的 `LOAD` 段不是 16KB 对齐会在安装时弹「此应用不符合 16KB 对齐要求」，这类设备还可能加载失败。NDK r27 的 lld 默认只对齐 4KB，所以 `src-tauri/build.rs` 对 Android 目标显式加 `-Wl,-z,max-page-size=16384`（NDK r28 起默认对齐，可删）。改完用 `llvm-readelf -l liblanmark_lib.so` 核 `LOAD` 的 `Align` 应为 `0x4000`。
-- 上滑划掉 Activity 会 `process::exit(0)` 连 FGS 一起杀（tauri#15671）→ `prevent_exit()` 保活；重建 Activity 后的白屏用 `ExitRequested` 置 `ACTIVITY_LOST` + 下次 `Resumed` 销毁旧窗口重建。零窗口时 wry 不分发 Resumed，所以 `patches/tauri-runtime-wry` 必须入库。
+- 上滑划掉 Activity 会 `process::exit(0)` 连 FGS 一起杀（tauri#15671）→ `prevent_exit()` 只挡这条路径。**国产 ROM 的「划掉任务卡」是 force-stop**：HyperOS 实测 logcat `Killing … (adj 50): stop … due to SwipeUpClean`（SIGKILL），之后包状态 `stopped=true`，`START_STICKY` 不会被拉起，App 侧无从拦截——别把「划掉后服务还活着」写成承诺。重建 Activity 后的白屏用 `ExitRequested` 置 `ACTIVITY_LOST` + 下次 `Resumed` 销毁旧窗口重建。零窗口时 wry 不分发 Resumed，所以 `patches/tauri-runtime-wry` 必须入库。
 
 ## 完成标准（DoD）
 

@@ -16,6 +16,9 @@ use crate::sync::{
 use crate::vault::AppState;
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// 建连单独限时：对端把 SYN 丢掉（手机熄屏/ROM 挂起/防火墙 DROP）时，
+/// 不该拿满 30s 的总超时才报错——UI 的「同步中…」要尽快给出可操作结论。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PULL_BATCH: usize = 32;
 const PUSH_BATCH: usize = 8;
 /// 单批推送的原始字节上限（base64 后膨胀 4/3）：避免 8 张大图挤进一个请求，
@@ -207,6 +210,7 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         return Ok(c.clone()); // Client 内部是 Arc，clone 很便宜
     }
     let built = reqwest::blocking::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
         .timeout(CLIENT_TIMEOUT)
         .build()
         .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;

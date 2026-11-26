@@ -20,7 +20,12 @@
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
+    <!-- enableOnBackInvokedCallback：Android 13+ 的手势返回走 OnBackInvokedDispatcher。
+         不开这个开关时手势返回被系统直接当成「结束 Activity」，根本到不了
+         BackPlugin（真机 Android 17 实测：KEYCODE_BACK 能关抽屉、边缘手势返回直接退
+         App）。androidx.activity 1.10 会把 dispatcher 桥接到新 API，开关一开两条路径统一。 -->
     <application
+        android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.lanmark"
