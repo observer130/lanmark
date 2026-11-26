@@ -35,6 +35,12 @@ pub const SCAN_PORT_SPAN: u16 = 10;
 const MAX_CONCURRENCY: usize = 128;
 /// L2 全扫的总预算硬截断：超时即返回已命中部分，UI 不再转圈。
 const L2_BUDGET: Duration = Duration::from_millis(3000);
+/// L1（邻居表）预算。邻居表在 /22 这类大网段能有上百条，每条再乘 10 个端口
+/// 就是上千个候选；此前 L1 不设预算，探完要十几秒（真机验收「正在查找…」
+/// 卡住 >1 分钟就是这么来的）。这里与 L2 一样给硬预算。
+const L1_BUDGET: Duration = Duration::from_millis(2000);
+/// L1 候选上限（邻居表异常膨胀时的保险丝）
+const MAX_NEIGHBORS: usize = 128;
 /// 候选总数上限（多网卡/VPN/Docker 会产出大量无效网段）。
 const MAX_CANDIDATES: usize = 1024;
 
@@ -329,23 +335,33 @@ pub struct ScanPlan {
 /// 抽出来供 B2 的两轮复用：已知端口先跑一轮，全空再换端口段重跑。
 /// L2 每轮各有一份 `L2_BUDGET` 硬预算（单轮不会无限期转圈）。
 fn scan_network(plan: &ScanPlan, probe: &dyn InfoProbe, ports: &[u16]) -> ScanOutcome {
+    // L1 的「可能不全」要一路带到最终结果：L1 被预算/上限截断但 L2 没开时，
+    // 旧代码直接返回默认值，把截断标志丢了（UI 就不提示「结果可能不全」）。
+    let mut l1_truncated = false;
     // L1：邻居表地址。个位数候选，百毫秒级。
     if !plan.neighbors.is_empty() {
         let mut urls = Vec::new();
-        for ip in &plan.neighbors {
+        let mut capped = false;
+        'nb: for ip in &plan.neighbors {
             for p in ports {
+                if urls.len() >= MAX_NEIGHBORS * ports.len() {
+                    capped = true;
+                    break 'nb;
+                }
                 urls.push(format!("http://{ip}:{p}"));
             }
         }
-        let out = probe_all(&urls, probe, None);
+        let mut out = probe_all(&urls, probe, Some(L1_BUDGET));
+        out.truncated |= capped;
         if !out.devices.is_empty() {
             return out;
         }
+        l1_truncated = out.truncated;
     }
 
     // L2：本机网段全扫。有总预算硬截断，超时返回已命中部分。
     if !plan.allow_subnet || plan.subnets.is_empty() {
-        return ScanOutcome::default();
+        return ScanOutcome { devices: Vec::new(), truncated: l1_truncated };
     }
     let mut urls = Vec::new();
     'outer: for seg in &plan.subnets {
@@ -365,6 +381,7 @@ fn scan_network(plan: &ScanPlan, probe: &dyn InfoProbe, ports: &[u16]) -> ScanOu
     let mut out = probe_all(&urls, probe, Some(L2_BUDGET));
     // 候选被截断（超过上限）也算「可能不全」
     out.truncated |= urls.len() >= MAX_CANDIDATES;
+    out.truncated |= l1_truncated;
     out
 }
 
@@ -479,6 +496,24 @@ mod tests {
         fn probe(&self, url: &str) -> Option<ScannedDevice> {
             self.answers.get(url).cloned()
         }
+    }
+
+    /// L1 候选必须封顶：邻居表异常膨胀时不能把上千个 SYN 全打出去（P7：
+    /// 「正在查找…」曾因此卡十几秒到一分钟）。超上限时还要报 truncated。
+    #[test]
+    fn neighbor_scan_is_capped() {
+        let neighbors: Vec<Ipv4Addr> = (0..200u16)
+            .map(|i| Ipv4Addr::new(10, 0, (i / 250) as u8, (i % 250) as u8 + 1))
+            .collect();
+        let p = plan(vec![], neighbors.clone(), vec![]);
+        let out = scan_network(&p, &FakeProbe::new(&[]), &[4180]);
+        assert!(out.truncated, "超过 MAX_NEIGHBORS 必须标记结果可能不全");
+        assert!(out.devices.is_empty());
+
+        let few: Vec<Ipv4Addr> = neighbors.into_iter().take(MAX_NEIGHBORS).collect();
+        let p = plan(vec![], few, vec![]);
+        let out = scan_network(&p, &FakeProbe::new(&[]), &[4180]);
+        assert!(!out.truncated, "邻居数未超上限时不该报截断");
     }
 
     fn plan(known: Vec<String>, neighbors: Vec<Ipv4Addr>, subnets: Vec<NetSegment>) -> ScanPlan {

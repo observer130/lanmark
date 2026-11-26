@@ -884,14 +884,29 @@ export function SyncSection() {
           <div className="flex items-center justify-between pb-1 pl-4 pr-2 pt-2.5">
             <span className="text-[13px] font-semibold text-ink">同步</span>
             <button
+              type="button"
               title="收起"
-              className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
+              aria-label="收起同步面板"
+              // 命中区至少 28×28：面板内容会随扫描结果长高（顶边向上移动），
+              // 小目标 + 漂移叠在一起就会「点了没反应」（P7 现场）。
+              className="-mr-1 rounded-md p-1.5 text-ink-3 hover:bg-canvas hover:text-ink"
               onClick={() => setOpen(false)}
             >
               <X size={14} />
             </button>
           </div>
-          <div className="max-h-[min(560px,calc(100vh-140px))] overflow-y-auto pb-3">
+          <div
+            className={`${
+              // 桌面：固定高度。面板是 bottom-full 锚底的上拉面板，高度随内容变化时
+              // 顶边会整体上下跳，正在点的「×」/「立即同步」会从指针底下溜走
+              // （P7 走查原话：点两次都没反应）。固定后指针永远落在同一处。
+              // 手机：手指直接点在当前可见位置，且底部抽屉内容本来就长，
+              // 保持内容自适应、只封顶（留白比跳位更难解释）。
+              android
+                ? "max-h-[min(560px,calc(100vh-140px))]"
+                : "h-[min(420px,calc(100vh-190px))]"
+            } overflow-y-auto pb-3`}
+          >
             {android ? <ServerPanel /> : <ClientPanel />}
 
             {error && (

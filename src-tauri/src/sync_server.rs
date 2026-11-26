@@ -8,7 +8,7 @@
 
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -190,9 +190,13 @@ pub struct ServerCtx {
     /// UI 的重扫/切库持有，服务器不该因为 UI 忙而整体停摆（真机验收踩过：
     /// 4180 仍 LISTEN、进程健在，但 /info 与 /manifest 全超时）。
     vault_path: Mutex<PathBuf>,
-    /// /info 的计数缓存（notes, assets）：manifest 回合顺带刷新。
+    /// /info 的计数缓存（notes, assets）：manifest 回合与后台磁盘计数顺带刷新。
     /// /info 是无鉴权探活端点，DB 锁抢不到时必须还能立即应答。
     stats: (AtomicU64, AtomicU64),
+    /// 磁盘计数最近一次完成时刻（见 request_disk_stats）
+    stats_at: Mutex<Option<std::time::Instant>>,
+    /// 后台磁盘计数是否在跑（防止每次探活都排一个 walk）
+    stats_busy: AtomicBool,
     /// 设备身份缓存（切库时刷新），避免在 handler 里读盘
     device: Mutex<String>,
 }
@@ -242,6 +246,8 @@ impl ServerCtx {
             write_lock: Mutex::new(()),
             vault_path: Mutex::new(PathBuf::new()),
             stats: (AtomicU64::new(0), AtomicU64::new(0)),
+            stats_at: Mutex::new(None),
+            stats_busy: AtomicBool::new(false),
         }
     }
 
@@ -262,9 +268,49 @@ impl ServerCtx {
         )
     }
 
+    /// 首次填充缓存（DB 口径），不刷新 stats_at，让磁盘校正仍按 TTL 立刻排队
+    fn seed_stats(&self, notes: u64, assets: u64) {
+        self.stats.0.store(notes, Ordering::Relaxed);
+        self.stats.1.store(assets, Ordering::Relaxed);
+    }
+
     fn set_stats(&self, notes: u64, assets: u64) {
         self.stats.0.store(notes, Ordering::Relaxed);
         self.stats.1.store(assets, Ordering::Relaxed);
+        if let Ok(mut g) = self.stats_at.lock() {
+            *g = Some(std::time::Instant::now());
+        }
+    }
+
+    /// 后台用磁盘清单校正 /info 的笔记数。
+    ///
+    /// DB 索引只在开库（及手动「立即清理」）时重建；对端推来的文件、外部
+    /// 编辑器/adb 落盘都不经过索引，`SELECT COUNT(*)` 会长期偏低（验收 P7：
+    /// 磁盘 6 篇、`/info` 报 5）。这里每 `STATS_TTL` 最多 walk 一次目录树
+    /// （不读内容、不算 sha256），算完写回缓存；`/info` 自身永不等待它。
+    fn request_disk_stats(self: &Arc<Self>) {
+        const STATS_TTL: Duration = Duration::from_secs(3);
+        if let Ok(g) = self.stats_at.lock() {
+            if let Some(t) = *g {
+                if t.elapsed() < STATS_TTL {
+                    return;
+                }
+            }
+        }
+        if self.stats_busy.swap(true, Ordering::AcqRel) {
+            return; // 上一轮还在跑
+        }
+        let Ok(vault) = self.vault() else {
+            self.stats_busy.store(false, Ordering::Release);
+            return;
+        };
+        let ctx = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            if let Some((notes, assets)) = disk_stats(&vault) {
+                ctx.set_stats(notes, assets);
+            }
+            ctx.stats_busy.store(false, Ordering::Release);
+        });
     }
 
     /// 设备身份：优先缓存，缓存为空（旧调用路径）再读配置
@@ -346,6 +392,24 @@ impl ServerCtx {
     }
 }
 
+/// 文件系统口径的计数（笔记走与 /manifest 同一条 walk，附件数一次浅层 read_dir）。
+/// 读失败返回 None：/info 只保留旧缓存，绝不因为统计失败而报错。
+fn disk_stats(vault: &std::path::Path) -> Option<(u64, u64)> {
+    let notes = crate::fs_ops::collect_note_paths(vault).ok()?.len() as u64;
+    let mut assets = 0u64;
+    if let Ok(d) = std::fs::read_dir(vault.join(crate::fs_ops::ASSETS_DIR)) {
+        assets = d
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type()
+                    .map(|ft| ft.is_file() && !ft.is_symlink())
+                    .unwrap_or(false)
+            })
+            .count() as u64;
+    }
+    Some((notes, assets))
+}
+
 /// 轻量统计（/info 用）：笔记数走 DB 计数、附件数浅层计数——不逐文件 sha256
 /// （那是 local_manifest 的重活）。/info 是无鉴权探活端点，**DB 锁用 try_lock**：
 /// UI 正在重扫/切库时不能把探活也拖住，抢不到就返回缓存值。
@@ -405,8 +469,16 @@ async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     // DB 用 try_lock（抢不到就用缓存），assets 只做一次浅层 read_dir。
     // 这样即使 manifest/pull 的阻塞任务卡死、线程池被占满，桌面仍能
     // 立刻拿到「在线/离线」，而不是跟着一起挂住（验收 P1 的观感来源）。
-    let (notes, assets) = light_stats(&ctx.app, ctx.vault().ok(), ctx.cached_stats());
-    ctx.set_stats(notes, assets);
+    // 缓存为空（进程刚起）才用 DB 口径垫一次；之后一律用后台磁盘校正的结果，
+    // 否则每次探活都会把 DB 的过期计数写回去（P7：磁盘 6 篇、卡片显示 5）。
+    let mut stats = ctx.cached_stats();
+    if stats == (0, 0) {
+        stats = light_stats(&ctx.app, ctx.vault().ok(), stats);
+        ctx.seed_stats(stats.0, stats.1);
+    }
+    let (notes, assets) = stats;
+    // 排队一次磁盘校正（3s TTL + 单飞，不阻塞本次响应）
+    ctx.request_disk_stats();
     let name = crate::alias::current_alias(None);
     // deviceId 让桌面端按「设备」而不是「URL」记住服务器（IP 变了自动找回）。
     // 旧服务器无该字段 → 客户端看到空串，回退按名称匹配。
@@ -1573,6 +1645,27 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// /info 的计数必须按磁盘算：对端推来的文件不进 DB 索引，用 `COUNT(*)`
+    /// 会长期偏低（P7 真机：磁盘 6 篇、设备卡显示 5）。
+    #[test]
+    fn disk_stats_counts_notes_and_assets_from_filesystem() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("工作")).unwrap();
+        std::fs::create_dir_all(root.join("生活")).unwrap();
+        std::fs::create_dir_all(root.join(fs_ops::ASSETS_DIR)).unwrap();
+        std::fs::write(root.join("工作/一.md"), b"a").unwrap();
+        std::fs::write(root.join("生活/二.md"), b"b").unwrap();
+        std::fs::write(root.join("生活/不是笔记.txt"), b"c").unwrap();
+        std::fs::write(root.join(fs_ops::ASSETS_DIR).join("图.png"), b"png").unwrap();
+        // 回收站里的笔记不算（与 /manifest 同一条 walk 口径）
+        let trash = root.join(fs_ops::META_DIR).join("trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(trash.join("旧.md"), b"old").unwrap();
+
+        assert_eq!(disk_stats(root), Some((2, 1)));
+    }
 
     /// 冲突列表只认严格命名的副本：普通文件名里的「冲突」不算，
     /// 笔记与 assets 附件都要能还原出原路径/时间戳。
