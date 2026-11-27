@@ -61,12 +61,15 @@ Lanmark 的分支模型、发版流程与 Release Notes 规范。**命令、门�
    ```
    远端已有同值 tag，这一步正常是 no-op（`Everything up-to-date`）。**若被拒**，说明本地 `master` 与远端不一致、tag 指向了别的提交——停下来查，不要加 `-f`。
    CI 侧先跑 `preflight`（tag 必须等于 `package.json` / `tauri.conf.json` / `Cargo.toml` 三处版本号），再三端并行构建、把 5 个资产挂到这个 Release 上。
-7. **发布后**：`git switch dev && git merge --ff-only master && git push origin dev`，让 `dev` 与发布快照对齐。
+7. **发布后**：
+   - 核对 Release 正文与 `--notes-file` 一致：`gh release view v<版本> --json body | wc -m` 应等于文件字数。不一致（v0.9.0 出现过正文缺首段与末节）用 `gh release edit v<版本> --notes-file .cache/release-notes/v<版本>.md` 重写即恢复。
+   - 抽查 `latest.json` 的 `notes` 不以半截字符结尾：它由 `release.yml` 对正文做 `head -c 500` **字节**截断，可能切在多字节字符中间。要修就只改这个文本字段，再 `gh release upload v<版本> latest.json --clobber`——签名字段覆盖的是 exe 字节，改文本不影响，URL 也不要动。
+   - `git switch dev && git merge --ff-only master && git push origin dev`，让 `dev` 与发布快照对齐。
 
 **为什么 tag 是轻量、且必须先建 Release：**
 
 - `gh release create` 会自动建 tag；此时远端已存在同名轻量 tag，再把本地换成 annotated tag 推送会被拒（`! [rejected] ... (already exists)`）。想改 annotated 必须先推 tag、再建 Release，而那样 CI 会在正文写好之前跑完。
-- `release.yml` 的 Windows job 会把 Release 正文前 500 字符写进 `latest.json`（`release.yml` 里 `gh release view --json body`），作为更新器弹窗文案。正文晚于构建，用户看到的就是空文案。
+- `release.yml` 的 Windows job 会把 Release 正文前 500 **字节**写进 `latest.json`（`release.yml` 里 `gh release view --json body`），作为更新器弹窗文案。正文晚于构建，用户看到的就是空文案。
 
 **出错时**：
 
