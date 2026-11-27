@@ -691,7 +691,7 @@ function AboutSection() {
  删掉这行即违约（licenses/fonts/README.md 有完整义务清单）。 */}
         <Row
           label="内置字体"
-          hint="编辑区字体随应用分发以保证三端一致；许可：MiSans © 小米科技（免费商用），其余 SIL OFL 1.1"
+          hint="许可：MiSans © 小米科技（免费商用），其余 SIL OFL 1.1"
         >
           <span className="text-xs text-ink-2">
             MiSans · 思源宋体 · 霞鹜文楷 · JetBrains Mono
