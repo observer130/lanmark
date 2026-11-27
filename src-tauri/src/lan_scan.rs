@@ -35,6 +35,12 @@ pub const SCAN_PORT_SPAN: u16 = 10;
 const MAX_CONCURRENCY: usize = 128;
 /// L2 全扫的总预算硬截断：超时即返回已命中部分，UI 不再转圈。
 const L2_BUDGET: Duration = Duration::from_millis(3000);
+/// L1（邻居表）预算。邻居表在 /22 这类大网段能有上百条，每条再乘 10 个端口
+/// 就是上千个候选；此前 L1 不设预算，探完要十几秒（真机验收「正在查找…」
+/// 卡住 >1 分钟就是这么来的）。这里与 L2 一样给硬预算。
+const L1_BUDGET: Duration = Duration::from_millis(2000);
+/// L1 候选上限（邻居表异常膨胀时的保险丝）
+const MAX_NEIGHBORS: usize = 128;
 /// 候选总数上限（多网卡/VPN/Docker 会产出大量无效网段）。
 const MAX_CANDIDATES: usize = 1024;
 
@@ -109,15 +115,55 @@ pub fn is_private_v4(ip: Ipv4Addr) -> bool {
     }
 }
 
-/// 虚拟网卡前缀：docker/veth/br-/utun/tun/tap/wg 等。
-/// 它们的网段扫了必无结果，却会成倍拉长 L2。
+/// 虚拟/非 LAN 网卡前缀：docker/veth/br-/utun/tun/tap/wg、蜂窝（rmnet/ccmni）、
+/// 464xlat（clat）与 Android 的 dummy/p2p 等。
+///
+/// 它们的网段扫了必无结果，却会成倍拉长 L2；选「本机局域网地址」时也必须跳过，
+/// 否则开着 VPN 会把 tun 地址当成 LAN 地址广播给桌面端（根本连不上）。
 pub fn is_virtual_iface(name: &str) -> bool {
-    const PREFIXES: [&str; 14] = [
+    const PREFIXES: [&str; 19] = [
         "docker", "veth", "br-", "virbr", "vmnet", "vboxnet", "utun", "tun", "tap", "wg", "zt",
-        "lo", "ppp", "tailscale",
+        "lo", "ppp", "tailscale", "rmnet", "ccmni", "clat", "dummy", "p2p",
     ];
     let n = name.to_ascii_lowercase();
     PREFIXES.iter().any(|p| n.starts_with(p))
+}
+
+/// 从网卡列表里选一个「局域网可达」的 IPv4，供配对面板/mDNS 展示。
+///
+/// 规则：
+/// 1. 跳过虚拟/蜂窝网卡（[`is_virtual_iface`]）——VPN 的 tun、移动数据的 rmnet 都不算；
+/// 2. 只接受 RFC1918，且排除 169.254 链路本地（它只能在同链路内用）；
+/// 3. 优先 `wlan*`/`wl*`，其次 `eth*`/`en*`，再按网卡名、IP 排序，保证结果确定。
+///
+/// 纯函数：`local_ipv4_addrs()` 在真机上填数据，测试直接喂表。
+pub fn pick_host_ipv4(ifaces: &[(String, Ipv4Addr, u8)]) -> Option<Ipv4Addr> {
+    let mut candidates: Vec<(&str, Ipv4Addr)> = ifaces
+        .iter()
+        .filter(|(name, ip, _)| {
+            !is_virtual_iface(name) && is_private_v4(*ip) && !ip.is_link_local()
+        })
+        .map(|(name, ip, _)| (name.as_str(), *ip))
+        .collect();
+    candidates.sort_by(|a, b| {
+        iface_rank(a.0)
+            .cmp(&iface_rank(b.0))
+            .then_with(|| a.0.cmp(b.0))
+            .then_with(|| a.1.octets().cmp(&b.1.octets()))
+    });
+    candidates.first().map(|(_, ip)| *ip)
+}
+
+/// 局域网优先级：无线 > 有线 > 其它（热点 `ap*`、虚拟网桥剩项等）。
+fn iface_rank(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if n.starts_with("wlan") || n.starts_with("wl") {
+        0
+    } else if n.starts_with("eth") || n.starts_with("en") {
+        1
+    } else {
+        2
+    }
 }
 
 /// 按 `(网卡名, ip, prefix)` 生成 L2 候选网段：跳虚拟网卡、只留私有段、同段去重。
@@ -289,23 +335,33 @@ pub struct ScanPlan {
 /// 抽出来供 B2 的两轮复用：已知端口先跑一轮，全空再换端口段重跑。
 /// L2 每轮各有一份 `L2_BUDGET` 硬预算（单轮不会无限期转圈）。
 fn scan_network(plan: &ScanPlan, probe: &dyn InfoProbe, ports: &[u16]) -> ScanOutcome {
+    // L1 的「可能不全」要一路带到最终结果：L1 被预算/上限截断但 L2 没开时，
+    // 旧代码直接返回默认值，把截断标志丢了（UI 就不提示「结果可能不全」）。
+    let mut l1_truncated = false;
     // L1：邻居表地址。个位数候选，百毫秒级。
     if !plan.neighbors.is_empty() {
         let mut urls = Vec::new();
-        for ip in &plan.neighbors {
+        let mut capped = false;
+        'nb: for ip in &plan.neighbors {
             for p in ports {
+                if urls.len() >= MAX_NEIGHBORS * ports.len() {
+                    capped = true;
+                    break 'nb;
+                }
                 urls.push(format!("http://{ip}:{p}"));
             }
         }
-        let out = probe_all(&urls, probe, None);
+        let mut out = probe_all(&urls, probe, Some(L1_BUDGET));
+        out.truncated |= capped;
         if !out.devices.is_empty() {
             return out;
         }
+        l1_truncated = out.truncated;
     }
 
     // L2：本机网段全扫。有总预算硬截断，超时返回已命中部分。
     if !plan.allow_subnet || plan.subnets.is_empty() {
-        return ScanOutcome::default();
+        return ScanOutcome { devices: Vec::new(), truncated: l1_truncated };
     }
     let mut urls = Vec::new();
     'outer: for seg in &plan.subnets {
@@ -325,6 +381,7 @@ fn scan_network(plan: &ScanPlan, probe: &dyn InfoProbe, ports: &[u16]) -> ScanOu
     let mut out = probe_all(&urls, probe, Some(L2_BUDGET));
     // 候选被截断（超过上限）也算「可能不全」
     out.truncated |= urls.len() >= MAX_CANDIDATES;
+    out.truncated |= l1_truncated;
     out
 }
 
@@ -374,10 +431,10 @@ pub fn run_scan(plan: &ScanPlan, probe: &dyn InfoProbe) -> ScanOutcome {
 
 // ---------- 系统信息采集（生产路径） ----------
 
-/// 本机 IPv4 网卡列表。Linux 走 `ip -4 -o addr`；其它平台尽力而为（拿不到就空，
-/// 退化为 L0+L1 两层，不会因此扫公网）。
+/// 本机 IPv4 网卡列表。Linux/Android 走 `ip -4 -o addr`；其它平台尽力而为
+/// （拿不到就空，退化为 L0+L1 两层，不会因此扫公网）。
 pub fn local_ipv4_addrs() -> Vec<(String, Ipv4Addr, u8)> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         if let Ok(out) = std::process::Command::new("ip").args(["-4", "-o", "addr"]).output() {
             if out.status.success() {
@@ -441,6 +498,24 @@ mod tests {
         }
     }
 
+    /// L1 候选必须封顶：邻居表异常膨胀时不能把上千个 SYN 全打出去（P7：
+    /// 「正在查找…」曾因此卡十几秒到一分钟）。超上限时还要报 truncated。
+    #[test]
+    fn neighbor_scan_is_capped() {
+        let neighbors: Vec<Ipv4Addr> = (0..200u16)
+            .map(|i| Ipv4Addr::new(10, 0, (i / 250) as u8, (i % 250) as u8 + 1))
+            .collect();
+        let p = plan(vec![], neighbors.clone(), vec![]);
+        let out = scan_network(&p, &FakeProbe::new(&[]), &[4180]);
+        assert!(out.truncated, "超过 MAX_NEIGHBORS 必须标记结果可能不全");
+        assert!(out.devices.is_empty());
+
+        let few: Vec<Ipv4Addr> = neighbors.into_iter().take(MAX_NEIGHBORS).collect();
+        let p = plan(vec![], few, vec![]);
+        let out = scan_network(&p, &FakeProbe::new(&[]), &[4180]);
+        assert!(!out.truncated, "邻居数未超上限时不该报截断");
+    }
+
     fn plan(known: Vec<String>, neighbors: Vec<Ipv4Addr>, subnets: Vec<NetSegment>) -> ScanPlan {
         ScanPlan { known, neighbors, subnets, known_port: None, allow_subnet: true }
     }
@@ -459,12 +534,65 @@ mod tests {
 
     #[test]
     fn virtual_ifaces_are_skipped() {
-        for n in ["docker0", "veth1234", "br-abc", "utun3", "tun0", "wg0", "lo"] {
+        for n in [
+            "docker0", "veth1234", "br-abc", "utun3", "tun0", "wg0", "lo", "rmnet_data0",
+            "ccmni0", "clat4", "dummy0", "p2p0",
+        ] {
             assert!(is_virtual_iface(n), "{n} 应判为虚拟");
         }
         for n in ["wlan0", "eth0", "enp3s0", "wlp2s0"] {
             assert!(!is_virtual_iface(n), "{n} 是真实网卡");
         }
+    }
+
+    fn ifaces(v: &[(&str, &str, u8)]) -> Vec<(String, Ipv4Addr, u8)> {
+        v.iter()
+            .map(|(name, ip, prefix)| (name.to_string(), ip.parse().unwrap(), *prefix))
+            .collect()
+    }
+
+    #[test]
+    fn pick_host_ipv4_skips_vpn_and_cellular() {
+        // VPN 排在前面也不能选 tun
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[
+                ("tun0", "10.8.0.2", 24),
+                ("wlan0", "192.168.1.7", 24),
+            ])),
+            Some("192.168.1.7".parse().unwrap())
+        );
+        // 只有 VPN / 蜂窝 → 宁可没有，也不广播一个连不上的地址
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[("tun0", "10.8.0.2", 24), ("rmnet_data0", "10.12.3.4", 30)])),
+            None
+        );
+        // 链路本地（169.254）不能当 LAN 地址，退回有线
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[
+                ("wlan0", "169.254.3.9", 16),
+                ("eth0", "192.168.0.9", 24),
+            ])),
+            Some("192.168.0.9".parse().unwrap())
+        );
+        // 公网地址同样拒绝
+        assert_eq!(pick_host_ipv4(&ifaces(&[("eth0", "203.0.113.9", 24)])), None);
+    }
+
+    #[test]
+    fn pick_host_ipv4_prefers_wireless_and_is_deterministic() {
+        // 无线优先于有线，即使有线名字排在前
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[
+                ("eth0", "192.168.1.5", 24),
+                ("wlan0", "192.168.1.6", 24),
+            ])),
+            Some("192.168.1.6".parse().unwrap())
+        );
+        // 同权重按网卡名，结果稳定
+        assert_eq!(
+            pick_host_ipv4(&ifaces(&[("wlan1", "192.168.1.8", 24), ("wlan0", "192.168.1.9", 24)])),
+            Some("192.168.1.9".parse().unwrap())
+        );
     }
 
     #[test]

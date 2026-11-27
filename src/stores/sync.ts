@@ -11,6 +11,7 @@ import {
   type ServerProfile,
   type SyncPairingInfo,
   type SyncReport,
+  type BlockedShrink,
 } from "../lib/sync";
 import { useVaultStore } from "./vault";
 
@@ -106,8 +107,9 @@ async function autoTick(): Promise<void> {
         // B：离线→在线跳变立即回合；A：在线且距上回合 ≥60s
         const due =
           wasOffline || Date.now() - next.lastRoundAt >= ROUND_MIN_INTERVAL_MS;
-        if (due && !useSyncStore.getState().syncing) {
-          const ok = await useSyncStore.getState().runRound(s.id, { silent: true });
+        const live = useSyncStore.getState();
+        if (due && !live.syncing && !live.blocked[s.id]) {
+          const ok = await live.runRound(s.id);
           if (ok) setProbeState(s.id, { ...next, lastRoundAt: Date.now() });
         }
       } else if (next.failCount === MDNS_RETRY_FAILS && !next.mdnsRetried) {
@@ -147,7 +149,8 @@ async function autoTick(): Promise<void> {
       if (!st.syncing) {
         for (const s of st.servers) {
           if (st.probeStates[s.id]?.online === false) continue; // 离线 → 等探测恢复
-          const ok = await st.runRound(s.id, { silent: true });
+          if (st.blocked[s.id]) continue; // 待确认熔断 → 自动回合暂停，避免反复触发
+          const ok = await st.runRound(s.id);
           if (ok) {
             const cur = useSyncStore.getState().probeStates[s.id] ?? defaultProbeState();
             setProbeState(s.id, { ...cur, lastRoundAt: Date.now() });
@@ -172,6 +175,8 @@ interface SyncStore {
   syncing: boolean;
   /** 最近一次同步报告 */
   lastReport: SyncReport | null;
+  /** 每台服务器待确认的骤缩熔断（确认或成功回合后清除；自动循环暂停该服务器） */
+  blocked: Record<string, BlockedShrink>;
   error: string | null;
 
   /** 自动同步开关（null = 尚未从配置加载） */
@@ -210,6 +215,10 @@ interface SyncStore {
   pair: (url: string, code: string) => Promise<boolean>;
   removeServer: (id: string) => Promise<void>;
   syncNow: (id: string) => Promise<void>;
+  /** 骤缩熔断确认：本机删除、接受手机删除、把本机版本传回；成功后清熔断并重跑 */
+  acceptLocalDeletions: (id: string, paths: string[]) => Promise<void>;
+  acceptServerDeletions: (id: string, paths: string[]) => Promise<void>;
+  restoreServerVersions: (id: string, paths: string[]) => Promise<void>;
   clearError: () => void;
 
   /** */
@@ -218,7 +227,7 @@ interface SyncStore {
   startAutoLoop: () => void;
   stopAutoLoop: () => void;
   /** 单回合执行（手动/自动共用入口）：flush 脏编辑 → 回合 → 刷新。返回是否成功 */
-  runRound: (id: string, opts?: { silent?: boolean }) => Promise<boolean>;
+  runRound: (id: string) => Promise<boolean>;
 
   /** Android 专项 */
   hasAllFilesAccess: boolean;
@@ -234,6 +243,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   discovered: [],
   syncing: false,
   lastReport: null,
+  blocked: {},
   error: null,
   syncAuto: null,
   probeStates: {},
@@ -342,14 +352,20 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     try {
       await sync.serverRemove(id);
       await get().refreshServers();
+      set((prev) => {
+        if (!prev.blocked[id]) return {};
+        const next = { ...prev.blocked };
+        delete next[id];
+        return { blocked: next };
+      });
     } catch (e) {
       set({ error: String(e) });
     }
   },
 
   /** 单回合执行（手动/自动共用入口：所有触发走同一入口）。
- * silent = 自动触发：Rust 串行锁的「进行中」拒绝与 flush 失败不弹错误 */
-  runRound: async (id, opts) => {
+   * 失败一律写 `error`（侧栏红点）：自动回合静默失败曾让「已连接」假象挂了 8 分钟。 */
+  runRound: async (id) => {
     if (get().syncing) return false;
     set({ syncing: true, error: null });
     try {
@@ -358,9 +374,9 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       // 会用「旧内容+改动」覆盖刚拉下来的版本（跨设备 last-write-wins 丢数据）
       if (vs.dirty && vs.activePath) {
         if (!(await vs.saveNow())) {
-          if (!opts?.silent) {
-            set({ error: "保存未完成的修改失败，已中止同步以免覆盖它" });
-          }
+          // 自动回合也必须可见：保存失败意味着本轮同步被中止，
+          // 不提示会让用户以为「已连接」就代表一切正常。
+          set({ error: "保存未完成的修改失败，已中止同步以免覆盖它" });
           return false;
         }
       }
@@ -371,6 +387,18 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         return true;
       }
       set({ lastReport: report });
+      // 熔断回合：记住现场并暂停该服务器的自动回合（手动仍可重试/确认）
+      if (report.blocked) {
+        const blocked = report.blocked;
+        set((prev) => ({ blocked: { ...prev.blocked, [id]: blocked } }));
+      } else {
+        set((prev) => {
+          if (!prev.blocked[id]) return {};
+          const next = { ...prev.blocked };
+          delete next[id];
+          return { blocked: next };
+        });
+      }
       // 同步后刷新树/元数据（拉取的新文件无需手动「重新扫描」），
       // 并重载当前笔记（磁盘可能已被拉取更新）
       await vs.refreshTree();
@@ -396,7 +424,10 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       void get().refreshServers();
       return true;
     } catch (e) {
-      if (!opts?.silent) set({ error: String(e) });
+      // 自动回合的错误同样落到 error：侧栏「同步」行用它显示红点。
+      // 真机验收踩过：手机端 503 连挂 8 分钟，面板仍显示「已连接」——
+      // silent 把失败吞了，用户与走查者都看不见。
+      set({ error: String(e) });
       return false;
     } finally {
       set({ syncing: false });
@@ -405,6 +436,48 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
   syncNow: async (id) => {
     await get().runRound(id);
+  },
+
+  acceptLocalDeletions: async (id, paths) => {
+    try {
+      await sync.acceptLocalDeletions(id, paths);
+      set((prev) => {
+        const next = { ...prev.blocked };
+        delete next[id];
+        return { blocked: next };
+      });
+      await get().runRound(id);
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  acceptServerDeletions: async (id, paths) => {
+    try {
+      await sync.acceptServerDeletions(id, paths);
+      set((prev) => {
+        const next = { ...prev.blocked };
+        delete next[id];
+        return { blocked: next };
+      });
+      await get().runRound(id);
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  restoreServerVersions: async (id, paths) => {
+    try {
+      await sync.restoreServerVersions(id, paths);
+      set((prev) => {
+        const next = { ...prev.blocked };
+        delete next[id];
+        return { blocked: next };
+      });
+      await get().runRound(id);
+    } catch (e) {
+      set({ error: String(e) });
+    }
   },
 
   clearError: () => set({ error: null }),

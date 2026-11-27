@@ -42,15 +42,23 @@ class MainActivity : TauriActivity() {
    * M4i 返回手势：**有浮层先关浮层，没有就正常退出**（两段式已废弃，
    * 理由见 BackPlugin 类注释）。
    *
-   * 两条拦截路径都要：
-   * 1. `OnBackPressedCallback` —— 标准手势返回
+   * 三条路径都要（少一条就有一条返回手势失灵）：
+   * 1. `OnBackPressedCallback` —— 三键导航 / 部分 ROM 的手势
    * 2. `dispatchKeyEvent` —— 部分 ROM（真机 2510DRK44C / Android 16 实测
    *    MIUI）把返回键转成广播 `miui.intent.KEYCODE_BACK`，**不派发给
    *    OnBackPressedDispatcher**，只注册回调时根本不触发（已加日志确认）
+   * 3. manifest 的 `android:enableOnBackInvokedCallback="true"` —— Android 13+
+   *    的边缘手势返回走 `OnBackInvokedDispatcher`；**不开这个开关时系统直接把
+   *    手势当成「结束 Activity」**，事件根本到不了这里（真机 Android 17 实测：
+   *    三键/按键返回能关抽屉，边缘手势直接退 App）。androidx.activity 1.10
+   *    会把 dispatcher 桥接到新 API，开关一开两条路径就统一了。
    *
-   * 退出不做 `finish()`：`generated/TauriActivity` 的 handleBackNavigation
-   * 为 false 时系统默认行为就是结束 Activity，交给它即可；且 finish 会撞
-   * tauri#15671 的窗口重建问题（见 lib.rs）。
+   * 无浮层时**显式 `finish()`**：开了 `enableOnBackInvokedCallback` 之后，androidx
+   * 会把自己挂成 `OnBackInvokedCallback`，手势/按键都先到它，再也不能靠
+   * 「不消费、交回系统默认」退出（递归调 `onBackPressedDispatcher.onBackPressed()`
+   * 只会静默无事发生）。Activity 销毁后的重建路径不变：`lib.rs` 的
+   * `ExitRequested → prevent_exit → ACTIVITY_LOST` 保进程、下次 `Resumed` 重建窗口
+   * （tauri#15671 白屏已由这条路径处理，真机复验重开无白屏）。
    */
   override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
     if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK &&
@@ -74,10 +82,13 @@ class MainActivity : TauriActivity() {
             BackPlugin.triggerBack()
             return
           }
-          // 无浮层：交给系统默认行为（结束 Activity）
-          isEnabled = false
-          onBackPressedDispatcher.onBackPressed()
-          isEnabled = true
+          // 无浮层：结束 Activity。
+          // 不能像以前那样 `isEnabled=false` + 再调 dispatcher 交回系统默认——
+          // 一旦 manifest 开了 `enableOnBackInvokedCallback`，androidx 会把自己挂成
+          // OnBackInvokedCallback，手势返回永远先到它，递归交回去只会静默无事发生
+          // （真机 Android 17 实测：返回键/手势都退不出去）。这里显式 finish，
+          // 后续 ExitRequested → prevent_exit → ACTIVITY_LOST 的重建路径不变（见 lib.rs）。
+          finish()
         }
       },
     )

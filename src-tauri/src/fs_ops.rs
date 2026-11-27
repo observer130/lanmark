@@ -880,6 +880,32 @@ pub fn trash_clear(vault: &Path) -> std::io::Result<usize> {
 
 // ---------- 回收站恢复 ----------
 
+/// 把文件（或目录树下所有文件）的 mtime 刷成当前时刻。
+///
+/// 只用于「从回收站恢复」：恢复是一次显式的内容复活，必须让它比对端墓碑新，
+/// 否则会被当成「陈旧恢复」再次软删。正文不改一个字节，只动 mtime。
+fn bump_mtime_tree(path: &Path) -> std::io::Result<()> {
+    let now = std::time::SystemTime::now();
+    let is_dir = fs::metadata(path)?.is_dir();
+    if is_dir {
+        for entry in fs::read_dir(path)?.flatten() {
+            let p = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                bump_mtime_tree(&p)?;
+            } else if ft.is_file() {
+                fs::File::options().write(true).open(&p)?.set_modified(now)?;
+            }
+        }
+    } else {
+        fs::File::options().write(true).open(path)?.set_modified(now)?;
+    }
+    Ok(())
+}
+
 /// 从回收站恢复条目：优先回到删除前的原位置（来源索引），索引缺失或原目录
 /// 无法重建时落到 vault 根。同名冲突自动 -2、-3…。返回恢复后的相对路径。
 ///
@@ -950,6 +976,13 @@ pub fn trash_restore(vault: &Path, trash_rel: &str, conn: &Connection) -> std::i
 
     let target = unique_target(&target_dir, &target_name)?;
     fs::rename(&abs, &target)?;
+    // 恢复即「重新出现」：把 mtime 抬到当前时刻。复活判据是本地版本比墓碑新
+    // （`sync_client.rs` 的 `version_gt` / D4 的 `meta_mtime_ms > t.mtime_ms`）；
+    // 保留回收站里的旧 mtime，恢复出来的笔记下一回合就会被对端墓碑再删一次
+    // （真机复现两次：报告「已同步删除 5（进回收站）」，无任何提示）。
+    if let Err(e) = bump_mtime_tree(&target) {
+        log::warn!("恢复条目 mtime 刷新失败 {}: {e}", target.display());
+    }
     trash_index_remove(vault, &raw);
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     // 先入索引再清 tombstone：entry_file_list 对文件夹走 DB 前缀查询，
@@ -1248,11 +1281,10 @@ fn collect_notes(
         if name == META_DIR || name.starts_with('.') {
             continue;
         }
-        // 符号链接跳过（与 walk 同纪律）：不进索引 → 不进同步清单
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
+        // 符号链接跳过（与 walk 同纪律）：不进索引 → 不进同步清单。
+        // file_type 失败必须向上抛：若是目录，静默跳过会让整棵子树从清单消失，
+        // 被同步误判成“这些文件被删了”。让 /manifest 回 503，下回合重扫。
+        let ft = entry.file_type()?;
         if ft.is_symlink() {
             continue;
         }
@@ -1891,6 +1923,46 @@ mod tests {
         assert_eq!(restored, "项目");
         assert_eq!(db::search(&conn, "苹果", 10).unwrap()[0].path, "项目/a.md");
         assert_eq!(db::search(&conn, "香蕉", 10).unwrap()[0].path, "项目/b.md");
+    }
+
+    /// 回归 P2：恢复必须把 mtime 抬到删除之后。
+    /// 复活判据是「本地版本比墓碑新」（`sync_client.rs` 的 `version_gt` / D4）；
+    /// 保留旧 mtime 时，对端墓碑会把刚恢复的笔记下一回合再删一次（真机复现两次）。
+    #[test]
+    fn trash_restore_bumps_mtime_above_deletion() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let note = create_note(vault, "", "旧笔记.md").unwrap();
+        write_note(vault, &note.path, "正文", &conn).unwrap();
+        // 模拟「两小时前编辑过、刚刚被删」的文件
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        fs::File::options()
+            .write(true)
+            .open(vault.join(&note.path))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let trash_rel = delete_entry(vault, &note.path, &conn).unwrap();
+        let deleted_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        // 进回收站后 mtime 仍是旧的
+        let trashed = vault.join(&trash_rel);
+        let trashed_mtime = fs::metadata(&trashed).unwrap().modified().unwrap();
+        assert!(trashed_mtime < old + std::time::Duration::from_secs(5));
+
+        let restored = trash_restore(vault, &trash_rel, &conn).unwrap();
+        let restored_mtime = fs::metadata(vault.join(&restored))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        assert!(
+            restored_mtime >= deleted_at,
+            "恢复后的 mtime 必须晚于删除时刻，否则会被对端墓碑再删（got {restored_mtime:?} < {deleted_at:?}）"
+        );
     }
 
     /// 回归：同名冲突自动 -2（恢复到已有同名文件的位置）

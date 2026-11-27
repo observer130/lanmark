@@ -30,6 +30,15 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
 - **Android**：`source scripts/env.sh && pnpm tauri android build --apk --debug --target aarch64`，产物 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。它装成独立应用 `com.lanmark.app.debug`（「Lanmark Debug」），与 release 共存。模拟器（x86_64）改用 `--target x86_64`，或直接用 `scripts/android-emu.sh`。
 - 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`；桌面 release 用 `scripts/lanmark-desktop.sh`。
 
+## 分支与集成
+
+- **master 只做发布快照**：不在 master 上直接开发或提交。
+- 开发/修复一律从 `dev` 拉分支：`feat/<主题>`、`fix/<主题>`、`chore/<主题>`；需要并行时放 `.cache/wt/<topic>` 的 worktree，别来回切脏工作区。
+- 分支上跑完门禁（见「命令」与「完成标准」）再请用户验收；**验收通过后**才合入：
+  `git switch dev && git merge --no-ff <branch>`。
+- `dev` 稳定后再合 `master`。已推送的 `dev`/`master` 不 rebase（会改写别人已拉取的基点）。
+- 完整分支模型（含 `release/v<版本>`、worktree 与 `+` 标记）、发版步骤与 Release Notes 规范见 `RELEASING.md`。
+
 ## 改动边界
 
 **总是**
@@ -49,6 +58,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
 
 **从不**
 
+- 在 `master` 上直接提交（master 只做发布快照，见「分支与集成」）
 - 删掉 `src-tauri/gen/android` 重新 init（会冲掉 SyncService / SAF 代码）
 - 把构建路径上的东西移进 `.cache/`（`patches/` 曾因此让 CI 三端全挂）
 - 把密钥 / keystore / `.env` 写进仓库
@@ -63,6 +73,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
 
 2. **vault 文件是唯一事实源**；`src-tauri/src/db.rs` 的 SQLite 只是可重建索引。任何「数据」改动先问文件侧怎么表达。
    同步方向固定：手机 = axum 服务器（`0.0.0.0:4180` 起、最多顺延 60 个端口），桌面 = 客户端；客户端先探已知端口，未命中再回退扫 `4180..4189`（`lan_scan.rs` 的 `SCAN_PORT_SPAN=10`，**不是**服务端那 60 个端口——手机若落到 4190+ 且 mDNS 被网络屏蔽，只能手填 URL 配对）；文件级 sha256 版本对比，冲突按 **mtime LWW**（较新者留原路径、较旧者存可见冲突副本），删除走 tombstone。**任何裁决都不丢弃内容**：删除先进回收站，冲突输家必留副本。
+   清单读取失败必须 fail-closed：单篇读失败整轮报错（`ManifestError`），不能静默跳过；`/manifest` 对权限/遍历错误回 503 `storage_unavailable`。**骤缩熔断**：无墓碑解释的缺失超过 3 个，或上一回合清单全灭（含 1–3 个文件的小库）→ 本回合不删不推不存基线，只返回 `SyncReport.blocked`；自动回合暂停，等用户在侧栏确认（本机删除 / 接受手机删除 / 传回本机版本）后才继续。阈值与语义以 `sync_client.rs` 的 `SHRINK_FUSE_ABS`、`shrink_blocked` 为准。
 
 3. **设置存放分层**：设备偏好（配色/字体/字号/行距/回收站策略）进 `AppConfig`（`app_config_dir/config.json`），换库不变；跟库走的视图状态（折叠目录等）进 localStorage；笔记内容进文件。**不要**把设置放 `.lanmark/settings.json`（会随库漂移、卷进同步清单）。唯一例外是外观 key 额外写一份 localStorage 作首帧缓存（`index.html` 内联脚本先落 `data-scheme`/`data-font`，防深色闪白）；真源仍是 AppConfig，key 名必须与 `src/lib/settings.ts` 常量一致。
 
@@ -72,7 +83,7 @@ scripts/android-emu.sh all       # 模拟器一键：起 16KB AVD → 装 x86_64
    - `tauri.conf.json` 的 `dragDropEnabled` **必须保持 `false`**：开启后 WebView2 不再向页面派发 HTML5 拖放事件，Crepe 手柄拖不动，且会退化成「拖了变复制」。外部文件拖入另走 `dragover` + `dataTransfer.files`。
 
 5. **平台三坑**（真机 / 桌面 WebView 才复现，Chrome 探针永远绿）：
-   - **Android 返回键要拦两条路**：`OnBackPressedCallback` 与 `dispatchKeyEvent`（部分 ROM 把返回转成广播，不走 dispatcher）。原生→前端事件**不要用 `addPluginListener`**，用 `evaluateJavascript` 派发 DOM CustomEvent。Kotlin 单测跑 `./gradlew :app:testUniversalDebugUnitTest`（universal 变体）。
+   - **Android 返回键要拦三条路**：`OnBackPressedCallback`、`dispatchKeyEvent`（部分 ROM 把返回转成广播，不走 dispatcher），以及 manifest 的 `android:enableOnBackInvokedCallback="true"`。**最后这条最容易漏**：Android 13+ 的边缘手势返回走 `OnBackInvokedDispatcher`，应用不显式 opt-in 时系统把手势直接当成「结束 Activity」，按键返回能关抽屉、手势返回却直接退 App（真机 2510DRK44C / Android 17 实测）。原生→前端事件**不要用 `addPluginListener`**，用 `evaluateJavascript` 派发 DOM CustomEvent。Kotlin 单测跑 `./gradlew :app:testUniversalDebugUnitTest`（universal 变体）。
    - **外部文件拖入**：`dragover` 一律 `preventDefault`，**绝不用 `types.includes("Files")` 判断**——WebKit 系在该阶段不暴露 Files，不 preventDefault 则 `drop` 根本不派发；过滤放到 `drop`。
    - **Windows 缩放窗口后输入法候选框跑到屏幕左上角**：`src/lib/ime-anchor.ts` 用 `blur()` → **等 60ms** → `focus()` 重锚；别简化这个间隔（`setTimeout(0)` 对 CodeMirror 不够），且只在 Windows/WebView2 上装。
 
@@ -114,7 +125,7 @@ vault/
 - mDNS 收包需 MulticastLock（随 SyncService 生命周期）；WifiLock 无效。
 - 加 TLS 时 rustls 必须切 ring 后端（aws-lc-rs 在 Android 交叉编译会挂）。
 - **原生库必须 16KB 页对齐**：Android 15+ 的 16KB 页设备上，`.so` 的 `LOAD` 段不是 16KB 对齐会在安装时弹「此应用不符合 16KB 对齐要求」，这类设备还可能加载失败。NDK r27 的 lld 默认只对齐 4KB，所以 `src-tauri/build.rs` 对 Android 目标显式加 `-Wl,-z,max-page-size=16384`（NDK r28 起默认对齐，可删）。改完用 `llvm-readelf -l liblanmark_lib.so` 核 `LOAD` 的 `Align` 应为 `0x4000`。
-- 上滑划掉 Activity 会 `process::exit(0)` 连 FGS 一起杀（tauri#15671）→ `prevent_exit()` 保活；重建 Activity 后的白屏用 `ExitRequested` 置 `ACTIVITY_LOST` + 下次 `Resumed` 销毁旧窗口重建。零窗口时 wry 不分发 Resumed，所以 `patches/tauri-runtime-wry` 必须入库。
+- 上滑划掉 Activity 会 `process::exit(0)` 连 FGS 一起杀（tauri#15671）→ `prevent_exit()` 只挡这条路径。**国产 ROM 的「划掉任务卡」是 force-stop**：HyperOS 实测 logcat `Killing … (adj 50): stop … due to SwipeUpClean`（SIGKILL），之后包状态 `stopped=true`，`START_STICKY` 不会被拉起，App 侧无从拦截——别把「划掉后服务还活着」写成承诺。重建 Activity 后的白屏用 `ExitRequested` 置 `ACTIVITY_LOST` + 下次 `Resumed` 销毁旧窗口重建。零窗口时 wry 不分发 Resumed，所以 `patches/tauri-runtime-wry` 必须入库。
 
 ## 完成标准（DoD）
 
@@ -129,7 +140,7 @@ vault/
 
 - **只发三件产物**（另有 2 个元数据资产 `lanmark-linux-x64.tar.gz.sig` 与 `latest.json`，共 5 个 release 资产）：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`；deb/AppImage/msi 不进 release。`release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis`。
 - **release 标题只写版本号**（如 `vX.Y.Z`），不加描述后缀；功能说明写进 notes 正文。
-- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`，`Cargo.lock` 随之更新）→ 提交推送 → **先** `gh release create vX.Y.Z --title vX.Y.Z --notes-file …` → `git tag vX.Y.Z && git push origin vX.Y.Z` → CI 先跑 `preflight`（tag 必须等于三处版本号）与 `test` 门禁，再三端构建并附产物。
+- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`，`Cargo.lock` 随之更新）→ 提交推送 → **先** `gh release create vX.Y.Z --title vX.Y.Z --notes-file …` → `git tag vX.Y.Z && git push origin vX.Y.Z` → CI 先跑 `preflight`（tag 必须等于三处版本号）与 `test` 门禁，再三端构建并附产物。分步命令、分支走向与「为什么正文必须先于 tag」见 `RELEASING.md`。
 - `release.yml` 的 `permissions: contents: write` 不能删（默认 GITHUB_TOKEN 只读，缺了上传 403）。
 - **Android release 走固定签名**：`release.yml` 解码 `RELEASE_KEYSTORE` secret → 真实 release 构建 → `apksigner` 拒绝 debug 证书**且比对 `RELEASE_CERT_SHA256` secret 的证书指纹**后上传；keystore 与预期指纹都不入库，任一缺失时 job 直接 fail（取值：`apksigner verify --print-certs <已发布APK> | grep SHA-256`）。本地无环境变量时回退 debug 签名，所以本地 `--apk` 产物仍可 CDP；真 release 包 CDP 不可用，走查回归本地 debug APK。
 

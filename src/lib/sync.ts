@@ -109,6 +109,39 @@ export interface SyncReport {
   errors: string[];
   /** 另一回合在跑，本次跳过（不是错误） */
   busy: boolean;
+  /** 清单骤缩熔断：本回合什么都没做，等用户确认（不是错误） */
+  blocked: BlockedShrink | null;
+}
+
+/** 清单骤缩熔断的现场（后端 BlockedShrink，camelCase） */
+export interface BlockedShrink {
+  /** 本地缺失数（上回合有、本回合无、且无墓碑） */
+  localMissing: number;
+  /** 服务器缺失数（同上） */
+  serverMissing: number;
+  localTotal: number;
+  serverTotal: number;
+  /** 上回合基线路径总数（判断“全灭”） */
+  priorTotal: number;
+  /** 完整缺失路径（UI 只展示前几条；确认动作按全量执行） */
+  localPaths: string[];
+  serverPaths: string[];
+  /** 触发熔断的绝对阈值 */
+  threshold: number;
+}
+
+/** 冲突副本（手机面板可展开列表；笔记可直接打开，附件仅展示） */
+export interface ConflictCopy {
+  /** 副本相对路径 */
+  path: string;
+  kind: "note" | "asset";
+  /** 原名 + 目录（副本名里还原出的原路径） */
+  originalPath: string;
+  /** 冲突时间戳 MMDD-HHMM（UTC） */
+  stamp: string;
+  /** 同分钟第 N 个副本（0 = 首个） */
+  attempt: number;
+  mtimeMs: number;
 }
 
 /** 手机端：同步服务器配对信息（服务器随 vault 打开自动启动） */
@@ -117,6 +150,8 @@ export const sync = {
   serverStart: () => invoke<number>("sync_server_start"),
   /** vault 内冲突副本数（手机端可发现性） */
   conflictCount: () => invoke<number>("sync_conflict_count"),
+  /** 冲突副本列表（新→旧；严格命名解析，普通「冲突」文件名不算） */
+  conflicts: () => invoke<ConflictCopy[]>("sync_conflicts"),
 
   /** 桌面端 */
   discover: () => invoke<Discovered[]>("sync_discover"),
@@ -143,6 +178,15 @@ export const sync = {
   /** 自动同步循环：轻量在线探测 */
   probe: (id: string) => invoke<ProbeResult>("sync_probe", { id }),
   syncNow: (id: string) => invoke<SyncReport>("sync_now", { id }),
+  /** 骤缩熔断确认：本机这些文件确实是我删的（复核后补墓碑，不删内容） */
+  acceptLocalDeletions: (id: string, paths: string[]) =>
+    invoke<number>("sync_accept_local_deletions", { id, paths }),
+  /** 骤缩熔断确认：接受手机端的删除（本地软删进回收站，不反向 /delete） */
+  acceptServerDeletions: (id: string, paths: string[]) =>
+    invoke<number>("sync_accept_server_deletions", { id, paths }),
+  /** 骤缩熔断确认：把本机版本显式传回手机（一次性覆盖，不自动重试） */
+  restoreServerVersions: (id: string, paths: string[]) =>
+    invoke<number>("sync_restore_server_versions", { id, paths }),
 };
 
 /* ── 设备代号（AppConfig 设备级，换库不变） ── */
